@@ -100,7 +100,7 @@ ORDER BY ddsd.date_id ASC, ddsd.ticker_id ASC	"""
 #     ORDER BY ddsd.date_id
 # ) AS next_day_change_in_price
 
-def SELECT_CLOSE_RATIO_ONLY_SQL(day_change_centered: str) -> str:
+def SELECT_VARIABLE_DATA_SQL(day_change_centered: str, current_day_change = False, volume_ratio = False, vwap_ratio = False, tranaction_ratio = False) -> str:
 	"""Build SQL that selects only close ratio as the single feature plus the chosen label.
 
 	day_change_centered:
@@ -110,21 +110,34 @@ def SELECT_CLOSE_RATIO_ONLY_SQL(day_change_centered: str) -> str:
 	Any other value falls back to "one" behavior.
 	"""
 	if day_change_centered == "half":
-		label_col = "ddsd.half_centered_next_day_price_change"
+		additional_fields_to_select = "ddsd.half_centered_next_day_price_change"
 	elif day_change_centered == "zero":
-		label_col = "ddsd.zero_centered_next_day_price_change"
+		additional_fields_to_select = "ddsd.zero_centered_next_day_price_change"
+	elif day_change_centered == "gapped01":
+		additional_fields_to_select = "ddsd.next_day_price_change_to_extremes_0_1"
 	else:
-		label_col = "ddsd.next_day_change_in_price"
+		additional_fields_to_select = "ddsd.next_day_change_in_price"
 
-	return f"""
+	if current_day_change:
+		additional_fields_to_select = f"{additional_fields_to_select},ddsd.change_in_price_over_day"
+	if volume_ratio:
+		additional_fields_to_select = f"{additional_fields_to_select},ddsd.volume_normalized"
+	if vwap_ratio:
+		additional_fields_to_select = f"{additional_fields_to_select},ddsd.vwap_ratio_to_prior"
+	if tranaction_ratio:
+		additional_fields_to_select = f"{additional_fields_to_select},ddsd.transactions_normalized"
+
+	full_query = f"""
 SELECT
 	ddsd.ticker_id,
 	ddsd.date_id,
 	ddsd.close_ratio_to_prior,
-	{label_col}
+	{additional_fields_to_select}
 FROM daily_delta_stock_data ddsd
 ORDER BY ddsd.date_id ASC, ddsd.ticker_id ASC
 """
+	#print(full_query)
+	return full_query
 
 
 # LEAD(ddsd.change_in_price_over_day, 1) OVER (
@@ -133,65 +146,87 @@ ORDER BY ddsd.date_id ASC, ddsd.ticker_id ASC
 # ) AS next_day_change_in_price
 
 
-def fetch_as_numpy(
-	host: str = "mysql95",
-	database: str = "stockforecasting",
-	user: Optional[str] = "Redbeard",
-	password: Optional[str] = "3YZs#z5GOJKdea",
-	port: int = 3306,
-	driver: str = "auto",
-	limit: Optional[int] = None,
-	close_ratio_only: bool = False,
-	day_change_centered:  str = "one",
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-	"""Fetch table rows and return (keys, features, labels) as NumPy arrays.
-
-	keys: shape (N, 2) -> (date_id, ticker_id)
-	features: shape (N, F) where F=7 for full query, or F=1 when --close-only is used
-	  Full order: open/high/low/close/volume/vwap/transactions
-	labels: shape (N,) -> next_day_change_in_price (may contain NaN for last date per ticker)
-	"""
-	conn = get_connection(host=host, database=database, user=user, password=password, port=port, driver=driver)
-	try:
-		cur = conn.cursor()
-		sql = SELECT_CLOSE_RATIO_ONLY_SQL(day_change_centered) if close_ratio_only else SELECT_SQL
-		if limit is not None and limit > 0:
-			sql = f"{sql}\nLIMIT {int(limit)}"
-		cur.execute(sql)
-
-		date_ids: List[int] = []
-		ticker_ids: List[int] = []
-		feats: List[List[float]] = []
-		labels: List[float] = []
-		feature_count: Optional[int] = None
-		# Stream rows to avoid loading everything into memory at once
-		for row in _iter_rows(cur):
-			# row order: ticker_id, date_id, 7 feature columns, label (next_day_change_in_price)
-			tkr_id = int(row[0])
-			dt_id = int(row[1])
-			# features are columns 2..-2 inclusive, label is last column
-			fvals = row[2:-1]
-			label_val = row[-1]
-			# convert to float64, preserving None as np.nan
-			fv = [np.nan if v is None else float(v) for v in fvals]
-			lb = np.nan if label_val is None else float(label_val)
-			date_ids.append(dt_id)
-			ticker_ids.append(tkr_id)
-			feats.append(fv)
-			labels.append(lb)
-			if feature_count is None:
-				feature_count = len(fv)
-
-		keys = np.stack([np.array(date_ids, dtype=np.int32), np.array(ticker_ids, dtype=np.int32)], axis=1)
-		F = int(feature_count or (1 if close_ratio_only else 7))
-		features = np.asarray(feats, dtype=np.float64) if feats else np.empty((0, F), dtype=np.float64)
-		labels_np = np.asarray(labels, dtype=np.float64) if labels else np.empty((0,), dtype=np.float64)
-		return keys, features, labels_np
-	finally:
-		try:
-			conn.close()
-		except Exception:
-			pass
+# def fetch_as_numpy(
+# 	host: str = "mysql95",
+# 	database: str = "stockforecasting",
+# 	user: Optional[str] = "Redbeard",
+# 	password: Optional[str] = "3YZs#z5GOJKdea",
+# 	port: int = 3306,
+# 	driver: str = "auto",
+# 	limit: Optional[int] = None,
+# 	close_ratio_only: bool = False,
+# 	day_change_centered:  str = "one",
+# ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+# 	"""Fetch table rows and return (keys, features, labels) as NumPy arrays.
+#
+# 	keys: shape (N, 2) -> (date_id, ticker_id)
+# 	features: shape (N, F) where F=7 for full query, or F=1 when --close-only is used
+# 	  Full order: open/high/low/close/volume/vwap/transactions
+# 	labels: shape (N,) -> next_day_change_in_price (may contain NaN for last date per ticker)
+# 	"""
+# 	# First, attempt to load from the cached NumPy file if it exists.
+# 	# This avoids hitting the database when the data has already been fetched.
+# 	cache_file = f"fetch_as_numpty_{day_change_centered}.npz"
+# 	try:
+# 		if os.path.exists(cache_file):
+# 			loaded = np.load(cache_file)
+# 			# Expect the same keys used when saving below.
+# 			return (
+# 				loaded["keys"],
+# 				loaded["features"],
+# 				loaded["labels"],
+# 			)
+# 	except Exception:
+# 		# If anything goes wrong while loading the cache, fall back to DB.
+# 		pass
+#
+# 	conn = get_connection(host=host, database=database, user=user, password=password, port=port, driver=driver)
+# 	try:
+# 		cur = conn.cursor()
+# 		sql = SELECT_VARIABLE_DATA_SQL(day_change_centered) if close_ratio_only else SELECT_SQL
+# 		if limit is not None and limit > 0:
+# 			sql = f"{sql}\nLIMIT {int(limit)}"
+# 		cur.execute(sql)
+#
+# 		date_ids: List[int] = []
+# 		ticker_ids: List[int] = []
+# 		feats: List[List[float]] = []
+# 		labels: List[float] = []
+# 		feature_count: Optional[int] = None
+# 		# Stream rows to avoid loading everything into memory at once
+# 		for row in _iter_rows(cur):
+# 			# row order: ticker_id, date_id, 7 feature columns, label (next_day_change_in_price)
+# 			tkr_id = int(row[0])
+# 			dt_id = int(row[1])
+# 			# features are columns 2..-2 inclusive, label is last column
+# 			fvals = row[2:-1]
+# 			label_val = row[-1]
+# 			# convert to float64, preserving None as np.nan
+# 			fv = [np.nan if v is None else float(v) for v in fvals]
+# 			lb = np.nan if label_val is None else float(label_val)
+# 			date_ids.append(dt_id)
+# 			ticker_ids.append(tkr_id)
+# 			feats.append(fv)
+# 			labels.append(lb)
+# 			if feature_count is None:
+# 				feature_count = len(fv)
+#
+# 		keys = np.stack([np.array(date_ids, dtype=np.int32), np.array(ticker_ids, dtype=np.int32)], axis=1)
+# 		F = int(feature_count or (1 if close_ratio_only else 7))
+# 		features = np.asarray(feats, dtype=np.float64) if feats else np.empty((0, F), dtype=np.float64)
+# 		labels_np = np.asarray(labels, dtype=np.float64) if labels else np.empty((0,), dtype=np.float64)
+# 		# Save to cache file for future calls.
+# 		try:
+# 			np.savez(cache_file, keys=keys, features=features, labels=labels_np)
+# 		except Exception:
+# 			# Caching is a best-effort optimization; ignore failures.
+# 			pass
+# 		return keys, features, labels_np
+# 	finally:
+# 		try:
+# 			conn.close()
+# 		except Exception:
+# 			pass
 
 
 def fetch_grouped_by_date(
@@ -203,10 +238,12 @@ def fetch_grouped_by_date(
 	driver: str = "pymysql",
 	limit: Optional[int] = None,
 	return_2d: bool = False,
-	 close_ratio_only: bool = False,
-	end_percent_to_fetch: Optional[float] = None,
+	current_day_change = False,
+	volume_ratio = False,
+	vwap_ratio = False,
+	tranaction_ratio = False,
 	day_change_centered: str = "one",
-
+	end_percent_to_fetch: Optional[float] = None,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
 	"""Fetch rows and pack features into a fixed layout per date.
 
@@ -229,11 +266,30 @@ def fetch_grouped_by_date(
 	available date_id entries are kept, effectively selecting the most recent dates
 	(e.g., 10% keeps the last 10% of dates and drops the earlier 90%).
 	"""
+	# First, attempt to load from the cached NumPy file if it exists.
+	# This avoids hitting the database when the grouped-by-date data has already been fetched.
+	#
+	# Include the day_change_centered value in the cache filename so that
+	# different centerings ("one", "half", "zero") maintain separate
+	# cached files.
+	cache_file = f"group_by_date_{day_change_centered}_{"current_day_change" if current_day_change else ""}_{"vol_ratio" if volume_ratio else ""}_{"vwap" if vwap_ratio else ""}_{"transaction" if tranaction_ratio else ""}.npz"
+	try:
+		if os.path.exists(cache_file):
+			loaded = np.load(cache_file)
+			return (
+				loaded["dates"],
+				loaded["X"],
+				loaded["Y"],
+			)
+	except Exception:
+		# If anything goes wrong while loading the cache, fall back to DB.
+		pass
+
 	print("Fetching rows from database... user= ", user, "")
 	conn = get_connection(host=host, database=database, user=user, password=password, port=port, driver=driver)
 	try:
 		cur = conn.cursor()
-		sql = SELECT_CLOSE_RATIO_ONLY_SQL(day_change_centered) if close_ratio_only else SELECT_SQL
+		sql = SELECT_VARIABLE_DATA_SQL(day_change_centered, current_day_change, volume_ratio, vwap_ratio, tranaction_ratio )
 		if limit is not None and limit > 0:
 			sql = f"{sql}\nLIMIT {int(limit)}"
 		cur.execute(sql)
@@ -282,8 +338,8 @@ def fetch_grouped_by_date(
 				dates_list = dates_list[-max(1, keep):]
 
 		Number_Of_dates_found = len(dates_list)
-		# feature width depends on selected SQL (7 for full, 1 for close-only)
-		Number_of_fields_per_ticker_symbol = 1 if close_ratio_only else 7
+		# feature width depends on selected SQL (add up the features)
+		Number_of_fields_per_ticker_symbol = 1 + current_day_change + volume_ratio + vwap_ratio + tranaction_ratio
 
 		# Determine T (max ticker slot) based only on the retained dates, to keep
 		# matrix sizes consistent with the selected window.
@@ -307,6 +363,12 @@ def fetch_grouped_by_date(
 					if 0 <= t_idx < T:
 						X[d_idx, t_idx, :] = stock_data_fields_safe
 						Y[d_idx, t_idx] = label_safe
+			# Save to cache file for future calls.
+			try:
+				np.savez(cache_file, dates=dates, X=X, Y=Y)
+			except Exception:
+				# Caching is a best-effort optimization; ignore failures.
+				pass
 			return dates, X, Y
 		else:
 			X = np.full((Number_Of_dates_found, T * Number_of_fields_per_ticker_symbol), np.nan, dtype=np.float64)
@@ -317,6 +379,12 @@ def fetch_grouped_by_date(
 					if 0 <= base < T * Number_of_fields_per_ticker_symbol:
 						X[d_idx, base:base + Number_of_fields_per_ticker_symbol] = stock_data_fields_safe
 						Y[d_idx, ticker_id - 1] = label_safe
+			# Save to cache file for future calls.
+			try:
+				np.savez(cache_file, dates=dates, X=X, Y=Y)
+			except Exception:
+				# Caching is a best-effort optimization; ignore failures.
+				pass
 			return dates, X, Y
 	finally:
 		try:
@@ -338,9 +406,13 @@ def parse_args(argv: Optional[list[str]] = None):
 	p.add_argument("--user", default=os.getenv("MYSQL_USER"))
 	p.add_argument("--password", default=os.getenv("MYSQL_PASSWORD", ""))
 	p.add_argument("--port", type=int, default=int(os.getenv("MYSQL_PORT", "3306")))
-	p.add_argument("--driver", default="pymysql", choices=["auto", "mysqlconnector", "pymysql", "jdbc"], help="DB driver to use")
+	p.add_argument("--driver", default="auto", choices=["auto", "mysqlconnector", "pymysql", "jdbc"], help="DB driver to use")
 	p.add_argument("--limit", type=int, default=None, help="Optional LIMIT for debugging")
 	p.add_argument("--day-change-centered", default="one", choices=["one", "half", "zero"], help="The centroid of ratio of next_day_change_in_price")
+	p.add_argument("--current-day-change", action="store_true", help="Include current_day_change_in_price")
+	p.add_argument("--volume-ratio", action="store_true", help="Include volume_ratio")
+	p.add_argument("--vwap-ratio", action="store_true", help="Include vwap_ratio")
+	p.add_argument("--tranaction-ratio", action="store_true", help="Include transaction_ratio")
 
 	# New: option to load only close_ratio_to_prior as the feature (instead of all 7 ratios)
 	p.add_argument(
@@ -352,7 +424,7 @@ def parse_args(argv: Optional[list[str]] = None):
 	p.add_argument(
 		"--layout",
 		default="per-date-flat",
-		choices=["rows", "per-date-flat", "per-date-2d"],
+		choices=["per-date-flat", "per-date-2d"],#"rows",
 		help=(
 			"Output layout: 'rows' -> (keys, features, labels) row-wise; "
 			"'per-date-flat' -> (dates, X, Y) with X shape (D, T*F) and Y shape (D, T); "
@@ -377,96 +449,101 @@ def main(argv: Optional[list[str]] = None) -> None:
 	start_time = time.perf_counter()
 	args = parse_args(argv)
 
-	if args.layout == "rows":
-		keys_np, feats_np, labels_np = fetch_as_numpy(
-			host=args.host,
-			database=args.database,
-			user=args.user,
-			password=args.password,
-			port=args.port,
-			driver=args.driver,
-			limit=args.limit,
-			close_ratio_only=args.close_only,
-			day_change_centered=args.day_change_centered,
-		)
+	# if args.layout == "rows":
+	# 	keys_np, feats_np, labels_np = fetch_as_numpy(
+	# 		host=args.host,
+	# 		database=args.database,
+	# 		user=args.user,
+	# 		password=args.password,
+	# 		port=args.port,
+	# 		driver=args.driver,
+	# 		limit=args.limit,
+	# 		close_ratio_only=args.close_only,
+	# 		day_change_centered=args.day_change_centered,
+	# 	)
+	#
+	# 	print(f"Loaded rows: {len(keys_np)}")
+	# 	if len(keys_np) > 0:
+	# 		print(f"Keys (date_id, ticker_id) shape: {keys_np.shape}, dtype: {keys_np.dtype}")
+	# 		print(f"Features shape: {feats_np.shape}, dtype: {feats_np.dtype}")
+	# 		print(f"Labels shape: {labels_np.shape}, dtype: {labels_np.dtype}")
+	# 		print("First row sample:")
+	# 		print({
+	# 			"date_id": int(keys_np[0, 0]),
+	# 			"ticker_id": int(keys_np[0, 1]),
+	# 			"features": feats_np[0].tolist(),
+	# 			"label": None if np.isnan(labels_np[0]) else float(labels_np[0]),
+	# 		})
+	#
+	# 	if args.save_npz:
+	# 		np.savez(args.save_npz, keys=keys_np, features=feats_np, labels=labels_np)
+	# 		print(f"Saved NumPy arrays to {args.save_npz}")
+	#
+	# 	if args.to_torch:
+	# 		if not TORCH_AVAILABLE:
+	# 			raise SystemExit("--to-torch specified but PyTorch is not installed. Install torch or omit the flag.")
+	# 		keys_t, feats_t, labels_t = to_torch(keys_np, feats_np, labels_np)
+	# 		print(
+	# 			f"Torch tensors: keys {tuple(keys_t.shape)} {keys_t.dtype}, features {tuple(feats_t.shape)} {feats_t.dtype}, labels {tuple(labels_t.shape)} {labels_t.dtype}"
+	# 		)
+	# 		if args.save_pt:
+	# 			torch.save({"keys": keys_t, "features": feats_t, "labels": labels_t}, args.save_pt)
+	# 			print(f"Saved PyTorch tensors to {args.save_pt}")
+	# else:
+	return_2d = args.layout == "per-date-2d"
+	print(f"user arg: {args}")
+	dates_np, X_np, Y_np = fetch_grouped_by_date(
+		host=args.host,
+		database=args.database,
+		user=args.user,
+		password=args.password,
+		port=args.port,
+		driver=args.driver,
+		limit=args.limit,
+		return_2d=return_2d,
+		day_change_centered=args.day_change_centered,
+		current_day_change=args.current_day_change,
+		volume_ratio=args.volume_ratio,
+		vwap_ratio=args.vwap_ratio,
+		tranaction_ratio=args.tranaction_ratio,
 
-		print(f"Loaded rows: {len(keys_np)}")
-		if len(keys_np) > 0:
-			print(f"Keys (date_id, ticker_id) shape: {keys_np.shape}, dtype: {keys_np.dtype}")
-			print(f"Features shape: {feats_np.shape}, dtype: {feats_np.dtype}")
-			print(f"Labels shape: {labels_np.shape}, dtype: {labels_np.dtype}")
-			print("First row sample:")
-			print({
-				"date_id": int(keys_np[0, 0]),
-				"ticker_id": int(keys_np[0, 1]),
-				"features": feats_np[0].tolist(),
-				"label": None if np.isnan(labels_np[0]) else float(labels_np[0]),
-			})
+	)
 
-		if args.save_npz:
-			np.savez(args.save_npz, keys=keys_np, features=feats_np, labels=labels_np)
-			print(f"Saved NumPy arrays to {args.save_npz}")
+	layout_desc = "(D, T, F)" if return_2d else "(D, T*F)"
+	print(f"Loaded dates: {len(dates_np)}; X shape: {X_np.shape} {layout_desc}, dtype: {X_np.dtype}; Y shape: {Y_np.shape}")
+	if len(dates_np) > 0:
+		d0 = int(dates_np[0])
+		if return_2d:
+			# show first non-empty ticker slot if possible
+			first_row = X_np[0]
+			# find first non-nan row
+			t_idx = int(np.nanargmax(~np.isnan(first_row).any(axis=1))) if first_row.size else 0
+			sample = first_row[t_idx].tolist() if first_row.size else []
+			label0 = None if np.isnan(Y_np[0, t_idx]) else float(Y_np[0, t_idx])
+		else:
+			# first ticker slot features (first 7 values)
+			sample = X_np[0, :7].tolist() if X_np.shape[1] >= 7 else X_np[0].tolist()
+			label0 = None if (Y_np.shape[1] == 0 or np.isnan(Y_np[0, 0])) else float(Y_np[0, 0])
+		print({
+			"date_id": d0,
+			"first_ticker_slot_features": sample,
+			"first_ticker_label": label0,
+		})
 
-		if args.to_torch:
-			if not TORCH_AVAILABLE:
-				raise SystemExit("--to-torch specified but PyTorch is not installed. Install torch or omit the flag.")
-			keys_t, feats_t, labels_t = to_torch(keys_np, feats_np, labels_np)
-			print(
-				f"Torch tensors: keys {tuple(keys_t.shape)} {keys_t.dtype}, features {tuple(feats_t.shape)} {feats_t.dtype}, labels {tuple(labels_t.shape)} {labels_t.dtype}"
-			)
-			if args.save_pt:
-				torch.save({"keys": keys_t, "features": feats_t, "labels": labels_t}, args.save_pt)
-				print(f"Saved PyTorch tensors to {args.save_pt}")
-	else:
-		return_2d = args.layout == "per-date-2d"
-		print(f"user arg: {args}")
-		dates_np, X_np, Y_np = fetch_grouped_by_date(
-			host=args.host,
-			database=args.database,
-			user=args.user,
-			password=args.password,
-			port=args.port,
-			driver=args.driver,
-			limit=args.limit,
-			return_2d=return_2d,
-			close_ratio_only=args.close_only,
-		)
+	if args.save_npz:
+		np.savez(args.save_npz, dates=dates_np, X=X_np, Y=Y_np)
+		print(f"Saved NumPy arrays to {args.save_npz}")
 
-		layout_desc = "(D, T, F)" if return_2d else "(D, T*F)"
-		print(f"Loaded dates: {len(dates_np)}; X shape: {X_np.shape} {layout_desc}, dtype: {X_np.dtype}; Y shape: {Y_np.shape}")
-		if len(dates_np) > 0:
-			d0 = int(dates_np[0])
-			if return_2d:
-				# show first non-empty ticker slot if possible
-				first_row = X_np[0]
-				# find first non-nan row
-				t_idx = int(np.nanargmax(~np.isnan(first_row).any(axis=1))) if first_row.size else 0
-				sample = first_row[t_idx].tolist() if first_row.size else []
-				label0 = None if np.isnan(Y_np[0, t_idx]) else float(Y_np[0, t_idx])
-			else:
-				# first ticker slot features (first 7 values)
-				sample = X_np[0, :7].tolist() if X_np.shape[1] >= 7 else X_np[0].tolist()
-				label0 = None if (Y_np.shape[1] == 0 or np.isnan(Y_np[0, 0])) else float(Y_np[0, 0])
-			print({
-				"date_id": d0,
-				"first_ticker_slot_features": sample,
-				"first_ticker_label": label0,
-			})
-
-		if args.save_npz:
-			np.savez(args.save_npz, dates=dates_np, X=X_np, Y=Y_np)
-			print(f"Saved NumPy arrays to {args.save_npz}")
-
-		if args.to_torch:
-			if not TORCH_AVAILABLE:
-				raise SystemExit("--to-torch specified but PyTorch is not installed. Install torch or omit the flag.")
-			dates_t = torch.from_numpy(dates_np.astype(np.int64, copy=False))
-			X_t = torch.from_numpy(X_np.astype(np.float32, copy=False))
-			Y_t = torch.from_numpy(Y_np.astype(np.float32, copy=False))
-			print(f"Torch tensors: dates {tuple(dates_t.shape)} {dates_t.dtype}, X {tuple(X_t.shape)} {X_t.dtype}, Y {tuple(Y_t.shape)} {Y_t.dtype}")
-			if args.save_pt:
-				torch.save({"dates": dates_t, "X": X_t, "Y": Y_t}, args.save_pt)
-				print(f"Saved PyTorch tensors to {args.save_pt}")
+	if args.to_torch:
+		if not TORCH_AVAILABLE:
+			raise SystemExit("--to-torch specified but PyTorch is not installed. Install torch or omit the flag.")
+		dates_t = torch.from_numpy(dates_np.astype(np.int64, copy=False))
+		X_t = torch.from_numpy(X_np.astype(np.float32, copy=False))
+		Y_t = torch.from_numpy(Y_np.astype(np.float32, copy=False))
+		print(f"Torch tensors: dates {tuple(dates_t.shape)} {dates_t.dtype}, X {tuple(X_t.shape)} {X_t.dtype}, Y {tuple(Y_t.shape)} {Y_t.dtype}")
+		if args.save_pt:
+			torch.save({"dates": dates_t, "X": X_t, "Y": Y_t}, args.save_pt)
+			print(f"Saved PyTorch tensors to {args.save_pt}")
 
 	elapsed = time.perf_counter() - start_time
 	print(f"Total time: {elapsed:.2f} seconds")

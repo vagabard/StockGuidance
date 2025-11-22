@@ -19,6 +19,9 @@ _ACT_ALIASES = {
     "swish": (nn.SiLU, ()),  # alias
     "leaky_relu": (nn.LeakyReLU, (0.01,)),
     "elu": (nn.ELU, ()),
+    # Tanhshrink variants
+    "tanshrink": (nn.Tanhshrink, ()),
+    "tanhshrink": (nn.Tanhshrink, ()),  # alias
 }
 
 

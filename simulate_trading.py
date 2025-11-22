@@ -141,7 +141,7 @@ def simulate(
 	port: int,
 	driver: str,
 	limit: Optional[int],
-	close_ratio_only: bool,
+	#close_ratio_only: bool,
 	sp500_ticker_id: Optional[int],
 	prefer_prior_only: bool = True,
 	debug_sim_output: bool = False,
@@ -149,7 +149,7 @@ def simulate(
 	rec = StockRecommenderFromModel(model_path)
 	required_prior = int(rec.get_required_previous_days())
 	expected_inp = int(rec.get_input_size())
-	print("close only is ", close_ratio_only)
+	#print("close only is ", close_ratio_only)
 	print("sp500 ticker id is ", sp500_ticker_id)
 	print("prefer prior only is ", prefer_prior_only)
 	print("expected inp is ", expected_inp)
@@ -159,6 +159,10 @@ def simulate(
 	print("driver is ", driver)
 	print("port is ", port)
 	print("user is ", user)
+	print("current day change used is ", rec.get_current_day_change_used())
+	print("volume ratio used is ", rec.get_volume_ratio_used())
+	print("vwap ratio used is ", rec.get_vwap_ratio_used())
+	print("tranaction ratio used is ", rec.get_tranaction_ratio_used())
 	# Load per-date flattened features (X_flat) and dates
 	dates, X_flat, _Y = fetch_grouped_by_date(
 		host=host,
@@ -169,7 +173,10 @@ def simulate(
 		driver=driver,
 		limit=limit,
 		return_2d=False,
-		close_ratio_only=close_ratio_only,
+		current_day_change=rec.get_current_day_change_used(),
+		volume_ratio=rec.get_volume_ratio_used(),
+		vwap_ratio=rec.get_vwap_ratio_used(),
+		tranaction_ratio=rec.get_tranaction_ratio_used(),
 	)
 
 	D = int(dates.shape[0])
@@ -228,6 +235,8 @@ def simulate(
 					"top3_ticker_ids",
 					"close_ratio_top1",
 					"raw_close_top1",
+					"scores_std",
+					"top1_score",
 				]
 			f.write(",".join(cols_single) + "\n")
 		else:
@@ -244,6 +253,8 @@ def simulate(
 					"top3_ticker_ids",
 					"close_ratio_top1",
 					"raw_close_top1",
+					"scores_std",
+					"top1_score",
 				]
 			f.write(",".join(cols) + "\n")
 
@@ -256,13 +267,20 @@ def simulate(
 			# Get recommendations up to the largest K once (ensure at least 3 for debug output)
 			max_k = max(top_ks)
 			req_k = int(max(max_k, 3))
-			_, top_ids_all = rec.getBuyRecommendations(
+			scores_all, top_ids_all = rec.getBuyRecommendations(
 				feat_vec, top_k=req_k, return_scores=True, index_base=1
 			)
 
 			# Compute portfolio daily return using equal-weight allocation among valid picks
-			todays_open = open_mat[d]
-			todays_close = close_mat[d]
+			# IMPORTANT: Trades are executed the day AFTER the feature vector date.
+			# We buy at next day's open and sell at next day's close (same day),
+			# so both open/close belong to the next calendar date relative to the feature.
+			trade_idx = d + 1
+			if trade_idx >= D:
+				# No next-day data available; stop simulation for remaining dates
+				break
+			todays_open = open_mat[trade_idx]
+			todays_close = close_mat[trade_idx]
 
 			# Update each K-specific portfolio using equal-weight allocation
 			for k in top_ks:
@@ -292,8 +310,9 @@ def simulate(
 					sp500_value *= (c / o)
 				# else hold cash (no change)
 
-			open_date_id = int(dates[d])
-			close_date_id = int(dates[d])
+			# Record trade date ids as the next day's date (buy and sell same day)
+			open_date_id = int(dates[trade_idx])
+			close_date_id = int(dates[trade_idx])
 
 			# Prepare debug extras if requested
 			debug_cols: List[str] = []
@@ -311,9 +330,9 @@ def simulate(
 				if top_ids_all is not None and len(top_ids_all) >= 1:
 					t1 = int(top_ids_all[0])
 					i1 = t1 - 1
-					# raw close from close_mat
+					# raw close from close_mat for the TRADE day (next day after feature)
 					if 0 <= i1 < T:
-						cval = close_mat[d, i1]
+						cval = close_mat[trade_idx, i1]
 						if np.isfinite(cval):
 							raw_close_str = f"{float(cval):.6f}"
 					# close_ratio from features X_flat for the day, assuming feature 0 is close_ratio
@@ -325,7 +344,21 @@ def simulate(
 							if np.isfinite(cr):
 								close_ratio_str = f"{float(cr):.6f}"
 
-				debug_cols = [top3_col, close_ratio_str, raw_close_str]
+				# Score dispersion diagnostics
+				try:
+					std_val = float(np.std(scores_all)) if isinstance(scores_all, np.ndarray) else float('nan')
+					max_val = float(np.max(scores_all)) if isinstance(scores_all, np.ndarray) else float('nan')
+				except Exception:
+					std_val = float('nan')
+					max_val = float('nan')
+
+				debug_cols = [
+					top3_col,
+					close_ratio_str,
+					raw_close_str,
+					(f"{std_val:.6f}" if np.isfinite(std_val) else ""),
+					(f"{max_val:.6f}" if np.isfinite(max_val) else ""),
+				]
 
 			if len(top_ks) == 1:
 				only_k = top_ks[0]
@@ -379,7 +412,7 @@ def parse_args(argv: Optional[List[str]] = None):
 	p.add_argument("--driver", default="auto", choices=["auto", "mysqlconnector", "pymysql"], help="DB driver")
 	p.add_argument("--limit", type=int, default=None, help="Optional LIMIT for debugging")
 
-	p.add_argument("--close-ratio-only", action="store_true",default=True, help="Use only close_ratio_to_prior features if available")
+	#p.add_argument("--close-ratio-only", action="store_true",default=True, help="Use only close_ratio_to_prior features if available")
 	p.add_argument("--sp500-ticker-id", type=int, default=None, help="Ticker id to use as S&P 500 benchmark")
 	p.add_argument(
 		"--prior-only", action="store_true", help="Build features from strictly prior days [d-1..d-N] if possible"
@@ -422,7 +455,7 @@ def main(argv: Optional[List[str]] = None) -> None:
 		port=args.port,
 		driver=args.driver,
 		limit=args.limit,
-		close_ratio_only=args.close_ratio_only,
+		#close_ratio_only=args.close_ratio_only,
 		sp500_ticker_id=args.sp500_ticker_id,
 		prefer_prior_only=bool(args.prior_only),
 		debug_sim_output=bool(args.debug_sim_output),

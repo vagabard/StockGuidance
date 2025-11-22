@@ -93,10 +93,14 @@ def get_connection(
             database=database,
             user=user,
             password=password,
+	        #unix_socket="MYSQL",
             port=port,
-            autocommit=True,
-#	        compress=True,
+            #autocommit=True,
+	        #compress=True,
 	        buffered=True,
+	        raw=True,
+	        #ssl_disabled=True,
+
         )
         return conn
     elif drv_name == "pymysql":

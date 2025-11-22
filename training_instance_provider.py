@@ -64,7 +64,10 @@ class TrainingInstanceProvider:
         driver: str = "auto",
         limit: Optional[int] = None,
         use_torch: bool = False,
-        close_ratio_only: bool = False,
+        current_day_change: bool = True,
+	    volume_ratio: bool = True,
+	    vwap_ratio: bool = True,
+	    tranaction_ratio: bool = True,
 	    day_change_centered: str = "one",
     ) -> None:
         """Load per-date matrices from the database and cache them in memory.
@@ -83,7 +86,10 @@ class TrainingInstanceProvider:
             driver=driver,
             limit=limit,
             return_2d=False,
-            close_ratio_only=close_ratio_only,
+	        current_day_change=current_day_change,
+	        volume_ratio=volume_ratio,
+	        vwap_ratio=vwap_ratio,
+	        tranaction_ratio=tranaction_ratio,
 	        day_change_centered=day_change_centered
         )
 
@@ -92,7 +98,12 @@ class TrainingInstanceProvider:
         self._Y: np.ndarray = Y.astype(np.float64, copy=False)
         self._num_prior: int = 0
         self._use_torch: bool = bool(use_torch and TORCH_AVAILABLE)
-        self._close_ratio_only: bool = bool(close_ratio_only)
+        self._current_day_change: bool = current_day_change
+        self._volume_ratio: bool = volume_ratio
+        self._vwap_ratio: bool = vwap_ratio
+        self._tranaction_ratio: bool = tranaction_ratio
+        self._day_change_centered: str = day_change_centered
+
 
         # Derived dims
         self._D: int = int(self._X_flat.shape[0])
