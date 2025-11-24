@@ -31,6 +31,7 @@ class MultiLayerLinearNet(nn.Module):
 		output_size: int,
 		hidden_layers: int,
 		activation_factory: Optional[Callable[[], nn.Module]] = None,
+		final_activation: Optional[nn.Module] = None,
 		num_layers: int = 3,
 	):
 		super().__init__()
@@ -56,9 +57,10 @@ class MultiLayerLinearNet(nn.Module):
 				layers.append(activation_factory())
 			# Final output layer: hidden -> output (remove the last activation if present)
 			# Remove the last activation added in the loop to ensure no activation after output
-			if isinstance(layers[-1], nn.Module) and not isinstance(layers[-1], nn.Linear):
-				layers.pop()
+			# if isinstance(layers[-1], nn.Module) and not isinstance(layers[-1], nn.Linear):
+			# 	layers.pop()
 			layers.append(nn.Linear(width, output_size))
+			layers.append(final_activation() or nn.Identity())
 
 		self.net = nn.Sequential(*layers)
 

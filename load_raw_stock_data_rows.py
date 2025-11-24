@@ -57,7 +57,30 @@ def fetch_as_numpy(
 
     keys: shape (N, 2) -> (date_id, ticker_id)
     features: shape (N, 2) -> (open, close)
+
+    Results are cached on disk under a ``cache`` subdirectory next to this
+    module. On subsequent calls with the same ``limit`` value, the cached
+    NumPy file is loaded instead of querying the database again. Caching is
+    a best-effort optimisation: any errors while reading or writing the cache
+    are silently ignored and the database is queried as a fallback.
     """
+
+    # Build cache path in a dedicated "cache" subdirectory. We include the
+    # ``limit`` value (when provided) in the filename so that partial-debug
+    # loads do not collide with full-dataset caches.
+    cache_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache")
+    suffix = f"_limit{int(limit)}" if limit is not None and int(limit) > 0 else ""
+    cache_name = f"raw_stock_data{suffix}.npz"
+    cache_file = os.path.join(cache_dir, cache_name)
+
+    try:
+        if os.path.exists(cache_file):
+            loaded = np.load(cache_file)
+            return loaded["keys"], loaded["features"]
+    except Exception:
+        # If anything goes wrong while loading the cache, fall back to DB.
+        pass
+
     conn = get_connection(host=host, database=database, user=user, password=password, port=port, driver=driver)
     try:
         cur = conn.cursor()
@@ -80,8 +103,23 @@ def fetch_as_numpy(
             ticker_ids.append(tkr_id)
             feats.append([open_v, close_v])
 
-        keys = np.stack([np.array(date_ids, dtype=np.int32), np.array(ticker_ids, dtype=np.int32)], axis=1) if date_ids else np.empty((0, 2), dtype=np.int32)
+        keys = (
+            np.stack(
+                [np.array(date_ids, dtype=np.int32), np.array(ticker_ids, dtype=np.int32)],
+                axis=1,
+            )
+            if date_ids
+            else np.empty((0, 2), dtype=np.int32)
+        )
         features = np.asarray(feats, dtype=np.float64) if feats else np.empty((0, 2), dtype=np.float64)
+
+        # Save to cache file for future invocations. Ignore any failures.
+        try:
+            os.makedirs(cache_dir, exist_ok=True)
+            np.savez(cache_file, keys=keys, features=features)
+        except Exception:
+            pass
+
         return keys, features
     finally:
         try:

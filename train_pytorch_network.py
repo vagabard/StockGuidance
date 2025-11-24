@@ -43,9 +43,9 @@ from __future__ import annotations
 import argparse
 import csv
 import os
-import time
-import sys
 import subprocess
+import sys
+import time
 from typing import Iterable, List, Optional
 
 import numpy as np
@@ -56,7 +56,7 @@ from trainer.dataloaders import build_dataloaders
 from trainer.datasets import batched
 from trainer.device import setup_device_and_precision, enforce_cuda_or_fail
 from trainer.factory import create_model_and_optimizer
-from trainer.io_run import write_label_limits, write_run_params, save_model_and_manifest
+from trainer.io_run import write_run_params, save_model_and_manifest
 from trainer.losses import ranking_surrogate_loss
 from trainer.memory import estimate_memory
 from trainer.metrics import mse_restricted, eval_epoch
@@ -64,12 +64,16 @@ from trainer.ranking import (
 	ranking_score,
 	ranking_max_score,
 	ranking_error_from_positions,
-	vector_to_ranking_indices,
 	batch_positions_from_prediction_and_labels,
 )
 from trainer.splits import split_datasets
 from trainer.utils import count_elements
 from training_instance_provider import TrainingInstanceProvider
+
+VALID_ACTIVATIONS = {"relu", "gelu", "tanh", "sigmoid", "silu", "swish", "leaky_relu", "elu", "tanshrink", "softmax",
+              "logsoftmax", "none"}
+
+VALID_DAY_CENTERS = {"one", "half", "zero", "gapped01", "binary_labels", "top_100_binary_labels"}
 
 
 # Dataset classes, batching, metrics, and other helpers are provided by trainer.* modules
@@ -87,112 +91,57 @@ def ranking_error(
 	return 0.0 if m == 0.0 else max(0.0, min(1.0, 1.0 - (s / m)))
 
 
-# -------------------------------
-# New single-argument API (integers only)
-# -------------------------------
-
-def _positions_from_orders(predicted_order: Iterable, true_order: Iterable) -> List[int]:
-	"""Build a positions array from two orders (internal helper).
-
-	Returns a list `pos` of length N, where `pos[p-1]` is the 1-based true position
-	of the item placed at predicted position `p`.
-	"""
-	pred = list(predicted_order)
-	truth = list(true_order)
-	if len(pred) != len(truth):
-		raise ValueError("predicted_order and true_order must have the same length")
-	N = len(pred)
-	if N == 0:
-		return []
-
-	# Map item -> 0-based index in true order
-	pos_true = {item: i for i, item in enumerate(truth)}
-
-	positions: List[int] = []
-	for item in pred:
-		if item not in pos_true:
-			raise ValueError("All items in predicted_order must exist in true_order")
-		t0 = pos_true[item]  # 0-based
-		positions.append(t0 + 1)  # store 1-based true position
-	return positions
-
-
-
-
-def matrix_to_ranking_indices(mat) -> List[List[int]]:
-	"""Return rankings per row for a 2D matrix of scores.
-
-	- Input can be: torch.Tensor (2D), numpy.ndarray (2D), or a sequence of 1D sequences.
-	- For each row, higher score ranks earlier; ties broken by smaller column index.
-
-	Returns a list of lists of 0-based indices: one ranking per row.
-	"""
-	# Batch implementation using NumPy stable argsort along axis=1
-	if TORCH_AVAILABLE and isinstance(mat, torch.Tensor):  # type: ignore
-		if mat.ndim != 2:
-			raise ValueError("matrix_to_ranking_indices: expected 2D tensor")
-		arr = mat.detach().cpu().numpy()
-	elif isinstance(mat, np.ndarray):
-		if mat.ndim != 2:
-			raise ValueError("matrix_to_ranking_indices: expected 2D array")
-		arr = mat
-	else:
-		arr = np.asarray([list(row) for row in mat], dtype=np.float64)
-
-	idx = np.argsort(-arr, axis=1, kind="mergesort")
-	return idx.astype(np.int64).tolist()
-
-
-def positions_from_prediction_and_labels(pred_scores, true_labels) -> List[int]:
-	"""Build the integer `positions` list from prediction and label vectors.
-
-	Contract (per sample):
-	  - `pred_scores`: 1D scores (higher is better) from the model for each output node.
-	  - `true_labels`: 1D ground-truth scores/labels for the same outputs.
-
-	Returns:
-	  - `positions` list of length N where `positions[p-1]` is the 1-based true
-		rank of the item placed at predicted position `p`.
-
-	This output is directly consumable by `ranking_score_from_positions` and
-	`ranking_error_from_positions`.
-	"""
-	# Produce 0-based index rankings for predictions and labels
-	pred_order = vector_to_ranking_indices(pred_scores)
-	true_order = vector_to_ranking_indices(true_labels)
-
-	# Fast path when using integer index lists 0..N-1 (which vector_to_ranking_indices returns)
-	N = len(pred_order)
-	if N == 0:
-		return []
-	# Convert to NumPy for vectorized inverse mapping
-	pred_idx = np.asarray(pred_order, dtype=np.int64)
-	true_idx = np.asarray(true_order, dtype=np.int64)
-	# Validate same length
-	if pred_idx.shape[0] != true_idx.shape[0]:
-		raise ValueError("positions_from_prediction_and_labels: predicted and label lengths differ")
-	# Build inverse rank mapping for true order: item -> true 0-based position
-	inv_true = np.empty(N, dtype=np.int64)
-	inv_true[true_idx] = np.arange(N, dtype=np.int64)
-	# positions[p-1] = 1 + true_rank_of_item_at_pred_pos
-	positions = (inv_true[pred_idx] + 1).astype(np.int64)
-	return positions.tolist()
-
 def main(argv: Optional[List[str]] = None) -> int:
 	parser = argparse.ArgumentParser(description="Train a PyTorch dense network on stock instances.")
 	parser.add_argument("--mode", type=str, default="train", choices=["train", "memest"], help="Run mode: train or memest (memory estimate only)")
 	# Accept single int or inclusive range like "2-4" for multiple runs
-	parser.add_argument("--prior-days", type=str, default="0", help="How many prior days to include in the feature window (>=0) or a range like '2-4' to run multiple")
-	parser.add_argument("--epochs", type=int, default=10, help="Number of training epochs")
-	parser.add_argument("--batch-size", type=int, default=32, help="Mini-batch size")
+	parser.add_argument("--prior-days", type=str, default="4", help="How many prior days to include in the feature window (>=0) or a range like '2-4' to run multiple")
+	parser.add_argument("--epochs", type=int, default=30, help="Number of training epochs")
+	parser.add_argument("--batch-size", type=int, default=128, help="Mini-batch size")
 	# Allow single value or comma-separated list for grid runs
-	parser.add_argument("--lr", type=str, default="1e-3", help="Learning rate for Adam; accepts a single value (e.g., 1e-3) or a comma-separated list (e.g., 0.01,0.001,0.0001)")
+	parser.add_argument("--lr", type=str, default="1e-7", help="Learning rate for Adam; accepts a single value (e.g., 1e-3) or a comma-separated list (e.g., 0.01,0.001,0.0001)")
 	parser.add_argument("--metrics-file", type=str, default=os.path.join("data", "training_metrics.csv"), help="Path to CSV for epoch metrics")
 	parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda"], help="Device selection")
 	parser.add_argument("--limit", type=int, default=None, help="Optional limit of DB rows during load (for debugging)")
-	parser.add_argument("--hidden-layers", type=int, default=0, help="Hidden layer width for MLP (defaults to input size if <=0)")
+	parser.add_argument("--hidden-layers", type=int, default=4, help="Hidden layer width for MLP (defaults to input size if <=0)")
 	# Accept single int or inclusive range like "2-4" for multiple runs
-	parser.add_argument("--mlp-layers", type=str, default="3", help="Total number of Linear layers in the MLP (including the output layer), or a range like '2-4'")
+	parser.add_argument("--mlp-layers", type=str, default="4", help="Total number of Linear layers in the MLP (including the output layer), or a range like '2-4'")
+	parser.add_argument("--train-percent", type=float, default="0.90", help="percent of data to train on")
+	parser.add_argument("--val-percent", type=float, default="0.5", help="percent of data to use for validation")
+	parser.add_argument(
+		"--data-head-ignore-percent",
+		type=float,
+		default=0.0,
+		help=(
+			"Fraction [0.0-1.0] of the beginning of the dataset to ignore when choosing instances for train/val/test (e.g. 0.70 ignores the first 70 percent of instances)."
+		),
+	)
+	parser.add_argument(
+		"--data-tail-ignore-percent",
+		type=float,
+		default=0.0,
+		help=(
+			"Fraction [0.0-1.0] of the *end* of the dataset to ignore when choosing instances for train/val/test (e.g. 0.10 ignores the last 10 percent of instances)."
+		),
+	)
+	parser.add_argument(
+		"--dry-run",
+		action="store_true",
+		help=(
+			"Perform a dry run: build the dataset splits using the current arguments, "
+			"print the effective usable window after any head/tail trimming, and exit "
+			"without estimating memory or training."
+		),
+	)
+	parser.add_argument(
+		"--run-repeats",
+		type=int,
+		default=1,
+		help=(
+			"How many times to repeat each distinct parameter configuration. "
+			"Values <= 0 are treated as 1."
+		),
+	)
 	parser.add_argument("--log-interval", type=int, default=50, help="How many batches between progress prints during training (0 to disable)")
 	parser.add_argument("--close-ratio-only", action="store_true", help="Use only the close_ratio_to_prior as the single input feature per ticker (smaller feature vector)")
 	# Rank displacement metric window
@@ -203,7 +152,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 	parser.add_argument("--rank-temp", type=float, default=1.0, help="Temperature for ranking surrogate loss softmax (T>0, higher is softer)")
 	# Ability to disable rank error calculation (saves CPU during training/eval)
 	parser.add_argument(
-		"--disable-rank-err",
+		"--enable-rank-err",
 		action="store_true",
 		help="Disable rank error calculation and logging (sets values to 0.0)",
 	)
@@ -211,7 +160,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 		"--split-mode",
 		type=str,
 		choices=["sequential", "random_order_train_validation", "mix_training_and_validation"],
-		default="sequential",
+		default="random_order_train_validation",
 		help="How to split train/val/test: sequential (by time/index), random_order_train_validation (shuffled indices), mix_training_and_validation (intermix training and validation indices)",
 	)
 	parser.add_argument(
@@ -228,9 +177,18 @@ def main(argv: Optional[List[str]] = None) -> int:
 		help="Math precision for training/inference: auto (CUDA->fp16 else fp32), fp32, fp16, or bf16",
 	)
 	parser.add_argument(
+		"--run-repeat-index",
+		type=int,
+		default=1,
+		help=(
+			"Internal index (1-based) of this repeat when --run-repeats > 1. "
+			"Normally set by the launcher; users do not need to specify this."
+		),
+	)
+	parser.add_argument(
 		"--arch",
 		type=str,
-		default="conv_trans",
+		default="mlp",
 		choices=["conv_trans", "mlp"],
 		help="Model architecture: conv_trans (Conv+Transformer) or mlp (configurable-layer MLP)",
 	)
@@ -245,11 +203,24 @@ def main(argv: Optional[List[str]] = None) -> int:
 		),
 	)
 	parser.add_argument(
+		"--final-activation",
+		type=str,
+		default="None",
+		help=(
+			"Activation for MLP output layers (ignored for conv_trans). "
+			"Accepts a single value or a comma-separated list. Supported: "
+			"relu, gelu, tanh, sigmoid, silu, swish, leaky_relu, elu, tanshrink, softmax, logsoftmax"
+		),
+	)
+	parser.add_argument(
 		"--day-change-centered",
 		type=str,
 		default="one",
-		choices=["one", "half", "zero", "gapped01"],
-		help="Center of next_day_change_in_price ratio",
+		help=(
+			"Center of next_day_change_in_price ratio. "
+			"Accepts a single value or a comma-separated list. Supported values: "
+			"one, half, zero, gapped01, binary_labels, top_100_binary_labels."
+		),
 	)
 	parser.add_argument(
 		"--change-in-price-today",
@@ -276,9 +247,9 @@ def main(argv: Optional[List[str]] = None) -> int:
 	)
 	# DataLoader and shuffling options
 	parser.add_argument(
-		"--use-dataloader",
+		"--dont-use-dataloader",
 		action="store_true",
-		help="Use torch DataLoader for batching (enables workers, pin_memory, and optional shuffling)",
+		help="don't use torch DataLoader for batching (enables workers, pin_memory, and optional shuffling)",
 	)
 	# Optional post-training simulation
 	parser.add_argument(
@@ -289,7 +260,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 	parser.add_argument(
 		"--simulate-percent",
 		type=float,
-		default=10.0,
+		default=5.0,
 		help="Percent of dates to simulate in simulate_trading (last N percent)",
 	)
 	parser.add_argument(
@@ -330,116 +301,80 @@ def main(argv: Optional[List[str]] = None) -> int:
 	)
 	args = parser.parse_args(argv)
 
-	# Helper to parse single int or inclusive range "a-b" into a list of ints
-	def _parse_int_or_range(val: str) -> List[int]:
-		try:
-			return [int(val)]
-		except Exception:
-			pass
-		if isinstance(val, str) and "-" in val:
-			parts = val.split("-", 1)
-			try:
-				a = int(parts[0].strip())
-				b = int(parts[1].strip())
-			except Exception:
-				raise argparse.ArgumentTypeError(f"Invalid range value: {val}")
-			if b < a:
-				a, b = b, a
-			# constrain to non-negative
-			a = max(0, a)
-			b = max(0, b)
-		return list(range(a, b + 1))
+	# Helper to parse comma separated list of ints or inclusive range "a-b" into a list of values
+	def general_arg_parser_understands_lists(val: str, keyword:str, valid_values:List[str] = None) -> List[str]:
+		#first check for commas, ranges might be separated by commas, or single values
+		comma_processed_string ={val.strip().lower()}
+		if "," in val.strip().lower():
+			parts = [p.strip() for p in val.split(",") if p.strip()]
+			comma_processed_string: List[str] = []
+			for p in parts:
+				comma_processed_string.append(p)
+		comma_and_dash_processed_string = general_arg_parser_understands_ranges(comma_processed_string)
+		for one_entry in comma_and_dash_processed_string:
+			if one_entry not in valid_values:
+				raise argparse.ArgumentTypeError(f"Invalid '{keyword}' entry: '{one_entry}'. Supported: {sorted(valid_values)}")
+
+	def general_arg_parser_understands_ranges(val: List[str]) -> List[str]:
+		parsed_list: List[str] = []
+		for one_val in val:
+			if isinstance(one_val, str) and "-" in one_val:
+				parts = one_val.split("-", 1)
+				#right now we are only supporting integer ranges
+				try:
+					a = int(parts[0].strip())
+					b = int(parts[1].strip())
+				except Exception:
+					raise argparse.ArgumentTypeError(f"Invalid range value: {val}")
+				if b < a:
+					a, b = b, a
+				# constrain to non-negative
+				a = max(0, a)
+				b = max(0, b)
+			parsed_list.extend(list(range(a, b + 1)))
+		return parsed_list
+
 
 	# Helper to parse a comma-separated list of floats for learning rates
-	def _parse_lr_list(val) -> List[float]:
-		# Already a float or int
-		try:
-			if isinstance(val, (float, int)):
-				return [float(val)]
-		except Exception:
-			pass
-		s = str(val).strip() if val is not None else "1e-3"
-		if "," in s:
-			parts = [p.strip() for p in s.split(",") if p.strip()]
-			out: List[float] = []
-			for p in parts:
-				try:
-					out.append(float(p))
-				except Exception:
-					raise argparse.ArgumentTypeError(f"Invalid --lr entry: '{p}'")
-			if not out:
-				return [1e-3]
-			return out
-		# Single value path
-		try:
-			return [float(s)]
-		except Exception:
-			raise argparse.ArgumentTypeError(f"Invalid --lr value: '{val}'")
+	def parse_float_list(val, keyword) -> List[float]:
+		parsed_list = general_arg_parser_understands_lists(str(val), keyword)
+		for one_entry in parsed_list:
+			try:
+				float(one_entry)
+			except Exception:
+				raise argparse.ArgumentTypeError(f"Invalid {keyword} value: '{one_entry}'")
+		return [float(p) for p in parsed_list]
 
-	# Helper to parse a comma-separated list of activations
-	VALID_ACTS = {"relu", "gelu", "tanh", "sigmoid", "silu", "swish", "leaky_relu", "elu", "tanshrink"}
-	def _parse_activation_list(val) -> List[str]:
-		s = str(val).strip() if val is not None else "relu"
-		if "," in s:
-			parts = [p.strip().lower() for p in s.split(",") if p.strip()]
-			if not parts:
-				return ["relu"]
-			for p in parts:
-				if p not in VALID_ACTS:
-					raise argparse.ArgumentTypeError(f"Invalid --activation entry: '{p}'. Supported: {sorted(VALID_ACTS)}")
-			return parts
-		# Single value path
-		p = s.lower()
-		if p not in VALID_ACTS:
-			raise argparse.ArgumentTypeError(f"Invalid --activation value: '{s}'. Supported: {sorted(VALID_ACTS)}")
-		return [p]
 
 	# Helper to parse simulate top-k which may be a single int or comma-separated list
-	def _parse_topk(val) -> List[int]:
-		# Already an int
-		try:
-			if isinstance(val, int):
-				v = int(val)
-				return [v]
-		except Exception:
-			pass
-		s = str(val).strip() if val is not None else "10"
-		if "," in s:
-			parts = [p.strip() for p in s.split(",") if p.strip()]
-			out: List[int] = []
-			for p in parts:
-				try:
-					out.append(int(p))
-				except Exception:
-					raise argparse.ArgumentTypeError(f"Invalid --simulate-top-k entry: '{p}'")
-			if not out:
-				return [10]
-			return out
-		# Single value path
-		try:
-			return [int(s)]
-		except Exception:
-			raise argparse.ArgumentTypeError(f"Invalid --simulate-top-k value: '{val}'")
+	def parse_int_list(val, keyword) -> List[int]:
+		parsed_list = general_arg_parser_understands_lists(str(val), keyword)
+		for one_entry in parsed_list:
+			try:
+				int(one_entry)
+			except Exception:
+				raise argparse.ArgumentTypeError(f"Invalid {keyword} value: '{one_entry}'")
+		return [int(p) for p in parsed_list]
 
-	prior_days_list = _parse_int_or_range(str(args.prior_days))
-	mlp_layers_list = _parse_int_or_range(str(args.mlp_layers))
-	lr_list = _parse_lr_list(getattr(args, "lr", "1e-6"))
-	activation_list = _parse_activation_list(getattr(args, "activation", "relu"))
+
+	prior_days_list = general_arg_parser_understands_lists(str(args.prior_days))
+	mlp_layers_list = general_arg_parser_understands_lists(str(args.mlp_layers))
+	lr_list = parse_float_list(getattr(args, "lr", "1e-6"))
+	activation_list = general_arg_parser_understands_lists( getattr(args, "activation", "relu"), "activation", VALID_ACTIVATIONS)
+	final_activation_list = general_arg_parser_understands_lists(getattr(args, "final_activation", "None"), "final_activation", VALID_ACTIVATIONS)
+	day_change_centered_list = general_arg_parser_understands_ranges(getattr(args, "day_change_centered", "one"), "day_change_centered", VALID_DAY_CENTERS)
 
 	# Determine if this is a single run explicitly specified without range syntax
-	# We only consider it a "no-range" run when both options are single values
-	# and the original argument strings did not contain a '-'. This preserves
-	# prior behavior for explicit ranges like "2-4" as well as single-value lists.
-	single_run_no_range = (
-		len(prior_days_list) == 1
-		and len(mlp_layers_list) == 1
-		and len(lr_list) == 1
-		and len(activation_list) == 1
-		and ("-" not in str(args.prior_days))
-		and ("-" not in str(args.mlp_layers))
-		and ("," not in str(args.lr))
-		and ("," not in str(args.activation))
-	)
+	# We only consider it a "no-range" run when all sweepable options are single
+	# values and the original argument strings did not contain range/list syntax.
+	# all the lengths will only equal 1 if each length is 1
+	single_run_no_range = (len(prior_days_list) *len(mlp_layers_list) * len(lr_list) *len(activation_list)*len(day_change_centered_list)**len(mlp_layers_list)==1)
+
+	# Normalise repeat count early so later code can rely on it.
+	repeat_count = int(getattr(args, "run_repeats", 1) or 1)
+	if repeat_count <= 0:
+		repeat_count = 1
+	setattr(args, "run_repeats", repeat_count)
 
 	# Build a timestamped run directory and place metrics inside it
 	ts = time.strftime("%Y%m%d_%H%M%S", time.localtime())
@@ -460,20 +395,30 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 	# Support both torch.Tensor (train mode) and numpy.ndarray (memest mode)
 
-	# Prepare a single provider instance up-front and reuse it across runs
-	# to avoid reloading data from the database for each configuration.
-	provider = TrainingInstanceProvider(
-		use_torch=(args.mode == "train" and TORCH_AVAILABLE),
-		limit=args.limit,
-		current_day_change=args.change_in_price_today,
-		volume_ratio=args.volume_ratio,
-		vwap_ratio=args.vwap_ratio,
-		tranaction_ratio=args.transaction_ratio,
-		day_change_centered=args.day_change_centered,
-	)
+	# Cache providers per day_change_centered value so that we only load data
+	# from the database once for each distinct choice. This keeps the original
+	# optimisation (single provider) in the common single-value case, while
+	# still allowing a comma-separated sweep across day_change_centered.
+	_providers: dict[str, TrainingInstanceProvider] = {}
 
-	# Define a function to run one configuration using the shared provider
-	def _run_one(prior_days: int, mlp_layers: int, lr: float, activation: str) -> None:
+	def _get_provider(day_centered: str) -> TrainingInstanceProvider:
+		if day_centered not in _providers:
+			_providers[day_centered] = TrainingInstanceProvider(
+				use_torch=(args.mode == "train" and TORCH_AVAILABLE),
+				limit=args.limit,
+				current_day_change=args.change_in_price_today,
+				volume_ratio=args.volume_ratio,
+				vwap_ratio=args.vwap_ratio,
+				tranaction_ratio=args.transaction_ratio,
+				day_change_centered=day_centered,
+			)
+		return _providers[day_centered]
+
+	# Define a function to run one configuration using the appropriate provider
+	def _run_one(day_centered: str, prior_days: int, mlp_layers: int, lr: float, activation: str, final_activation: str) -> None:
+		print("day_centered ", day_centered, "prior_days ", prior_days, "mlp_layers ", mlp_layers, "lr ", lr, "activation ", activation, "final_activation ", final_activation)
+		provider = _get_provider(day_centered)
+		print(f"Provider: {provider}")
 		# Set the sliding window size for this configuration
 		provider.set_how_many_days_in_past_to_use(int(prior_days))
 
@@ -488,19 +433,42 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 		# Build datasets (train/val/test)
 		n = max_inst
-		train_ds, val_ds, test_ds = split_datasets(provider, args, n)
+		train_ds, val_ds, test_ds = split_datasets(provider, args, n, train_percent=args.train_percent, validation_percent=args.val_percent)
 
 		# Build output directory
-		# If no range was provided (single-run), write directly under the timestamp
-		# directory. Otherwise, create a per-config subdirectory to avoid collisions.
+		# If no range was provided (single-run), all configurations share the
+		# timestamp directory. When ranges are used, each distinct configuration
+		# gets its own subdirectory to avoid collisions.
+		#
+		# For repeated runs of the *same* configuration we now place outputs in
+		# per-repeat subdirectories (rep1, rep2, ...) instead of only encoding the
+		# repeat index in the filename. This keeps configurations grouped together
+		# while making it easy to inspect or delete individual repeats.
 		# Safe tokens for filenames
 		act_tok = str(activation).lower()
 		lr_tok = (f"{lr:.6g}").replace(".", "p").replace("-", "m")
-		suffix = f"prior{prior_days}_layers{mlp_layers}_lr{lr_tok}_act{act_tok}"
+		repeat_index = int(getattr(args, "run_repeat_index", 1) or 1)
+		# Base suffix that identifies the hyper-parameter configuration only
+		config_suffix = f"prior{prior_days}_layers{mlp_layers}_lr{lr_tok}_act{act_tok}"
+		# Configuration directory (shared by all repeats of this configuration)
 		if single_run_no_range:
-			run_dir = base_run_dir
+			config_dir = base_run_dir
 		else:
-			run_dir = os.path.join(base_run_dir, suffix)
+			config_dir = os.path.join(base_run_dir, config_suffix)
+		# Decide whether this run is part of a repeated set
+		repeat_count = int(getattr(args, "run_repeats", 1) or 1)
+		if repeat_count > 1 or repeat_index > 1:
+			# Place each repeat in its own subdirectory: rep1, rep2, ...
+			rep_dir_name = f"rep{repeat_index}"
+			run_dir = os.path.join(config_dir, rep_dir_name)
+			# Keep the historical suffix (including _repN) so filenames remain
+			# recognisable and any downstream tooling that expects it continues to
+			# work.
+			suffix = f"{config_suffix}_rep{repeat_index}"
+		else:
+			# No repeats in use: write directly into the configuration directory
+			run_dir = config_dir
+			suffix = config_suffix
 		os.makedirs(run_dir, exist_ok=True)
 		metrics_file = os.path.join(run_dir, f"{suffix}_" + metrics_base)
 
@@ -508,7 +476,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 		#write_label_limits(run_dir, provider, train_ds)
 
 		# Write run parameters for traceability (per-config)
-		sim_topks_resolved = _parse_topk(getattr(args, "simulate_top_k", "10"))
+		sim_topks_resolved = parse_int_list(getattr(args, "simulate_top_k", "10"))
 		write_run_params(
 			run_dir,
 			ts,
@@ -518,6 +486,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 				"resolved_mlp_layers": mlp_layers,
 				"resolved_lr": lr,
 				"resolved_activation": activation,
+				"resolved_day_change_centered": day_centered,
 			},
 			sim_topks_resolved,
 		)
@@ -527,7 +496,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 			print(f"Mode:Train")
 			device, eff_precision, amp_enabled, amp_dtype = setup_device_and_precision(args)
 			feature_mode = "close_ratio_only" if args.close_ratio_only else "full_feature_set"
-			print(f"Config: prior_days={prior_days} epochs={args.epochs} batch_size={args.batch_size} lr={lr} activation={activation} feature_mode={feature_mode} mlp_layers={mlp_layers} split_mode={args.split_mode} seed={args.seed} use_dataloader={bool(args.use_dataloader)} shuffle={bool(getattr(args,'shuffle', False))} workers={int(getattr(args,'num_workers',0))} pin_memory={bool(getattr(args,'pin_memory', False))}")
+			print(f"Config: prior_days={prior_days} epochs={args.epochs} batch_size={args.batch_size} lr={lr} activation={activation} feature_mode={feature_mode} mlp_layers={mlp_layers} split_mode={args.split_mode} seed={args.seed} dont_use_dataloader={bool(args.dont_use_dataloader)} shuffle={bool(getattr(args,'shuffle', False))} workers={int(getattr(args,'num_workers',0))} pin_memory={bool(getattr(args,'pin_memory', False))}")
 			print(f"Instances: total={n} | splits -> train={len(train_ds)} val={len(val_ds)} test={len(test_ds)}")
 			print(f"Tensor sizes: input_size={input_size} output_size={output_size}")
 
@@ -580,13 +549,6 @@ def main(argv: Optional[List[str]] = None) -> int:
 			if args.mode == "train":
 				#TORCH PROFILE START
 				best_val_mse = float("inf")
-				# with torch.profiler.profile(
-				# 	schedule=torch.profiler.schedule(wait=1, warmup=1, active=3, repeat=1),
-				# 	on_trace_ready=torch.profiler.tensorboard_trace_handler(run_dir),
-				# 	record_shapes=True,
-				# 	profile_memory=True,
-				# 	with_stack=True,
-				# ) as prof:
 				for epoch in range(1, args.epochs + 1):
 					print(f"\n=== Starting epoch {epoch}/{args.epochs} ===")
 					epoch_start = time.time()
@@ -651,7 +613,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 					train_loss_sum += loss.item() * bs
 					train_top10_sum += mse_restricted(pred.detach(), yb.to(pred.dtype), mode="top", k=10).item() * bs
 					#train_bot10_sum += mse_restricted(pred.detach(), yb.to(pred.dtype), mode="bottom", k=10).item() * bs
-					if not bool(args.disable_rank_err):
+					if bool(args.enable_rank_err):
 						try:
 							pos_list = batch_positions_from_prediction_and_labels(pred.detach().cpu(), yb.detach().cpu())
 							batch_rank_err = float(np.mean([ranking_error_from_positions(pos) for pos in pos_list])) if len(pos_list) > 0 else 0.0
@@ -675,7 +637,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 					val_iter = val_loader if use_dl else batched(iter(val_ds), args.batch_size)
 					val_mse, val_top10, _val_rde_unused, val_rank_err = eval_epoch(
 						model, val_iter, device, amp_enabled=use_amp, amp_dtype=amp_dtype,
-						rank_lower=int(args.rank_lower), rank_upper=int(args.rank_upper), compute_rank_err=(not bool(args.disable_rank_err)), compute_rank_disp=False
+						rank_lower=int(args.rank_lower), rank_upper=int(args.rank_upper), compute_rank_err=(bool(args.enable_rank_err)), compute_rank_disp=False
 					)
 
 					epoch_dur = time.time() - epoch_start
@@ -683,7 +645,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 						  f"train_top10={train_top10:.6f} val_top10={val_top10:.6f} "
 #						  f"train_bottom10={train_bot10:.6f} val_bottom10={val_bot10:.6f} "
 						  f"train_rank_err={train_rank_err:.4f} val_rank_err={val_rank_err:.4f}"
-						  + (" [rank_err:off]" if bool(args.disable_rank_err) else "")
+						  + (" [rank_err:on]" if bool(args.enable_rank_err) else "")
 						  + f" | time={epoch_dur:.2f}s")
 					print(msg)
 
@@ -701,7 +663,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 			test_iter = test_loader if use_dl else batched(iter(test_ds), args.batch_size)
 			test_mse, test_top10, test_rde, test_rank_err = eval_epoch(
 				model, test_iter, device, amp_enabled=use_amp, amp_dtype=amp_dtype,
-				rank_lower=int(args.rank_lower), rank_upper=int(args.rank_upper), compute_rank_err=(not bool(args.disable_rank_err))
+				rank_lower=int(args.rank_lower), rank_upper=int(args.rank_upper), compute_rank_err=(bool(args.enable_rank_err))
 			)
 			print("Final Test Metrics:")
 #			print(f"test_mse={test_mse:.6f} test_top10={test_top10:.6f} test_bottom10={test_bot10:.6f} test_rank_disp={test_rde:.3f} test_rank_err={test_rank_err:.4f}")
@@ -735,6 +697,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 					output_size,
 					mlp_layers,
 					activation,
+					final_activation,
 					prior_days,
 				)
 				# Optionally run simulation using the freshly saved model
@@ -754,6 +717,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 							password=os.getenv("MYSQL_PASSWORD", "3YZs#z5GOJKdea"),
 							port=int(os.getenv("MYSQL_PORT", "3306")),
 							driver="auto",
+							loaded_model=model,
 							limit=None,
 							sp500_ticker_id=(int(args.simulate_sp500_id) if args.simulate_sp500_id is not None else None),
 							prefer_prior_only=bool(args.simulate_prior_only),
@@ -770,11 +734,57 @@ def main(argv: Optional[List[str]] = None) -> int:
 		* len(mlp_layers_list)
 		* len(lr_list)
 		* len(activation_list)
+		* len(day_change_centered_list)
 	)
 
-	# If there is only a single combination and no explicit range usage, run in-process
+	# In dry-run mode we do not actually execute any training or memory
+	# estimation. Instead we iterate over the same combination space that
+	# would normally be run and print the resolved arguments for each planned
+	# run, including repeats when --run-repeats > 1. This keeps the CLI wiring
+	# and combination logic testable without touching the database or creating
+	# providers.
+	if bool(getattr(args, "dry_run", False)):
+		for dc in day_change_centered_list:
+			for pd in prior_days_list:
+				for ml in mlp_layers_list:
+					for lr in lr_list:
+						for act in activation_list:
+							for f_act in final_activation_list:
+								for rep in range(1, int(getattr(args, "run_repeats", 1) or 1) + 1):
+									print(
+										"DRY-RUN: "
+										f"mode={args.mode} "
+										f"day_change_centered={str(dc)} "
+										f"prior_days={int(pd)} "
+										f"mlp_layers={int(ml)} "
+										f"lr={float(lr)} "
+										f"activation={str(act)} "
+										f"final_activation={str(f_act)} "
+										f"epochs={int(args.epochs)} "
+										f"batch_size={int(args.batch_size)} "
+										f"train_percent={float(args.train_percent)} "
+										f"val_percent={float(args.val_percent)} "
+										f"split_mode={str(args.split_mode)} "
+										f"data_head_ignore_percent={float(getattr(args, 'data_head_ignore_percent', 0.0))} "
+										f"data_tail_ignore_percent={float(getattr(args, 'data_tail_ignore_percent', 0.0))} "
+										f"run_repeats={int(getattr(args, 'run_repeats', 1) or 1)} "
+										f"run_repeat_index={int(rep)}"
+									)
+		return 0
+
+	# If there is only a single combination and no explicit range usage, run in-process.
+	# Honour --run-repeats by executing the same configuration multiple times.
 	if combo_count == 1 and single_run_no_range:
-		_run_one(int(prior_days_list[0]), int(mlp_layers_list[0]), float(lr_list[0]), str(activation_list[0]))
+		for rep in range(1, repeat_count + 1):
+			setattr(args, "run_repeat_index", int(rep))
+			_run_one(
+				str(day_change_centered_list[0]),
+				int(prior_days_list[0]),
+				int(mlp_layers_list[0]),
+				float(lr_list[0]),
+				str(activation_list[0]),
+				str(final_activation_list[0])
+			)
 		return 0
 
 	# Otherwise, spawn a fresh Python process per combination to avoid in-process
@@ -786,83 +796,95 @@ def main(argv: Optional[List[str]] = None) -> int:
 	if not os.path.exists(wrapper_path):
 		# Fall back to in-process if wrapper is missing
 		print("Warning: run_one_training_setup.py not found. Falling back to in-process runs.")
-		for pd in prior_days_list:
-			for ml in mlp_layers_list:
-				for lr in lr_list:
-					for act in activation_list:
-						_run_one(int(pd), int(ml), float(lr), str(act))
+		for dc in day_change_centered_list:
+			for pd in prior_days_list:
+				for ml in mlp_layers_list:
+					for lr in lr_list:
+						for act in activation_list:
+							for rep in range(1, repeat_count + 1):
+								setattr(args, "run_repeat_index", int(rep))
+								_run_one(str(dc), int(pd), int(ml), float(lr), str(act), str(final_activation_list[0]))
 		return 0
 
 	def _flag(name: str) -> str:
 		return f"--{name.replace('_','-')}"
 
-	# Iterate combinations and spawn a subprocess per run
-	for pd in prior_days_list:
-		for ml in mlp_layers_list:
-			for lr in lr_list:
-				for act in activation_list:
-					cmd: List[str] = [sys.executable, wrapper_path]
-					# Core single-valued overrides for this run
-					cmd += [_flag("mode"), str(args.mode)]
-					cmd += [_flag("prior-days"), str(int(pd))]
-					cmd += [_flag("mlp-layers"), str(int(ml))]
-					cmd += [_flag("lr"), str(float(lr))]
-					cmd += [_flag("activation"), str(act)]
-					# Pass-through of other options
-					cmd += [_flag("epochs"), str(int(args.epochs))]
-					cmd += [_flag("batch-size"), str(int(args.batch_size))]
-					cmd += [_flag("metrics-file"), str(args.metrics_file)]
-					cmd += [_flag("device"), str(args.device)]
-					if args.limit is not None:
-						cmd += [_flag("limit"), str(int(args.limit))]
-					cmd += [_flag("hidden-layers"), str(int(args.hidden_layers))]
-					cmd += [_flag("log-interval"), str(int(args.log_interval))]
-					if bool(args.change_in_price_today):
-						cmd += [_flag("change-in-price-today")]
-					if bool(args.volume_ratio):
-						cmd += [_flag("volume-ratio")]
-					if bool(args.vwap_ratio):
-						cmd += [_flag("vwap-ratio")]
-					if bool(args.transaction_ratio):
-						cmd += [_flag("transaction-ratio")]
-					cmd += [_flag("rank-lower"), str(int(args.rank_lower))]
-					cmd += [_flag("rank-upper"), str(int(args.rank_upper))]
-					if bool(args.use_ranking_error_loss):
-						cmd += [_flag("use-ranking-error-loss")]
-					cmd += [_flag("rank-temp"), str(float(args.rank_temp))]
-					if bool(args.disable_rank_err):
-						cmd += [_flag("disable-rank-err")]
-					cmd += [_flag("split-mode"), str(args.split_mode)]
-					if args.seed is not None:
-						cmd += [_flag("seed"), str(int(args.seed))]
-					cmd += [_flag("precision"), str(args.precision)]
-					cmd += [_flag("arch"), str(args.arch)]
-					cmd += [_flag("day-change-centered"), str(args.day_change_centered)]
-					if bool(args.use_dataloader):
-						cmd += [_flag("use-dataloader")]
-					if bool(getattr(args, "shuffle", False)):
-						cmd += [_flag("shuffle")]
-					if int(getattr(args, "num_workers", 0)):
-						cmd += [_flag("num-workers"), str(int(args.num_workers))]
-					if bool(getattr(args, "pin_memory", False)):
-						cmd += [_flag("pin-memory")]
-					if bool(args.simulate_after):
-						cmd += [_flag("simulate-after")]
-					cmd += [_flag("simulate-percent"), str(float(args.simulate_percent))]
-					# simulate_top_k might be comma-separated; pass through original to preserve intent
-					cmd += [_flag("simulate-top-k"), str(getattr(args, "simulate_top_k", "10"))]
-					if args.simulate_sp500_id is not None:
-						cmd += [_flag("simulate-sp500-id"), str(int(args.simulate_sp500_id))]
-					if bool(args.simulate_prior_only):
-						cmd += [_flag("simulate-prior-only")]
+	# Iterate combinations and spawn a subprocess per run. Honour --run-repeats
+	# by launching each configuration multiple times with a distinct
+	# --run-repeat-index so outputs do not collide.
+	for dc in day_change_centered_list:
+		for pd in prior_days_list:
+			for ml in mlp_layers_list:
+				for lr in lr_list:
+					for act in activation_list:
+						for rep in range(1, repeat_count + 1):
+							cmd: List[str] = [sys.executable, wrapper_path]
+							# Core single-valued overrides for this run
+							cmd += [_flag("mode"), str(args.mode)]
+							cmd += [_flag("prior-days"), str(int(pd))]
+							cmd += [_flag("mlp-layers"), str(int(ml))]
+							cmd += [_flag("lr"), str(float(lr))]
+							cmd += [_flag("activation"), str(act)]
+							# Repeat metadata for the child process
+							cmd += [_flag("run-repeats"), str(int(repeat_count))]
+							cmd += [_flag("run-repeat-index"), str(int(rep))]
+							# Pass-through of other options
+							cmd += [_flag("epochs"), str(int(args.epochs))]
+							cmd += [_flag("batch-size"), str(int(args.batch_size))]
+							cmd += [_flag("metrics-file"), str(args.metrics_file)]
+							cmd += [_flag("device"), str(args.device)]
+							if args.limit is not None:
+								cmd += [_flag("limit"), str(int(args.limit))]
+							cmd += [_flag("hidden-layers"), str(int(args.hidden_layers))]
+							cmd += [_flag("log-interval"), str(int(args.log_interval))]
+							if bool(args.change_in_price_today):
+								cmd += [_flag("change-in-price-today")]
+							if bool(args.volume_ratio):
+								cmd += [_flag("volume-ratio")]
+						if bool(args.vwap_ratio):
+							cmd += [_flag("vwap-ratio")]
+						if bool(args.transaction_ratio):
+							cmd += [_flag("transaction-ratio")]
+						cmd += [_flag("rank-lower"), str(int(args.rank_lower))]
+						cmd += [_flag("rank-upper"), str(int(args.rank_upper))]
+						if bool(args.use_ranking_error_loss):
+							cmd += [_flag("use-ranking-error-loss")]
+							cmd += [_flag("rank-temp"), str(float(args.rank_temp))]
+						if bool(args.enable_rank_err):
+							cmd += [_flag("enable-rank-err")]
+						cmd += [_flag("split-mode"), str(args.split_mode)]
+						if args.seed is not None:
+							cmd += [_flag("seed"), str(int(args.seed))]
+						cmd += [_flag("precision"), str(args.precision)]
+						cmd += [_flag("arch"), str(args.arch)]
+						# Pass the specific day_change_centered value for this run so that
+						# the child process sees a single choice (no commas).
+						cmd += [_flag("day-change-centered"), str(dc)]
+						if bool(args.dont_use_dataloader):
+							cmd += [_flag("dont-use-dataloader")]
+						if bool(getattr(args, "shuffle", False)):
+							cmd += [_flag("shuffle")]
+						if int(getattr(args, "num_workers", 0)):
+							cmd += [_flag("num-workers"), str(int(args.num_workers))]
+						if bool(getattr(args, "pin_memory", False)):
+							cmd += [_flag("pin-memory")]
+						if bool(args.simulate_after):
+							cmd += [_flag("simulate-after")]
+						cmd += [_flag("simulate-percent"), str(float(args.simulate_percent))]
+						# simulate_top_k might be comma-separated; pass through original to preserve intent
+						cmd += [_flag("simulate-top-k"), str(getattr(args, "simulate_top_k", "10"))]
+						if args.simulate_sp500_id is not None:
+							cmd += [_flag("simulate-sp500-id"), str(int(args.simulate_sp500_id))]
+						if bool(args.simulate_prior_only):
+							cmd += [_flag("simulate-prior-only")]
 
-					print(f"Spawning isolated run: prior_days={pd} mlp_layers={ml} lr={lr} activation={act}")
-					try:
-						completed = subprocess.run(cmd, check=True)
-						if completed.returncode != 0:
-							print(f"Warning: sub-run exited with code {completed.returncode}")
-					except Exception as sub_e:
-						print(f"Error running isolated sub-process: {sub_e}")
+						print(f"Spawning isolated run: day_change_centered={dc} prior_days={pd} mlp_layers={ml} lr={lr} activation={act}")
+						try:
+							completed = subprocess.run(cmd, check=True)
+							if completed.returncode != 0:
+								print(f"Warning: sub-run exited with code {completed.returncode}")
+						except Exception as sub_e:
+							print(f"Error running isolated sub-process: {sub_e}")
 
 	return 0
 

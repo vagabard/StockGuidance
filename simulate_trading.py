@@ -1,51 +1,19 @@
-"""
-simulate_trading
------------------
-
-Simulate daily trading using a trained model for buy recommendations.
-
-Rules from the issue description:
-- Start with an account value of $1000.
-- Each simulated day: buy at the market open based on model recommendations
-  (computed from prior days' features), and sell at the close. End the day
-  fully in cash.
-- Use StockRecommenderFromModel to choose what to buy.
-- Allow the user to specify a percentage of loaded dates to use for simulation,
-  always using the last such fraction of dates (e.g., 10% means the last 10%).
-- Track the portfolio value across days and write it to a file named
-  stock_simulation_<PCT>.csv in the same directory as the model manifest.
-- On each line, also include what the value would have been if the money was
-  invested instead in the S&P 500 (specified via a ticker_id argument).
-
-Implementation notes:
-- We source features from load_database_rows_into_tensors.fetch_grouped_by_date
-  (flattened per-date vectors X_flat with size T*F), and raw open/close prices
-  from load_raw_stock_data_rows.fetch_as_numpy to compute daily returns.
-- The recommender model outputs scores for T tickers. We pick top_k tickers and
-  allocate capital equally among the valid ones for the day.
-- Feature vector size expectations may differ by model: some models expect the
-  current day included along with N prior days, others only the prior N days.
-  We will first try using strictly prior days [d-1..d-N]. If the input size
-  does not match the model, we fall back to using [d..d-N] (current day plus
-  prior) to accommodate how the model was trained.
-"""
-from __future__ import annotations
-
 import argparse
 import math
 import os
-from typing import Dict, List, Optional, Tuple, Union
+import time
+from typing import Tuple, Dict, Optional, List, Union, Set
 
 import numpy as np
 
 from StockRecommenderFromModel import StockRecommenderFromModel
-from load_database_rows_into_tensors import fetch_grouped_by_date
-from load_raw_stock_data_rows import fetch_as_numpy as fetch_raw_oc
 from feature_windowing import (
 	best_fit_feature_vector,
 	concat_features_prior_only,
 	concat_features_current_then_prior,
 )
+from load_database_rows_into_tensors import fetch_grouped_by_date
+from load_raw_stock_data_rows import fetch_as_numpy as fetch_raw_oc
 
 
 def _build_open_close_matrices(
@@ -130,6 +98,20 @@ def _concat_features(
 	return vec, feature_date_id
 
 
+def _average_scores(score_list: List[np.ndarray]) -> np.ndarray:
+	"""Average a list of 1D score arrays elementwise.
+
+	All arrays must be broadcast-compatible and share the same shape.
+	"""
+	if not score_list:
+		raise ValueError("score_list must not be empty for ensemble averaging")
+	s0 = np.asarray(score_list[0])
+	if s0.ndim != 1:
+		raise ValueError("Scores for ensemble averaging must be 1D arrays")
+	stack = np.stack([np.asarray(s, dtype=np.float32).reshape(s0.shape) for s in score_list], axis=0)
+	return stack.mean(axis=0)
+
+
 def simulate(
 	model_path: str,
 	percent: float,
@@ -141,12 +123,53 @@ def simulate(
 	port: int,
 	driver: str,
 	limit: Optional[int],
-	#close_ratio_only: bool,
+	loaded_model: Optional["torch.nn.Module"],
 	sp500_ticker_id: Optional[int],
 	prefer_prior_only: bool = True,
 	debug_sim_output: bool = False,
+	device: str = "auto",
+	ensemble_logic: bool = False,
+	ensemble_recs: Optional[List[StockRecommenderFromModel]] = None,
 ) -> str:
-	rec = StockRecommenderFromModel(model_path)
+	"""Run a trading simulation for a single model or an ensemble of models.
+
+	When ``ensemble_logic`` is False (default), ``model_path`` should point to a
+	single training run directory or manifest and a single
+	:class:`StockRecommenderFromModel` is used.
+
+	When ``ensemble_logic`` is True, ``ensemble_recs`` must be a non-empty list
+	of *compatible* StockRecommenderFromModel instances (same input_size,
+	output_size, required_previous_days and feature flags). In this mode, for
+	each step we:
+
+	* run all models on the same feature vector,
+	* sum their output scores elementwise,
+	* divide by the number of models,
+	* use the averaged scores to pick the top-K tickers and compute returns.
+	"""
+	if ensemble_logic:
+		if not ensemble_recs:
+			raise ValueError("ensemble_logic=True requires a non-empty ensemble_recs list")
+		# Use the first model as canonical and validate compatibility
+		rec = ensemble_recs[0]
+		for other in ensemble_recs[1:]:
+			if (
+				other.get_input_size() != rec.get_input_size()
+				or other._output_size != rec._output_size  # type: ignore[attr-defined]
+				or other.get_required_previous_days() != rec.get_required_previous_days()
+				or other.get_current_day_change_used() != rec.get_current_day_change_used()
+				or other.get_volume_ratio_used() != rec.get_volume_ratio_used()
+				or other.get_vwap_ratio_used() != rec.get_vwap_ratio_used()
+				or other.get_tranaction_ratio_used() != rec.get_tranaction_ratio_used()
+			):
+				raise ValueError("All ensemble models must have identical input/output sizes and feature flags")
+	else:
+		if loaded_model is not None:
+			rec = StockRecommenderFromModel(loaded_model, device=device)
+		else:
+			rec = StockRecommenderFromModel(model_path, device=device)
+		ensemble_recs = [rec]
+
 	required_prior = int(rec.get_required_previous_days())
 	expected_inp = int(rec.get_input_size())
 	#print("close only is ", close_ratio_only)
@@ -213,8 +236,16 @@ def simulate(
 	portfolio_values_by_k: Dict[int, float] = {k: 1000.0 for k in top_ks}
 
 	# Prepare output file path
-	model_dir = os.path.dirname(os.path.abspath(rec._resolve_manifest_path(model_path)))
-	out_name = f"stock_simulation_{int(pct)}.csv"
+	if ensemble_logic:
+		# For ensembles, prefer the directory passed in as model_path (root of reps)
+		if os.path.isdir(model_path):
+			model_dir = os.path.abspath(model_path)
+		else:
+			model_dir = os.path.dirname(os.path.abspath(rec._resolve_manifest_path(model_path)))
+		out_name = f"stock_simulation_ensemble_{int(pct)}.csv"
+	else:
+		model_dir = os.path.dirname(os.path.abspath(rec._resolve_manifest_path(model_path)))
+		out_name = f"stock_simulation_{int(pct)}.csv"
 	out_path = os.path.join(model_dir, out_name)
 
 	# Write header
@@ -267,9 +298,33 @@ def simulate(
 			# Get recommendations up to the largest K once (ensure at least 3 for debug output)
 			max_k = max(top_ks)
 			req_k = int(max(max_k, 3))
-			scores_all, top_ids_all = rec.getBuyRecommendations(
-				feat_vec, top_k=req_k, return_scores=True, index_base=1
-			)
+
+			if ensemble_logic:
+				# Run all models, average their raw scores, then derive rankings.
+				all_scores: List[np.ndarray] = []
+				for m in ensemble_recs or []:
+					model_scores, _ = m.getBuyRecommendations(
+						feat_vec, top_k=req_k, return_scores=True, index_base=0
+					)
+					all_scores.append(model_scores)
+				avg_scores = _average_scores(all_scores)
+				T_local = avg_scores.shape[0]
+				# Sort to get top indices (largest first)
+				idx_desc = np.argsort(avg_scores)[::-1]
+				idx_desc = idx_desc[: min(req_k, T_local)]
+				# Map to ticker ids using the canonical recommender's mapping
+				if rec._ticker_id_map and len(rec._ticker_id_map) == rec._output_size:  # type: ignore[attr-defined]
+					top_ids_all = [int(rec._ticker_id_map[i]) for i in idx_desc]
+				else:
+					# Dense indices -> 1..T
+					top_ids_all = [int(i + 1) for i in idx_desc]
+				# For debug columns we treat the averaged scores as the score vector
+				scores_all = avg_scores
+			else:
+				# Single-model case (backwards compatible path)
+				scores_all, top_ids_all = rec.getBuyRecommendations(
+					feat_vec, top_k=req_k, return_scores=True, index_base=1
+				)
 
 			# Compute portfolio daily return using equal-weight allocation among valid picks
 			# IMPORTANT: Trades are executed the day AFTER the feature vector date.
@@ -418,9 +473,28 @@ def parse_args(argv: Optional[List[str]] = None):
 		"--prior-only", action="store_true", help="Build features from strictly prior days [d-1..d-N] if possible"
 	)
 	p.add_argument(
+		"--device",
+		default="auto",
+		type=str,
+		help=(
+			"Device to run inference on: 'auto' (default, uses 'cuda' if available else 'cpu'), "
+			"'cpu', or a specific CUDA device like 'cuda:0'."
+		),
+	)
+	p.add_argument(
 		"--debug-sim-output",
 		action="store_true",
 		help="Include debug columns: top3 ticker ids, close_ratio for top1, and raw close for top1",
+	)
+	p.add_argument(
+		"--ensemble-logic",
+		action="store_true",
+		help=(
+			"If set and the provided model path is a directory containing rep* subdirectories, "
+			"load all those runs as an ensemble, average their output scores per step, and "
+			"use the averaged scores to drive trading. By default (flag not set), when such "
+			"a directory is provided, a separate simulation is run for each rep* subdirectory."
+		),
 	)
 	return p.parse_args(argv)
 
@@ -444,23 +518,172 @@ def main(argv: Optional[List[str]] = None) -> None:
 		# Already an int (e.g., when called programmatically)
 		top_k_parsed = int(top_k_arg)
 
-	out_path = simulate(
-		model_path=args.model,
-		percent=args.percent,
-		top_k=top_k_parsed,
-		host=args.host,
-		database=args.database,
-		user=args.user,
-		password=args.password,
-		port=args.port,
-		driver=args.driver,
-		limit=args.limit,
-		#close_ratio_only=args.close_ratio_only,
-		sp500_ticker_id=args.sp500_ticker_id,
-		prefer_prior_only=bool(args.prior_only),
-		debug_sim_output=bool(args.debug_sim_output),
-	)
-	print(f"Simulation complete. Results written to: {out_path}")
+	model_arg = args.model
+
+	def _dir_has_model(run_dir: str) -> bool:
+		"""Return True if the directory appears to contain a model manifest.
+
+		We reuse StockRecommenderFromModel._resolve_manifest_path to locate a
+		candidate manifest and then check that it exists on disk. This does not
+		instantiate any models or require PyTorch.
+		"""
+		try:
+			manifest_path = StockRecommenderFromModel._resolve_manifest_path(run_dir)  # type: ignore[attr-defined]
+		except Exception:
+			return False
+		return os.path.isfile(manifest_path)
+
+	def _run_for_path(path: str, visited: Optional[Set[str]] = None) -> None:
+		"""Recursively run simulations starting from ``path``.
+
+		Behaviour matches the previous flat-directory logic but, when a directory
+		contains neither rep* subdirectories nor a model manifest, we descend into
+		its subdirectories and repeat the same checks.
+
+		Additionally, we record and print the wall-clock time taken to process
+		each path (directory or single-model file), including any recursive
+		descendants.
+		"""
+		if visited is None:
+			visited = set()
+		abs_path = os.path.abspath(path)
+		if abs_path in visited:
+			print(f"Skipping already-visited directory: {abs_path}")
+			return
+		visited.add(abs_path)
+
+		start_time = time.perf_counter()
+		print(f"Starting simulations for {path}...")
+		try:
+			if os.path.isdir(path):
+				entries = sorted(os.listdir(path))
+				rep_dirs = [
+					os.path.join(path, name)
+					for name in entries
+					if name.lower().startswith("rep") and os.path.isdir(os.path.join(path, name))
+				]
+
+				# Always run individual rep simulations for any detected rep* dirs
+				if rep_dirs:
+					print(f"Detected {len(rep_dirs)} rep* directories under {path}; running simulation separately for each rep.")
+					last_out: Optional[str] = None
+					for d in rep_dirs:
+						print(f"Running simulation for {d}...")
+						last_out = simulate(
+							model_path=d,
+							percent=args.percent,
+							top_k=top_k_parsed,
+							host=args.host,
+							database=args.database,
+							user=args.user,
+							password=args.password,
+							port=args.port,
+							driver=args.driver,
+							limit=args.limit,
+							#close_ratio_only=args.close_ratio_only,
+							sp500_ticker_id=args.sp500_ticker_id,
+							prefer_prior_only=bool(args.prior_only),
+							debug_sim_output=bool(args.debug_sim_output),
+							device=str(args.device),
+						)
+					if last_out is not None:
+						print(f"Simulation complete for reps under {path}. Last results written to: {last_out}")
+
+					# If ensemble logic is requested and we have multiple reps, run an
+					# additional ensemble simulation over all rep* runs.
+					if args.ensemble_logic and len(rep_dirs) > 1:
+						print(
+							f"Detected {len(rep_dirs)} rep* directories under {path}; "
+							"running additional ensemble simulation with averaged scores "
+							"after individual rep simulations."
+						)
+						ensemble_recs: List[StockRecommenderFromModel] = [
+							StockRecommenderFromModel(d, device=args.device) for d in rep_dirs
+						]
+						out_path = simulate(
+							model_path=path,
+							percent=args.percent,
+							top_k=top_k_parsed,
+							host=args.host,
+							database=args.database,
+							user=args.user,
+							password=args.password,
+							port=args.port,
+							driver=args.driver,
+							limit=args.limit,
+							#close_ratio_only=args.close_ratio_only,
+							sp500_ticker_id=args.sp500_ticker_id,
+							prefer_prior_only=bool(args.prior_only),
+							debug_sim_output=bool(args.debug_sim_output),
+							device=str(args.device),
+							ensemble_logic=True,
+							ensemble_recs=ensemble_recs,
+						)
+						print(f"Ensemble simulation complete. Results written to: {out_path}")
+					return
+
+				# No rep* directories. If this directory itself contains a model
+				# manifest, behave like the original single-model path.
+				if _dir_has_model(path):
+					out_path = simulate(
+						model_path=path,
+						percent=args.percent,
+						top_k=top_k_parsed,
+						host=args.host,
+						database=args.database,
+						user=args.user,
+						password=args.password,
+						port=args.port,
+						driver=args.driver,
+						limit=args.limit,
+						#close_ratio_only=args.close_ratio_only,
+						sp500_ticker_id=args.sp500_ticker_id,
+						prefer_prior_only=bool(args.prior_only),
+						debug_sim_output=bool(args.debug_sim_output),
+						device=str(args.device),
+					)
+					print(f"Simulation complete. Results written to: {out_path}")
+					return
+
+				# Directory without rep* subdirectories and without a model manifest:
+				# descend into its subdirectories and repeat the same checks.
+				subdirs = [
+					os.path.join(path, name)
+					for name in entries
+					if os.path.isdir(os.path.join(path, name))
+				]
+				if not subdirs:
+					print(f"No models or rep* directories found in {path} and no subdirectories to search.")
+					return
+				for sub in subdirs:
+					print(f"Descending into subdirectory {sub} to search for models or rep* runs...")
+					_run_for_path(sub, visited)
+			else:
+				# Non-directory path: single-model behaviour.
+				out_path = simulate(
+					model_path=path,
+					percent=args.percent,
+					top_k=top_k_parsed,
+					host=args.host,
+					database=args.database,
+					user=args.user,
+					password=args.password,
+					port=args.port,
+					driver=args.driver,
+					limit=args.limit,
+					#close_ratio_only=args.close_ratio_only,
+					sp500_ticker_id=args.sp500_ticker_id,
+					prefer_prior_only=bool(args.prior_only),
+					debug_sim_output=bool(args.debug_sim_output),
+					device=str(args.device),
+				)
+				print(f"Simulation complete. Results written to: {out_path}")
+
+		finally:
+			elapsed = time.perf_counter() - start_time
+			print(f"Completed simulations for {path} in {elapsed:.2f} seconds")
+	# Start processing from the user-provided model argument
+	_run_for_path(model_arg)
 
 
 if __name__ == "__main__":

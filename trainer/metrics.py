@@ -92,6 +92,8 @@ def eval_epoch(
 	with torch.no_grad():
 		with amp_cm:
 			for xb, yb in batch_iter:
+				# print(xb.shape)
+				# print(yb.shape)
 				pred = model(xb)
 				pred = torch.nan_to_num(pred, nan=0.0, posinf=0.0, neginf=0.0)
 				label_to_pred_dtype = yb.to(pred.dtype)

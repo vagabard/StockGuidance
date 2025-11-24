@@ -22,6 +22,8 @@ _ACT_ALIASES = {
     # Tanhshrink variants
     "tanshrink": (nn.Tanhshrink, ()),
     "tanhshrink": (nn.Tanhshrink, ()),  # alias
+	"softmax": (nn.Softmax, ()),
+	"logsoftmax": (nn.LogSoftmax, (1,))
 }
 
 
@@ -53,6 +55,7 @@ def make_model(
     output_size: int,
     hidden_layers: int,
     activation=None,
+	final_activation=None,
     num_layers: int = 3,
 ):
     arch = (arch or "").lower()
@@ -62,7 +65,8 @@ def make_model(
     if arch in ("mlp", "three_layer", "linear3"):
         # Resolve activation name/callable to a factory and pass through
         act_factory = resolve_activation_factory(activation)
-        return MultiLayerLinearNet(input_size, output_size, hidden_layers, act_factory, num_layers=num_layers)
+        final_activation = resolve_activation_factory(final_activation)
+        return MultiLayerLinearNet(input_size, output_size, hidden_layers, act_factory,final_activation, num_layers=num_layers)
     raise ValueError(f"Unknown architecture '{arch}'. Choices: conv_trans, mlp")
 
 
@@ -84,8 +88,9 @@ def load_model_from_manifest(manifest_path: str, map_location: str = "cpu"):
     hidden_layers = int(m.get("hidden_layers", 0))
     mlp_layers = int(m.get("mlp_layers", 3))
     activation = m.get("activation", "relu")
+    final_activation = m.get("final_activation", "")
 
-    model = make_model(arch, input_size, output_size, hidden_layers, activation=activation, num_layers=mlp_layers)
+    model = make_model(arch, input_size, output_size, hidden_layers, activation=activation, final_activation=final_activation, num_layers=mlp_layers)
     device = torch.device(map_location)
 
     base_dir = os.path.dirname(os.path.abspath(manifest_path))

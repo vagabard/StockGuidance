@@ -115,6 +115,10 @@ def SELECT_VARIABLE_DATA_SQL(day_change_centered: str, current_day_change = Fals
 		additional_fields_to_select = "ddsd.zero_centered_next_day_price_change"
 	elif day_change_centered == "gapped01":
 		additional_fields_to_select = "ddsd.next_day_price_change_to_extremes_0_1"
+	elif day_change_centered == "binary_labels":
+		additional_fields_to_select = "ddsd.next_day_price_change_to_extremes_0_1"
+	elif day_change_centered == "top_100_binary_labels":
+		additional_fields_to_select = "ddsd.next_day_price_change_to_extremes_0_1"
 	else:
 		additional_fields_to_select = "ddsd.next_day_change_in_price"
 
@@ -269,13 +273,31 @@ def fetch_grouped_by_date(
 	# First, attempt to load from the cached NumPy file if it exists.
 	# This avoids hitting the database when the grouped-by-date data has already been fetched.
 	#
-	# Include the day_change_centered value in the cache filename so that
-	# different centerings ("one", "half", "zero") maintain separate
-	# cached files.
-	cache_file = f"group_by_date_{day_change_centered}_{"current_day_change" if current_day_change else ""}_{"vol_ratio" if volume_ratio else ""}_{"vwap" if vwap_ratio else ""}_{"transaction" if tranaction_ratio else ""}.npz"
+	# Include the day_change_centered value and feature flags in the cache
+	# filename so that different configurations maintain separate cached
+	# files. Cache files are stored under a dedicated "cache" subdirectory
+	# next to this module.
+	cache_base = (
+		f"group_by_date_{day_change_centered}_"
+		f"{'current_day_change' if current_day_change else ''}_"
+		f"{'vol_ratio' if volume_ratio else ''}_"
+		f"{'vwap' if vwap_ratio else ''}_"
+		f"{'transaction' if tranaction_ratio else ''}.npz"
+	)
+	cache_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache")
+	cache_file = os.path.join(cache_dir, cache_base)
+	legacy_cache_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), cache_base)
 	try:
+		load_path = None
 		if os.path.exists(cache_file):
-			loaded = np.load(cache_file)
+			load_path = cache_file
+		elif os.path.exists(legacy_cache_file):
+			# Backward-compat: still allow loading old cache files from the
+			# project root if they exist, but all new caches are written under
+			# the "cache" subdirectory.
+			load_path = legacy_cache_file
+		if load_path is not None:
+			loaded = np.load(load_path)
 			return (
 				loaded["dates"],
 				loaded["X"],
@@ -365,6 +387,7 @@ def fetch_grouped_by_date(
 						Y[d_idx, t_idx] = label_safe
 			# Save to cache file for future calls.
 			try:
+				os.makedirs(cache_dir, exist_ok=True)
 				np.savez(cache_file, dates=dates, X=X, Y=Y)
 			except Exception:
 				# Caching is a best-effort optimization; ignore failures.
@@ -381,6 +404,7 @@ def fetch_grouped_by_date(
 						Y[d_idx, ticker_id - 1] = label_safe
 			# Save to cache file for future calls.
 			try:
+				os.makedirs(cache_dir, exist_ok=True)
 				np.savez(cache_file, dates=dates, X=X, Y=Y)
 			except Exception:
 				# Caching is a best-effort optimization; ignore failures.

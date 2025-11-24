@@ -10,7 +10,7 @@ def build_dataloaders(args, train_ds, val_ds, test_ds):
     """
     if not TORCH_AVAILABLE:
         return False, None, None, None
-    if not bool(getattr(args, "use_dataloader", False)):
+    if bool(getattr(args, "dont_use_dataloader", True)):
         return False, None, None, None
     # Defaults for optional args
     num_workers = int(getattr(args, "num_workers", 0) or 0)

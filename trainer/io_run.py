@@ -73,7 +73,7 @@ def write_run_params(run_dir: str, ts: str, args, resolved: dict, simulate_topk_
         print(f"Warning: failed to write runParameters.txt: {e}")
 
 
-def save_model_and_manifest(args, model, optimizer, run_dir: str, suffix: str, metrics_file: str, test_metrics_path: str, input_size: int, output_size: int, mlp_layers: int, activation: str, prior_days: int):
+def save_model_and_manifest(args, model, optimizer, run_dir: str, suffix: str, metrics_file: str, test_metrics_path: str, input_size: int, output_size: int, mlp_layers: int, activation: str, final_activation:str, prior_days: int):
     """Save model/optimizer state dicts and a human-readable manifest JSON."""
     model_state_path = os.path.join(run_dir, f"{suffix}_model_state.pt")
     optimizer_state_path = os.path.join(run_dir, f"{suffix}_optimizer_state.pt")
@@ -101,6 +101,7 @@ def save_model_and_manifest(args, model, optimizer, run_dir: str, suffix: str, m
         "hidden_layers": int(args.hidden_layers),
         "mlp_layers": int(mlp_layers),
         "activation": (str(activation) if args.arch == "mlp" else None),
+	    "final_activation": (str(final_activation) if args.arch == "mlp" else None),
         "learning_rate": float(getattr(args, 'lr', 0.0) if isinstance(getattr(args, 'lr', None), (int, float)) else 0.0),
         "prior_days": int(prior_days),
         # Canonical feature flags (used by loaders)

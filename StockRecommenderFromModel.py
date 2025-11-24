@@ -40,32 +40,67 @@ ArrayLike = Union[np.ndarray, "torch.Tensor", Iterable[float]]
 
 
 class StockRecommenderFromModel:
-	def __init__(self, model_path_or_dir: str, device: str = "auto") -> None:
-		"""Load a trained model from a manifest or its directory.
+	def __init__(
+		self,
+		model_or_path: "torch.nn.Module | str",  # type: ignore[name-defined]
+		device: str = "auto",
+		*,
+		manifest: Optional[dict] = None,
+		run_dir: Optional[str] = None,
+	) -> None:
+		"""Create a recommender from either a saved model path or an existing model.
 
-		model_path_or_dir: path to either the model_manifest.json file or the
-			directory that contains it (as produced by train_pytorch_network.py).
-		device: "auto" (cuda if available else cpu), "cpu", or "cuda".
+		This constructor is intentionally backward compatible:
+		- If ``model_or_path`` is a string, it is treated as before: a path to
+		  either the model_manifest.json file or a directory containing it.
+		- If ``model_or_path`` is an already loaded ``torch.nn.Module`` then the
+		  caller must also supply ``manifest`` describing the model metadata
+		  (at minimum ``input_size`` and ``output_size``). ``run_dir`` may be
+		  provided to point at the directory that would normally contain the
+		  manifest/ticker mapping files (defaults to current working directory).
+
+		Args:
+			model_or_path: Path/dir to a manifest *or* an already-loaded model.
+			device: "auto" (cuda if available else cpu), "cpu", or "cuda".
+			manifest: Manifest dict to use when an existing model instance is
+				provided instead of a path. Ignored for path-based loading.
+			run_dir: Optional directory used to resolve ``ticker_id_map.json``
+				when an existing model is supplied. Ignored for path-based loading.
 		"""
 		if not TORCH_AVAILABLE:
 			raise RuntimeError("PyTorch is required to use StockRecommenderFromModel.")
 
-		resolved_manifest = self._resolve_manifest_path(model_path_or_dir)
-		if not os.path.exists(resolved_manifest):
-			raise FileNotFoundError(f"Model manifest not found: {resolved_manifest}")
-
-		# Resolve device
+		# Resolve device once; used in both construction modes
 		if device == "auto":
 			dev = "cuda" if torch.cuda.is_available() else "cpu"  # type: ignore[attr-defined]
 		else:
 			dev = device
 		self._device = torch.device(dev)  # type: ignore[call-arg]
 
-		# Load model via factory helper; get metadata (manifest)
-		model, manifest, _ = load_model_from_manifest(resolved_manifest, map_location=str(self._device))
-		self._model = model
-		self._manifest = manifest
-		self._dir = os.path.dirname(os.path.abspath(resolved_manifest))
+		# --- Mode 1: path/dir string (existing behaviour) --------------------
+		if isinstance(model_or_path, str):
+			resolved_manifest = self._resolve_manifest_path(model_or_path)
+			if not os.path.exists(resolved_manifest):
+				raise FileNotFoundError(f"Model manifest not found: {resolved_manifest}")
+
+			model, manifest_dict, _ = load_model_from_manifest(
+				resolved_manifest, map_location=str(self._device)
+			)
+			self._model = model
+			self._manifest = manifest_dict
+			self._dir = os.path.dirname(os.path.abspath(resolved_manifest))
+		else:
+			# --- Mode 2: an already loaded torch.nn.Module -------------------
+			model = model_or_path
+			if manifest is None:
+				raise ValueError(
+					"When passing an existing model instance, a manifest dict "
+					"with at least 'input_size' and 'output_size' must be provided."
+				)
+			self._model = model.to(self._device)
+			self._model.eval()
+			self._manifest = dict(manifest)
+			self._dir = os.path.abspath(run_dir or os.getcwd())
 
 		# Optional ticker id mapping sidecar
 		self._ticker_id_map: Optional[List[int]] = None

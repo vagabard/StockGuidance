@@ -114,24 +114,107 @@ def parse_run_parameters(params_path: str) -> Dict[str, Any]:
 
 
 def scan_runs(base_dir: str) -> List[Tuple[str, Dict[str, Any]]]:
-    """Return a list of (run_dir_name, params_dict) for directories containing runParameters.txt.
+    """Return a list of (run_dir_name, params_dict) discovered under *base_dir*.
 
-    Sorted by directory name ascending (i.e., chronological if names are timestamps).
+    The original implementation treated each timestamp directory
+    (e.g. ``20251124_031117``) as a single run by looking only for a
+    ``runParameters.txt`` file directly inside that directory.
+
+    To better support repeated runs, this function now has the following
+    behaviour per timestamp directory:
+
+    * If one or more ``rep*`` subdirectories exist (``rep1``, ``rep2``, ...)
+      each such subdirectory that contains a ``runParameters.txt`` file is
+      exposed as its **own** run entry. The returned run directory name is a
+      *relative* path of the form ``"<timestamp>/repN"`` (always using
+      forward slashes, even on Windows).  This is still compatible with
+      ``os.path.join(base_dir, run_dir_name)`` because Python happily
+      interprets forward slashes on Windows.
+
+    * If no ``rep*`` subdirectories are found, we fall back to the original
+      behaviour and look for a single ``runParameters.txt`` directly inside
+      the timestamp directory.
+
+    The list is sorted by the run directory name ascending so that runs are
+    effectively chronological when names are timestamps.
     """
+
     runs: List[Tuple[str, Dict[str, Any]]] = []
     if not os.path.isdir(base_dir):
         return runs
+
     try:
-        for name in os.listdir(base_dir):
-            if not _is_timestamp_dir(name):
+        for ts_name in os.listdir(base_dir):
+            if not _is_timestamp_dir(ts_name):
                 continue
-            rp = os.path.join(base_dir, name, "runParameters.txt")
+
+            ts_path = os.path.join(base_dir, ts_name)
+            if not os.path.isdir(ts_path):
+                continue
+
+            # First look for rep* subdirectories. If we find any, treat each
+            # rep as a separate run, as long as it has its own
+            # runParameters.txt.
+            try:
+                entries = os.listdir(ts_path)
+            except OSError:
+                continue
+
+            rep_subdirs = [
+                e
+                for e in entries
+                if e.lower().startswith("rep")
+                and os.path.isdir(os.path.join(ts_path, e))
+            ]
+
+            if rep_subdirs:
+                # If rep* subdirectories exist but do not contain their own
+                # runParameters.txt files, fall back to using the parent
+                # timestamp's parameters so that these repetitions still show
+                # up as distinct entries in the viewer.
+                parent_rp = os.path.join(ts_path, "runParameters.txt")
+                parent_params: Dict[str, Any] | None = None
+                if os.path.exists(parent_rp):
+                    try:
+                        parent_params = parse_run_parameters(parent_rp)
+                    except Exception:
+                        parent_params = None
+
+                for rep_name in sorted(rep_subdirs):
+                    rep_path = os.path.join(ts_path, rep_name)
+                    rp = os.path.join(rep_path, "runParameters.txt")
+
+                    if os.path.exists(rp):
+                        params = parse_run_parameters(rp)
+                    elif parent_params is not None:
+                        # Use a shallow copy so mutations on one rep's
+                        # params (if any) do not affect the others.
+                        params = dict(parent_params)
+                    else:
+                        # No parameters available for this rep; skip it.
+                        continue
+
+                    # Use a stable, OS-independent relative path so that the
+                    # viewer can join it with *base_dir* later on.
+                    rel_dir = f"{ts_name}/{rep_name}"
+                    params["_dir"] = rel_dir
+                    runs.append((rel_dir, params))
+
+                # When reps are present we do *not* also add the parent
+                # timestamp directory as its own run; each rep is the
+                # conceptual run of interest.
+                continue
+
+            # No rep* dirs: fall back to single-run behaviour.
+            rp = os.path.join(ts_path, "runParameters.txt")
             if os.path.exists(rp):
                 params = parse_run_parameters(rp)
-                params["_dir"] = name
-                runs.append((name, params))
+                params["_dir"] = ts_name
+                runs.append((ts_name, params))
     except Exception:
+        # Keep the viewer resilient to unexpected filesystem issues.
         pass
+
     runs.sort(key=lambda t: t[0])
     return runs
 
@@ -160,7 +243,13 @@ def _to_dataframe_dicts(runs: List[Dict[str, Any]], exclude_keys: List[str]) -> 
     for r in runs:
         row: Dict[str, Any] = {k: v for k, v in r.items() if k not in exclude_keys}
         # Always include identifying columns at front
-        row = {"run": r.get("_dir"), "run_timestamp": r.get("run_timestamp")} | row
+        # Prefer the logical timestamp identifier ("_ts") when present so
+        # that comparison tables and selectors operate at the timestamp level
+        # rather than on individual rep subdirectories.
+        row = {
+            "run": r.get("_ts") or r.get("_dir"),
+            "run_timestamp": r.get("run_timestamp"),
+        } | row
         rows.append(row)
     return rows
 
@@ -189,7 +278,25 @@ def _run_as_script():
     base_dir = st.sidebar.text_input("Base data directory", value=(win_default if os.path.isdir(win_default) else default_base))
 
     runs = scan_runs(base_dir)
-    run_names = [name for name, _ in runs]
+
+    # Group discovered runs by their timestamp directory so that the UI can
+    # present a single entry per timestamp (e.g. "20251124_031117") even when
+    # multiple rep* sub‑runs exist underneath it. Charts and stock simulation
+    # views can still fan out to all reps within a selected timestamp.
+    ts_to_runs: Dict[str, List[Tuple[str, Dict[str, Any]]]] = {}
+    for name, params in runs:
+        # Prefer an explicit _ts key if scan_runs provided one; otherwise,
+        # derive it from the run directory path or fall back to the raw name.
+        ts_name = params.get("_ts")
+        if not ts_name:
+            dname = params.get("_dir") or name
+            parts = str(dname).split("/")
+            ts_name = parts[0] if parts else str(dname)
+        ts_to_runs.setdefault(str(ts_name), []).append((name, params))
+
+    # Use sorted timestamp keys for deterministic, roughly chronological
+    # ordering in the sidebar selectors and comparison table.
+    timestamp_names: List[str] = sorted(ts_to_runs.keys())
 
     st.title("Compare Training Runs")
     st.caption("Scan a data folder of timestamped run directories and compare run parameters.")
@@ -217,7 +324,9 @@ def _run_as_script():
     selected_set = set()
     # Selection controls (always visible)
     st.sidebar.subheader("Select runs")
-    options_list = ["(none)"] + run_names
+    # Only show top‑level timestamp directories in the selection UI; rep
+    # subdirectories are still used internally for charting and simulation.
+    options_list = ["(none)"] + timestamp_names
     # Safely compute indices from persisted values; fallback to (none) if value no longer available
     cur_start = st.session_state.get("start_run_sel", "(none)")
     if cur_start not in options_list:
@@ -239,12 +348,12 @@ def _run_as_script():
         key="end_run_sel",
     )
     if start != "(none)" and end != "(none)":
-        i0 = run_names.index(start)
-        i1 = run_names.index(end)
+        i0 = timestamp_names.index(start)
+        i1 = timestamp_names.index(end)
         if i0 > i1:
             i0, i1 = i1, i0
         for i in range(i0, i1 + 1):
-            selected_set.add(run_names[i])
+            selected_set.add(timestamp_names[i])
 
     # Multiselect for fine-grained control. We persist the user's multiselect
     # choices in session_state so they are restored across reruns.
@@ -265,10 +374,10 @@ def _run_as_script():
 
     ms_default = st.session_state.get(sidebar_ms_key, sorted(selected_set))
     # Ensure the default only contains valid current options
-    ms_default = [m for m in ms_default if m in run_names]
+    ms_default = [m for m in ms_default if m in timestamp_names]
     multi = st.sidebar.multiselect(
         "Or pick specific runs",
-        options=run_names,
+        options=timestamp_names,
         default=ms_default,
         key=sidebar_ms_key,
     )
@@ -278,11 +387,30 @@ def _run_as_script():
     if not selected_set:
         st.info("Tip: Select rows in the grid below or use the sidebar pickers.")
 
-    # Prepare selected runs list of dicts in chronological order
+    # Prepare selected timestamp "run" entries for the comparison table.
+    # For each selected timestamp, we collapse its underlying reps to their
+    # common parameters so that the table shows one logical row per
+    # timestamp directory while charts can still expand to all reps.
     selected_params: List[Dict[str, Any]] = []
-    for name, params in runs:
-        if name in selected_set:
-            selected_params.append(params)
+    for ts_name in timestamp_names:
+        if ts_name not in selected_set:
+            continue
+
+        run_list = ts_to_runs.get(ts_name, [])
+        if not run_list:
+            continue
+
+        run_params = [p for _, p in run_list]
+        common = _compute_common_params(run_params)
+        # Record the logical timestamp identifier and a representative
+        # directory path for downstream consumers.
+        row_params: Dict[str, Any] = dict(common)
+        row_params["_ts"] = ts_name
+        # Keep a representative _dir so existing logic that expects it as a
+        # filesystem path (e.g. for metrics/CSV loading) can still function
+        # when operating on a single run.
+        row_params.setdefault("_dir", run_list[0][0])
+        selected_params.append(row_params)
 
     # Compute common vs varying
     common = _compute_common_params(selected_params)
@@ -415,12 +543,6 @@ def _run_as_script():
         st.session_state[ss_key_rows] = curr_rows
         st.session_state[ss_key_runs] = curr_runs
 
-        # Explicit debug message required by the issue description.
-        debug(
-            "Grid selection changed: rows=%s runs=%s",
-            curr_rows,
-            curr_runs,
-        )
 
         # Whenever the grid selection changes, update the set of runs that the
         # metrics viewer at the bottom should focus on.  We do this via
@@ -433,14 +555,6 @@ def _run_as_script():
         # so keeping this value in sync here is enough to drive which charts
         # are displayed.
         st.session_state["last_grid_selection"] = curr_runs
-    else:
-        # Still log the current selection to aid debugging, but clarify that
-        # it did not change w.r.t. the previous rerun.
-        debug(
-            "Grid selection unchanged: rows=%s runs=%s",
-            curr_rows,
-            curr_runs,
-        )
 
     # No in-grid selection; rely on sidebar-selected_set and last_grid_selection
     # for determining which runs to visualize.
@@ -483,6 +597,7 @@ def _run_as_script():
         "+N more".
         """
         ts = params.get("run_timestamp") or params.get("_dir") or ""
+        is_ensemble = bool(params.get("_is_ensemble"))
 
         def _short_val(v: Any) -> str:
             try:
@@ -510,17 +625,36 @@ def _run_as_script():
             parts.append(f"{k}={_short_val(v)}")
 
         suffix = ("-" + ", ".join(parts)) if parts else ""
-        return f"{ts}{suffix}"
 
-    def _viewer_panel(run_names_to_show: List[str]):
+        title = f"{ts}{suffix}"
+        # Make ensemble runs visually distinct in charts so they can be
+        # easily identified next to individual reps.
+        if is_ensemble:
+            title += " [ensemble]"
+        return title
+
+    def _viewer_panel(selected_timestamps: List[str]):
+        """Render the metrics and stock simulation viewer.
+
+        The selection coming into this panel is expressed purely in terms of
+        timestamp directory names (e.g. "20251124_031117").  For each
+        timestamp we expand to all underlying rep* runs using *ts_to_runs* so
+        that charts still reflect every repetition even though the UI only
+        exposes timestamp-level entries.
+        """
+
         st.header("Metrics viewer")
-        if not run_names_to_show:
+        if not selected_timestamps:
             st.info("No runs selected for viewing yet. Use the sidebar or the grid above to pick some runs.")
             return
-        # Collect params for selected runs in order
+
+        # Collect params for all reps belonging to the selected timestamps,
+        # preserving the timestamp ordering and the per-timestamp rep
+        # ordering inside each group.
         chosen_params: List[Dict[str, Any]] = []
-        for name, params in runs:
-            if name in run_names_to_show:
+        for ts_name in selected_timestamps:
+            run_list = ts_to_runs.get(str(ts_name), [])
+            for _name, params in run_list:
                 chosen_params.append(params)
         # Diff keys for titles
         common_local = _compute_common_params(chosen_params)
@@ -699,7 +833,7 @@ def _run_as_script():
                 )
                 if log_y:
                     fig.update_yaxes(type="log")
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width='stretch')
                 return
             except Exception:
                 pass
@@ -965,31 +1099,166 @@ def _run_as_script():
                     except Exception:
                         _plot_lines(plot_df, x_enc, height=260)
 
-        # --- Stock simulation viewer (stock_simulation_10.csv) ---
+        # --- Stock simulation viewer (stock_simulation_*.csv) ---
         # This section is rendered *under* the standard metrics charts and is
-        # handled independently: it looks for a stock_simulation_10.csv in
-        # each selected run directory and plots any columns containing
-        # "_top" in their name on dedicated charts.
+        # handled independently: it looks for a stock_simulation_<N>.csv in
+        # each selected run directory (for any integer N) and plots any
+        # columns containing "_top" in their name on dedicated charts.
 
-        st.subheader("Stock simulation (stock_simulation_10.csv)")
+        st.subheader("Stock simulation (stock_simulation_*.csv)")
 
-        # Locate and load stock_simulation_10.csv for each selected run.
+        # Locate and load stock_simulation_<N>.csv for each selected run. If
+        # multiple files exist we prefer the one with the highest <N>.
+        #
+        # In addition, when the selected run corresponds to a ``rep*``
+        # directory underneath a timestamp directory (e.g.
+        # ``20251123_233753/rep1``), we also look for an "ensemble" stock
+        # simulation CSV directly under the timestamp directory itself. This
+        # file represents the aggregate/ensemble simulation across all reps
+        # and should be plotted *before* the individual reps.
         sim_dfs: List[Tuple[Dict[str, Any], Any]] = []
         all_top_cols: List[str] = []
+
+        # Detect and load ensemble stock_simulation_* files that live directly
+        # in timestamp directories.  We key them by the timestamp string so we
+        # can insert them ahead of the corresponding rep runs below.
+        ensemble_per_ts: Dict[str, Any] = {}
+        try:
+            import pandas as pd  # type: ignore
+
+            for name, params in runs:
+                dname = params.get("_dir")
+                if not dname:
+                    continue
+
+                # We are only interested in rep-style runs here:
+                #   <timestamp>/repN
+                parts = str(dname).split("/")
+                if len(parts) != 2:
+                    continue
+                ts_name, rep_name = parts
+                if not rep_name.lower().startswith("rep"):
+                    continue
+
+                # Only consider timestamps that the user has actually
+                # selected via *chosen_params*.
+                if not any(p.get("_dir", "").startswith(ts_name + "/") for p in chosen_params):
+                    continue
+
+                if ts_name in ensemble_per_ts:
+                    # Already processed this timestamp.
+                    continue
+
+                ts_path = os.path.join(base_dir, ts_name)
+                if not os.path.isdir(ts_path):
+                    continue
+
+                best_csv_path = None
+                best_idx = None
+                try:
+                    for fname in os.listdir(ts_path):
+                        # Support both plain and ensemble-style filenames at the
+                        # timestamp level, e.g.:
+                        #   stock_simulation_10.csv
+                        #   stock_simulation_ensemble_10.csv
+                        # We treat them the same here and simply prefer the
+                        # highest numeric suffix.
+                        m = re.match(r"stock_simulation_(?:ensemble_)?(\d+)\.csv$", fname)
+                        if not m:
+                            continue
+                        idx = int(m.group(1))
+                        if best_idx is None or idx > best_idx:
+                            best_idx = idx
+                            best_csv_path = os.path.join(ts_path, fname)
+                except FileNotFoundError:
+                    best_csv_path = None
+
+                if not best_csv_path or not os.path.exists(best_csv_path):
+                    continue
+
+                try:
+                    dfs_ens = pd.read_csv(best_csv_path)
+                except Exception:
+                    dfs_ens = None
+
+                ensemble_per_ts[ts_name] = dfs_ens
+
+                # Collect *_top columns from this ensemble file as well so
+                # they are available to the checkbox UI even if a particular
+                # rep is missing some of them.
+                if dfs_ens is not None:
+                    try:
+                        num_cols = [
+                            c
+                            for c in dfs_ens.columns
+                            if isinstance(c, str)
+                            and "_top" in c
+                            and dfs_ens[c].dtype.kind in "if"
+                        ]
+                    except Exception:
+                        num_cols = [c for c in dfs_ens.columns if isinstance(c, str) and "_top" in c]
+                    for c in num_cols:
+                        if c not in all_top_cols:
+                            all_top_cols.append(c)
+        except Exception:
+            # If anything goes wrong while looking for ensemble files, we
+            # silently fall back to the per-run behaviour below.
+            ensemble_per_ts = {}
+
+        # Now load the per-run stock_simulation CSVs, inserting an ensemble
+        # entry per timestamp *before* the corresponding reps.
         for p in chosen_params:
             dname = p.get("_dir")
             if not dname:
                 sim_dfs.append((p, None))
                 continue
-            run_path = os.path.join(base_dir, str(dname))
-            csv_path = os.path.join(run_path, "stock_simulation_10.csv")
-            if not os.path.exists(csv_path):
+
+            str_dname = str(dname)
+            parts = str_dname.split("/")
+            ts_name = parts[0] if parts else None
+
+            # If this is the *first* rep we encounter for a timestamp that has
+            # an ensemble CSV, insert a synthetic ensemble entry ahead of it.
+            if ts_name and ts_name in ensemble_per_ts and not any(
+                isinstance(prev_p.get("_is_ensemble"), bool) and prev_p.get("_is_ensemble") and prev_p.get("_timestamp") == ts_name
+                for prev_p, _ in sim_dfs
+            ):
+                ens_params = {k: v for k, v in p.items() if not k.startswith("_")}
+                ens_params["_dir"] = ts_name  # logical location
+                ens_params["_is_ensemble"] = True
+                ens_params["_timestamp"] = ts_name
+                # Make it obvious in the title that this line is the
+                # ensemble/aggregate across reps.
+                ens_params.setdefault("rep", "ensemble")
+
+                sim_dfs.append((ens_params, ensemble_per_ts.get(ts_name)))
+
+            run_path = os.path.join(base_dir, str_dname)
+            # Find matching stock_simulation_<N>.csv files and pick the one
+            # with the largest integer suffix. This keeps behaviour stable for
+            # existing stock_simulation_10.csv files while allowing other
+            # indices.
+            best_csv_path = None
+            best_idx = None
+            try:
+                for fname in os.listdir(run_path):
+                    m = re.match(r"stock_simulation_(\d+)\.csv$", fname)
+                    if not m:
+                        continue
+                    idx = int(m.group(1))
+                    if best_idx is None or idx > best_idx:
+                        best_idx = idx
+                        best_csv_path = os.path.join(run_path, fname)
+            except FileNotFoundError:
+                best_csv_path = None
+
+            if not best_csv_path or not os.path.exists(best_csv_path):
                 sim_dfs.append((p, None))
                 continue
             try:
                 import pandas as pd  # type: ignore
 
-                dfs = pd.read_csv(csv_path)
+                dfs = pd.read_csv(best_csv_path)
             except Exception:
                 dfs = None
             sim_dfs.append((p, dfs))
@@ -1010,11 +1279,11 @@ def _run_as_script():
                         all_top_cols.append(c)
 
         if not any(df is not None for _, df in sim_dfs):
-            st.caption("No stock_simulation_10.csv files found for the currently selected runs.")
+            st.caption("No stock_simulation_*.csv files found for the currently selected runs.")
             return
 
         if not all_top_cols:
-            st.caption("No *_top columns found in stock_simulation_10.csv for the currently selected runs.")
+            st.caption("No *_top columns found in stock_simulation_*.csv for the currently selected runs.")
             return
 
         # Independent control for combining all *_top curves on a single chart.
@@ -1078,7 +1347,7 @@ def _run_as_script():
                     xaxis_title=x_name,
                     yaxis_title="portfolio value",
                 )
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width='stretch')
                 return
             except Exception:
                 pass
@@ -1116,13 +1385,13 @@ def _run_as_script():
             st.markdown(f"**{title}**")
 
             if dfs is None or dfs.empty:
-                st.caption("No stock_simulation_10.csv data for this run.")
+                st.caption("No stock_simulation_*.csv data for this run.")
                 continue
 
             # Restrict to desired *_top columns
             cols_here = [c for c in all_top_cols if c in dfs.columns]
             if not cols_here:
-                st.caption("No *_top columns found in stock_simulation_10.csv for this run.")
+                st.caption("No *_top columns found in stock_simulation_*.csv for this run.")
                 continue
 
             if preferred_sim_x in dfs.columns:
@@ -1142,8 +1411,9 @@ def _run_as_script():
     fdf.to_csv(csv_buf, index=False)
     st.download_button("Download CSV", data=csv_buf.getvalue(), file_name="run_params_comparison.csv", mime="text/csv")
 
-    # Determine which runs to show in the viewer: prefer current grid selection,
-    # then fall back to last_grid_selection, then sidebar-based selection.
+    # Determine which timestamps to show in the viewer: prefer current grid
+    # selection, then fall back to last_grid_selection, then sidebar-based
+    # selection.
     runs_for_view: List[str] = []
     if selected_current:
         runs_for_view = list(dict.fromkeys(str(r) for r in selected_current))
