@@ -78,7 +78,7 @@ def eval_epoch(
 	rank_upper: int = 10,
 	compute_rank_err: bool = True,
 	compute_rank_disp: bool = True,
-) -> Tuple[float, float, float, float]:
+) -> Tuple[float, float, float]:
 	model.eval()
 	total = 0
 	mse_sum = 0.0
@@ -88,7 +88,7 @@ def eval_epoch(
 		torch.amp.autocast('cuda', dtype=amp_dtype) if (amp_enabled and device.type == "cuda") else nullcontext()  # type: ignore[attr-defined]
 	)
 	rde_sum = 0.0
-	rank_err_sum = 0.0
+	#rank_err_sum = 0.0
 	with torch.no_grad():
 		with amp_cm:
 			for xb, yb in batch_iter:
@@ -116,11 +116,11 @@ def eval_epoch(
 				mse_sum += mse.item() * bs
 				top10_sum += top10.item() * bs
 				rde_sum += (rde.item() if compute_rank_disp else 0.0) * bs
-				rank_err_sum += batch_rank_err * bs
+				#rank_err_sum += batch_rank_err * bs
 	denom = max(1, total)
 	rde_avg = rde_sum / denom
-	rank_err_avg = rank_err_sum / denom
-	return mse_sum / denom, top10_sum / denom, rde_avg, rank_err_avg
+	#rank_err_avg = rank_err_sum / denom
+	return mse_sum / denom, top10_sum / denom, rde_avg # , rank_err_avg
 
 
 __all__ = [

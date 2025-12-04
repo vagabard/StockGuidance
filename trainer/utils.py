@@ -73,8 +73,8 @@ def open_metrics_writer(metrics_file: str) -> Tuple[object, csv.writer]:
         "val_top10_mse",
         # "train_bottom10_mse",
         # "val_bottom10_mse",
-        "train_rank_err",
-        "val_rank_err",
+        #"train_rank_err",
+        #"val_rank_err",
     ]
     writer.writerow(header)
     return f, writer

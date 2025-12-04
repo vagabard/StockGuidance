@@ -1,41 +1,15 @@
-import os
-import re
 import io
 import json
-import sys
-from datetime import datetime
-from typing import Dict, List, Any, Tuple
+import os
+import re
 from math import ceil, sqrt
+from typing import Dict, List, Any, Tuple
 
-
-def debug(msg: str, *args: Any, **kwargs: Any) -> None:
-    """Lightweight debug logger for this module.
-
-    Usage:
-        debug("Loaded %d runs from %s", n_runs, base_dir)
-
-    Behaviour:
-    - Prefixes messages with a timestamp.
-    - Formats the message with standard %-style arguments (like printf).
-    - Writes to stderr so it shows up in the Streamlit/terminal logs.
-    - Controlled by the CRV_DEBUG environment variable:
-        - If CRV_DEBUG is unset or "0", messages are suppressed.
-        - Any other value enables debug output.
-    """
-
-    # Cheap on the fast path when debugging is off
-#    if os.environ.get("CRV_DEBUG", "0") in ("0", "", "false", "False", "no", "NO"):
-#        return
-
-    try:
-        if args or kwargs:
-            msg = msg % args if args else msg.format(**kwargs)
-    except Exception:
-        # If formatting fails, fall back to the raw message and arguments
-        msg = f"{msg} | args={args!r} kwargs={kwargs!r}"
-
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"\n\nDEBUGGING  [{ts}] {msg}", file=sys.stderr, flush=True)
+from compare_runs_shared import (
+	build_run_families,
+	compute_selected_timestamps,
+	group_runs_by_timestamp,
+)
 
 
 def _is_timestamp_dir(name: str) -> bool:
@@ -283,20 +257,20 @@ def _run_as_script():
     # present a single entry per timestamp (e.g. "20251124_031117") even when
     # multiple rep* sub‑runs exist underneath it. Charts and stock simulation
     # views can still fan out to all reps within a selected timestamp.
-    ts_to_runs: Dict[str, List[Tuple[str, Dict[str, Any]]]] = {}
-    for name, params in runs:
-        # Prefer an explicit _ts key if scan_runs provided one; otherwise,
-        # derive it from the run directory path or fall back to the raw name.
-        ts_name = params.get("_ts")
-        if not ts_name:
-            dname = params.get("_dir") or name
-            parts = str(dname).split("/")
-            ts_name = parts[0] if parts else str(dname)
-        ts_to_runs.setdefault(str(ts_name), []).append((name, params))
+    ts_to_runs = group_runs_by_timestamp(runs)
 
-    # Use sorted timestamp keys for deterministic, roughly chronological
-    # ordering in the sidebar selectors and comparison table.
-    timestamp_names: List[str] = sorted(ts_to_runs.keys())
+    # Use timestamp keys sorted so that the most recent runs appear first.
+    # Since the directories are named using a ``YYYYMMDD_HHMMSS`` pattern,
+    # simple reverse lexicographical ordering corresponds to descending
+    # chronological order.
+    timestamp_names: List[str] = sorted(ts_to_runs.keys(), reverse=True)
+
+    # Derive "run families" based on the initial_run identifier so that
+    # compound runs (and harness-driven runs) can be grouped together.
+    # We only expose families that contain *multiple distinct parameter
+    # sets*; families whose only multiplicity comes from rep sub‑runs with
+    # identical parameters are filtered out.
+    family_to_ts, family_names = build_run_families(runs, require_multiple_param_sets=True)
 
     st.title("Compare Training Runs")
     st.caption("Scan a data folder of timestamped run directories and compare run parameters.")
@@ -310,12 +284,23 @@ def _run_as_script():
         st.session_state["start_run_sel"] = "(none)"
     if "end_run_sel" not in st.session_state:
         st.session_state["end_run_sel"] = "(none)"
+    # Persist Start/End run-family selections across reruns
+    if "start_family_sel" not in st.session_state:
+        st.session_state["start_family_sel"] = "(none)"
+    if "end_family_sel" not in st.session_state:
+        st.session_state["end_family_sel"] = "(none)"
     # Track the previous Start/End selections so we can detect when the
     # user changes the range and recompute the multiselect accordingly.
     if "last_start_run_sel" not in st.session_state:
         st.session_state["last_start_run_sel"] = st.session_state["start_run_sel"]
     if "last_end_run_sel" not in st.session_state:
         st.session_state["last_end_run_sel"] = st.session_state["end_run_sel"]
+    # Likewise track the last run-family selections so that changing the
+    # family range also recomputes the sidebar multiselect.
+    if "last_start_family_sel" not in st.session_state:
+        st.session_state["last_start_family_sel"] = st.session_state["start_family_sel"]
+    if "last_end_family_sel" not in st.session_state:
+        st.session_state["last_end_family_sel"] = st.session_state["end_family_sel"]
 
     if not runs:
         st.info("No runs found. Ensure the directory contains subfolders like YYYYMMDD_HHMMSS with a runParameters.txt inside.")
@@ -323,6 +308,13 @@ def _run_as_script():
 
     selected_set = set()
     # Selection controls (always visible)
+    # Provide a lightweight way to rescan the base directory for new
+    # timestamped run folders without restarting the Streamlit app.
+    #
+    # Clicking this button triggers a rerun, which causes `scan_runs`
+    # to execute again with the current *base_dir* value and refreshes
+    # the Start/End selectors with any newly discovered runs.
+    st.sidebar.button("Refresh runs list")
     st.sidebar.subheader("Select runs")
     # Only show top‑level timestamp directories in the selection UI; rep
     # subdirectories are still used internally for charting and simulation.
@@ -347,30 +339,71 @@ def _run_as_script():
         index=options_list.index(cur_end),
         key="end_run_sel",
     )
-    if start != "(none)" and end != "(none)":
-        i0 = timestamp_names.index(start)
-        i1 = timestamp_names.index(end)
-        if i0 > i1:
-            i0, i1 = i1, i0
-        for i in range(i0, i1 + 1):
-            selected_set.add(timestamp_names[i])
+
+    # New: run-family selection based on initial_run identifiers
+    family_options = ["(none)"] + family_names
+    cur_fam_start = st.session_state.get("start_family_sel", "(none)")
+    if cur_fam_start not in family_options:
+        cur_fam_start = "(none)"
+    cur_fam_end = st.session_state.get("end_family_sel", "(none)")
+    if cur_fam_end not in family_options:
+        cur_fam_end = "(none)"
+
+    start_family = st.sidebar.selectbox(
+        "Start run family",
+        options=family_options,
+        index=family_options.index(cur_fam_start),
+        key="start_family_sel",
+    )
+    end_family = st.sidebar.selectbox(
+        "End run family",
+        options=family_options,
+        index=family_options.index(cur_fam_end),
+        key="end_family_sel",
+    )
+
+    # Determine which timestamps are selected by the sidebar range controls.
+    # If the Start/End *run* boxes are both set, they define the range.
+    # Otherwise, if the Start/End *run family* boxes are both set, they
+    # define the range by expanding families to their member timestamps.
+    # Expand the Start/End run and run‑family selections into a concrete
+    # list of timestamp identifiers using the shared helper so behaviour is
+    # consistent across viewers.
+    range_ts = compute_selected_timestamps(
+        start,
+        end,
+        start_family,
+        end_family,
+        timestamp_names,
+        family_names,
+        family_to_ts,
+    )
+
+    # Seed the selected timestamp set from the range (if present). The
+    # multiselect below can further refine this.
+    for ts in range_ts:
+        selected_set.add(ts)
 
     # Multiselect for fine-grained control. We persist the user's multiselect
     # choices in session_state so they are restored across reruns.
     # Start from either the stored multiselect or the range-derived default.
     sidebar_ms_key = "sidebar_multiselect"
 
-    # If the Start/End range changed since the last run, recompute the
-    # multiselect selection from the new range so that all dependent
-    # fields (diff keys, metrics, etc.) update consistently.
+    # If the Start/End range (run or family) changed since the last run,
+    # recompute the multiselect selection from the new range so that all
+    # dependent fields (diff keys, metrics, etc.) update consistently.
     if (
         st.session_state.get("last_start_run_sel") != start
         or st.session_state.get("last_end_run_sel") != end
+        or st.session_state.get("last_start_family_sel") != start_family
+        or st.session_state.get("last_end_family_sel") != end_family
     ):
         st.session_state[sidebar_ms_key] = sorted(selected_set)
     # Update the "last_*" trackers for the next rerun.
     st.session_state["last_start_run_sel"] = start
     st.session_state["last_end_run_sel"] = end
+    st.session_state["last_start_family_sel"] = start_family
+    st.session_state["last_end_family_sel"] = end_family
 
     ms_default = st.session_state.get(sidebar_ms_key, sorted(selected_set))
     # Ensure the default only contains valid current options
@@ -1160,10 +1193,15 @@ def _run_as_script():
                         # Support both plain and ensemble-style filenames at the
                         # timestamp level, e.g.:
                         #   stock_simulation_10.csv
+                        #   stock_simulation_10d.csv
+                        #   stock_simulation_10p.csv
                         #   stock_simulation_ensemble_10.csv
+                        #   stock_simulation_ensemble_10d.csv
+                        #   stock_simulation_ensemble_10p.csv
                         # We treat them the same here and simply prefer the
-                        # highest numeric suffix.
-                        m = re.match(r"stock_simulation_(?:ensemble_)?(\d+)\.csv$", fname)
+                        # highest numeric suffix, ignoring the trailing d/p
+                        # variant.
+                        m = re.match(r"stock_simulation_(?:ensemble_)?(\d+)([dp])?\.csv$", fname)
                         if not m:
                             continue
                         idx = int(m.group(1))
@@ -1234,15 +1272,15 @@ def _run_as_script():
                 sim_dfs.append((ens_params, ensemble_per_ts.get(ts_name)))
 
             run_path = os.path.join(base_dir, str_dname)
-            # Find matching stock_simulation_<N>.csv files and pick the one
+            # Find matching stock_simulation_<N>[d|p].csv files and pick the one
             # with the largest integer suffix. This keeps behaviour stable for
             # existing stock_simulation_10.csv files while allowing other
-            # indices.
+            # indices and the new d/p suffix variants.
             best_csv_path = None
             best_idx = None
             try:
                 for fname in os.listdir(run_path):
-                    m = re.match(r"stock_simulation_(\d+)\.csv$", fname)
+                    m = re.match(r"stock_simulation_(\d+)([dp])?\.csv$", fname)
                     if not m:
                         continue
                     idx = int(m.group(1))
@@ -1285,6 +1323,27 @@ def _run_as_script():
         if not all_top_cols:
             st.caption("No *_top columns found in stock_simulation_*.csv for the currently selected runs.")
             return
+
+        # Bin width for histograms of day-over-day change magnitudes in the
+        # stock simulation curves. Expressed as a ratio (e.g. 0.01 == 1%).
+        # Kept separate from the main metrics controls so it only affects the
+        # stock simulation section.
+        from math import ceil as _ceil  # local import to avoid impacting module globals
+
+        default_hist_bin_width = 0.01
+        hist_bin_width = st.number_input(
+            "Histogram bin width (ratio)",
+            min_value=0.001,
+            max_value=0.5,
+            value=float(st.session_state.get("stock_sim_hist_bin_width", default_hist_bin_width) or default_hist_bin_width),
+            step=0.001,
+            format="%.3f",
+            key="stock_sim_hist_bin_width",
+            help=(
+                "Width of each histogram bin expressed as a day-over-day change ratio. "
+                "For example, 0.01 groups changes in 1% increments by |ratio|."
+            ),
+        )
 
         # Independent control for combining all *_top curves on a single chart.
         sim_single_chart = st.checkbox(
@@ -1405,6 +1464,179 @@ def _run_as_script():
             # Reuse the generic plotting helper, but with a horizontal
             # reference line at 1000 as requested.
             _plot_lines(plot_df, x_enc, height=260, y_ref=1000.0)
+
+            # ------------------------------------------------------------------
+            # Histogram of day-over-day change magnitudes for this run.
+            #
+            # We interpret "change-in-price-over-day" as the ratio of
+            # consecutive portfolio values for each *_top column, i.e.:
+            #   ratio_t = (v_t / v_{t-1}) - 1
+            # and use |ratio_t| as the magnitude to be histogrammed.
+            # All magnitudes from the selected *_top series for this run are
+            # pooled into a single histogram.
+            # ------------------------------------------------------------------
+            try:
+                import numpy as _np  # type: ignore
+
+                magnitudes: list[float] = []
+                for col in cols_here:
+                    series = dfs[col].to_numpy(dtype=float)
+                    if series.size < 2:
+                        continue
+                    prev = series[:-1]
+                    curr = series[1:]
+                    with _np.errstate(divide="ignore", invalid="ignore"):
+                        ratio = curr / prev - 1.0
+                    ratio = _np.abs(ratio)
+                    # Drop NaN/inf values that may arise from zero or invalid
+                    # previous values.
+                    ratio = ratio[_np.isfinite(ratio)]
+                    if ratio.size:
+                        magnitudes.extend(ratio.tolist())
+
+                if not magnitudes:
+                    continue
+
+                mags = _np.asarray(magnitudes, dtype=float)
+                max_mag = float(_np.max(mags))
+                min_mag = 0.0
+
+                if max_mag <= 0.0 or hist_bin_width <= 0.0:
+                    continue
+
+                # Build bin edges using the configured window size.
+                # Ensure at least one bin even for very small ranges.
+                n_bins = max(1, int(_ceil((max_mag - min_mag) / float(hist_bin_width))))
+                edges = _np.linspace(min_mag, min_mag + n_bins * float(hist_bin_width), n_bins + 1)
+                counts, bin_edges = _np.histogram(mags, bins=edges)
+
+                # Representative x value for each bin: use the bin centre.
+                bin_centres = (bin_edges[:-1] + bin_edges[1:]) / 2.0
+
+                # Prefer Plotly for the histogram; fall back to Matplotlib if
+                # Plotly is not available.
+                try:
+                    import plotly.graph_objects as _go  # type: ignore
+
+                    fig_hist = _go.Figure()
+                    fig_hist.add_bar(x=bin_centres, y=counts, name="|day-over-day change ratio|")
+                    fig_hist.update_layout(
+                        height=220,
+                        margin=dict(l=10, r=10, t=10, b=10),
+                        xaxis_title="|change ratio| (day-over-day)",
+                        yaxis_title="frequency",
+                        showlegend=False,
+                    )
+                    st.plotly_chart(fig_hist, use_container_width=True)
+                except Exception:
+                    try:
+                        import matplotlib.pyplot as _plt  # type: ignore
+
+                        fig_hist, ax_hist = _plt.subplots(figsize=(7.0, 3.0))
+                        ax_hist.bar(bin_centres, counts, width=float(hist_bin_width) * 0.9)
+                        ax_hist.set_xlabel("|change ratio| (day-over-day)")
+                        ax_hist.set_ylabel("frequency")
+                        ax_hist.grid(True, alpha=0.3)
+                        st.pyplot(fig_hist, clear_figure=True)
+                    except Exception:
+                        # If all backends fail, silently skip the histogram so
+                        # at least the main line chart remains visible.
+                        pass
+            except Exception:
+                # Any failure in histogram computation/rendering should not
+                # break the main stock simulation charts.
+                pass
+
+        # ------------------------------------------------------------------
+        # Per-epoch stock simulation history for a *single* selected run.
+        #
+        # When exactly one logical run directory is selected we additionally
+        # look for files named
+        #   stock_simulation_<set_size>_epoch_<epoch>.csv
+        # inside that run directory. If present, we render a series of
+        # stacked charts (one per epoch file) at the very bottom of the
+        # viewer, ordered by epoch and clearly labelled.
+        # ------------------------------------------------------------------
+
+        # Only activate this section when there is a single underlying run
+        # directory in the current selection. This keeps behaviour for
+        # multi-run comparison unchanged, as requested.
+        unique_run_dirs = sorted({str(p.get("_dir")) for p in chosen_params if p.get("_dir")})
+        if len(unique_run_dirs) == 1:
+            import pandas as pd  # type: ignore
+
+            run_rel = unique_run_dirs[0]
+            run_path = os.path.join(base_dir, run_rel)
+            try:
+                fnames = os.listdir(run_path)
+            except Exception:
+                fnames = []
+
+            epoch_files: List[Tuple[int, int, str]] = []
+            # Match patterns like stock_simulation_5_epoch_10.csv
+            for fname in fnames:
+                m = re.match(r"stock_simulation_(\d+)_epoch_(\d+)\.csv$", fname)
+                if not m:
+                    continue
+                try:
+                    sim_set = int(m.group(1))
+                    epoch = int(m.group(2))
+                except Exception:
+                    continue
+                epoch_files.append((epoch, sim_set, os.path.join(run_path, fname)))
+
+            if epoch_files:
+                # Order charts by increasing epoch, then by simulate set size.
+                epoch_files.sort(key=lambda t: (t[0], t[1]))
+
+                st.subheader("Per-epoch stock simulation history")
+                st.caption(
+                    "Showing stock_simulation_<set_size>_epoch_<epoch>.csv files "
+                    "for the currently selected run."
+                )
+
+                for epoch, sim_set, fpath in epoch_files:
+                    try:
+                        dfs_epoch = pd.read_csv(fpath)
+                    except Exception:
+                        continue
+
+                    if dfs_epoch is None or dfs_epoch.empty:
+                        continue
+
+                    # Identify *_top numeric columns, as in the main
+                    # stock_simulation viewer above.
+                    try:
+                        cols_here_epoch = [
+                            c
+                            for c in dfs_epoch.columns
+                            if isinstance(c, str)
+                            and "_top" in c
+                            and dfs_epoch[c].dtype.kind in "if"
+                        ]
+                    except Exception:
+                        cols_here_epoch = [
+                            c
+                            for c in dfs_epoch.columns
+                            if isinstance(c, str) and "_top" in c
+                        ]
+
+                    if not cols_here_epoch:
+                        continue
+
+                    # Build plotting DataFrame and x-axis, reusing the same
+                    # convention as for the main stock simulation charts.
+                    if preferred_sim_x in dfs_epoch.columns:
+                        plot_df_epoch = dfs_epoch[[preferred_sim_x] + cols_here_epoch].copy()
+                        x_enc_epoch = preferred_sim_x
+                    else:
+                        plot_df_epoch = dfs_epoch[cols_here_epoch].copy()
+                        plot_df_epoch.insert(0, "index", range(len(plot_df_epoch)))
+                        x_enc_epoch = "index"
+
+                    # Label each chart clearly with the set size and epoch.
+                    st.markdown(f"**Simulation set {sim_set}, epoch {epoch}**")
+                    _plot_lines(plot_df_epoch, x_enc_epoch, height=260, y_ref=1000.0)
 
     # Download (from the filtered view, without helper columns)
     csv_buf = io.StringIO()

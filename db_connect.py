@@ -95,10 +95,10 @@ def get_connection(
             password=password,
 	        #unix_socket="MYSQL",
             port=port,
-            #autocommit=True,
+	        autocommit=True,
 	        #compress=True,
 	        buffered=True,
-	        raw=True,
+	        #raw=True,
 	        #ssl_disabled=True,
 
         )

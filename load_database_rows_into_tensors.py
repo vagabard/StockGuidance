@@ -116,9 +116,15 @@ def SELECT_VARIABLE_DATA_SQL(day_change_centered: str, current_day_change = Fals
 	elif day_change_centered == "gapped01":
 		additional_fields_to_select = "ddsd.next_day_price_change_to_extremes_0_1"
 	elif day_change_centered == "binary_labels":
-		additional_fields_to_select = "ddsd.next_day_price_change_to_extremes_0_1"
+		additional_fields_to_select = "ddsd.next_day_raise1_lower0"
 	elif day_change_centered == "top_100_binary_labels":
-		additional_fields_to_select = "ddsd.next_day_price_change_to_extremes_0_1"
+		additional_fields_to_select = "ddsd.next_day_top100_raise1_lower0"
+	elif day_change_centered == "gappednegpos":
+		additional_fields_to_select = "ddsd.zero_center_extremes_neg1_pos1"
+	elif day_change_centered == "binary_negpos":
+		additional_fields_to_select = "ddsd.zero_center_raise1_lower_neg1"
+	elif day_change_centered == "top_100_binary_negpos":
+		additional_fields_to_select = "ddsd.zero_center_top100_1_other_neg1"
 	else:
 		additional_fields_to_select = "ddsd.next_day_change_in_price"
 
@@ -218,19 +224,15 @@ ORDER BY ddsd.date_id ASC, ddsd.ticker_id ASC
 # 		keys = np.stack([np.array(date_ids, dtype=np.int32), np.array(ticker_ids, dtype=np.int32)], axis=1)
 # 		F = int(feature_count or (1 if close_ratio_only else 7))
 # 		features = np.asarray(feats, dtype=np.float64) if feats else np.empty((0, F), dtype=np.float64)
-# 		labels_np = np.asarray(labels, dtype=np.float64) if labels else np.empty((0,), dtype=np.float64)
-# 		# Save to cache file for future calls.
-# 		try:
-# 			np.savez(cache_file, keys=keys, features=features, labels=labels_np)
-# 		except Exception:
-# 			# Caching is a best-effort optimization; ignore failures.
-# 			pass
-# 		return keys, features, labels_np
-# 	finally:
-# 		try:
-# 			conn.close()
-# 		except Exception:
-# 			pass
+# 		# Legacy row-wise loader caching removed; kept here for reference only.
+# 		# labels_np = np.asarray(labels, dtype=np.float64) if labels else np.empty((0,), dtype=np.float64)
+# 		# try:
+# 		# 	np.savez(cache_file, keys=keys, features=features, labels=labels_np)
+# 		# except Exception:
+# 		# 	pass
+
+
+_DISK_GROUPED_CACHE_CLEARED_ONCE = False
 
 
 def fetch_grouped_by_date(
@@ -242,10 +244,10 @@ def fetch_grouped_by_date(
 	driver: str = "pymysql",
 	limit: Optional[int] = None,
 	return_2d: bool = False,
-	current_day_change = False,
-	volume_ratio = False,
-	vwap_ratio = False,
-	tranaction_ratio = False,
+	current_day_change: bool = False,
+	volume_ratio: bool = False,
+	vwap_ratio: bool = False,
+	tranaction_ratio: bool = False,
 	day_change_centered: str = "one",
 	end_percent_to_fetch: Optional[float] = None,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -258,25 +260,18 @@ def fetch_grouped_by_date(
 
 	Returns a tuple (dates, X, Y) where:
 	- dates: shape (D,) int32 with the ordered list of date_id values.
-	- X: if return_2d is False -> shape (D, T*F) float64 (flattened per-date); otherwise -> shape (D, T, F).
+	- X: if return_2d is False -> shape (D, T*F) float64 (flattened per-date);
+	  otherwise -> shape (D, T, F).
 	- Y: labels per (date, ticker): shape (D, T) with next_day_change_in_price values.
 
-	Notes:
-	- T is determined as max ticker_id observed in the fetched rows. If ticker_id values are dense
-	  starting from 1 (typical auto-increment IDs), the slots align perfectly to (ticker_id-1).
-	- F (features per ticker) is 7 for the full query, or 1 when close_ratio_only=True.
-
 	If end_percent_to_fetch is provided (e.g., 10.0), only the last that percent of
-	available date_id entries are kept, effectively selecting the most recent dates
-	(e.g., 10% keeps the last 10% of dates and drops the earlier 90%).
+	available date_id entries are kept, effectively selecting the most recent dates.
 	"""
-	# First, attempt to load from the cached NumPy file if it exists.
-	# This avoids hitting the database when the grouped-by-date data has already been fetched.
-	#
-	# Include the day_change_centered value and feature flags in the cache
-	# filename so that different configurations maintain separate cached
-	# files. Cache files are stored under a dedicated "cache" subdirectory
-	# next to this module.
+
+	global _DISK_GROUPED_CACHE_CLEARED_ONCE
+
+	# Build cache paths based on configuration so different feature sets keep
+	# separate cache files.
 	cache_base = (
 		f"group_by_date_{day_change_centered}_"
 		f"{'current_day_change' if current_day_change else ''}_"
@@ -287,8 +282,22 @@ def fetch_grouped_by_date(
 	cache_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache")
 	cache_file = os.path.join(cache_dir, cache_base)
 	legacy_cache_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), cache_base)
+
+	# On the first call in this Python process, delete any existing cache file so
+	# that this run always recomputes fresh data once before reusing the disk cache.
+	if not _DISK_GROUPED_CACHE_CLEARED_ONCE:
+		for path in (cache_file, legacy_cache_file):
+			try:
+				if os.path.exists(path):
+					os.remove(path)
+			except Exception:
+				# Best-effort: ignore failures deleting stale cache.
+				pass
+		_DISK_GROUPED_CACHE_CLEARED_ONCE = True
+
+	# Try to load from disk cache if it exists after the initial invalidation.
 	try:
-		load_path = None
+		load_path: Optional[str] = None
 		if os.path.exists(cache_file):
 			load_path = cache_file
 		elif os.path.exists(legacy_cache_file):
@@ -308,10 +317,23 @@ def fetch_grouped_by_date(
 		pass
 
 	print("Fetching rows from database... user= ", user, "")
-	conn = get_connection(host=host, database=database, user=user, password=password, port=port, driver=driver)
+	conn = get_connection(
+		host=host,
+		database=database,
+		user=user,
+		password=password,
+		port=port,
+		driver=driver,
+	)
 	try:
 		cur = conn.cursor()
-		sql = SELECT_VARIABLE_DATA_SQL(day_change_centered, current_day_change, volume_ratio, vwap_ratio, tranaction_ratio )
+		sql = SELECT_VARIABLE_DATA_SQL(
+			day_change_centered,
+			current_day_change,
+			volume_ratio,
+			vwap_ratio,
+			tranaction_ratio,
+		)
 		if limit is not None and limit > 0:
 			sql = f"{sql}\nLIMIT {int(limit)}"
 		cur.execute(sql)
@@ -326,14 +348,16 @@ def fetch_grouped_by_date(
 		for row in _iter_rows(cur):
 			ticker_id = int(row[0])
 			date_id = int(row[1])
-			# split features (7) and label (last)
+			# split features and label (last)
 			stock_feature_values = row[2:-1]
 			label_val = row[-1]
-			stock_data_fields_safe = [np.nan if v is None else float(v) for v in stock_feature_values]
+			stock_data_fields_safe = [
+				np.nan if v is None else float(v) for v in stock_feature_values
+			]
 			label_safe = np.nan if label_val is None else float(label_val)
 
 			if date_id not in date_to_index:
-				#first time encountering this date_id
+				# first time encountering this date_id
 				date_to_index[date_id] = len(dates_list)
 				dates_list.append(date_id)
 				rows_by_date[date_id] = []
@@ -357,18 +381,28 @@ def fetch_grouped_by_date(
 				keep = int(np.ceil(len(dates_list) * (pct / 100.0)))
 			# Slice to the last 'keep' dates
 			if keep > 0 and len(dates_list) > 0:
-				dates_list = dates_list[-max(1, keep):]
+				dates_list = dates_list[-max(1, keep) :]
 
 		Number_Of_dates_found = len(dates_list)
 		# feature width depends on selected SQL (add up the features)
-		Number_of_fields_per_ticker_symbol = 1 + current_day_change + volume_ratio + vwap_ratio + tranaction_ratio
+		Number_of_fields_per_ticker_symbol = (
+			1
+			+ int(bool(current_day_change))
+			+ int(bool(volume_ratio))
+			+ int(bool(vwap_ratio))
+			+ int(bool(tranaction_ratio))
+		)
 
 		# Determine T (max ticker slot) based only on the retained dates, to keep
 		# matrix sizes consistent with the selected window.
 		if Number_Of_dates_found > 0:
 			local_max_ticker = 0
 			for dt in dates_list:
-				for ticker_id, _stock_data_fields_safe, _label_safe in rows_by_date.get(dt, []):
+				for (
+					ticker_id,
+					_stock_data_fields_safe,
+					_label_safe,
+				) in rows_by_date.get(dt, []):
 					if ticker_id > local_max_ticker:
 						local_max_ticker = ticker_id
 			T = local_max_ticker
@@ -377,39 +411,51 @@ def fetch_grouped_by_date(
 
 		dates = np.array(dates_list, dtype=np.int32)
 		if return_2d:
-			X = np.full((Number_Of_dates_found, T, Number_of_fields_per_ticker_symbol), np.nan, dtype=np.float64)
+			X = np.full(
+				(Number_Of_dates_found, T, Number_of_fields_per_ticker_symbol),
+				np.nan,
+				dtype=np.float64,
+			)
 			Y = np.full((Number_Of_dates_found, T), np.nan, dtype=np.float64)
 			for d_idx, dt in enumerate(dates_list):
-				for ticker_id, stock_data_fields_safe, label_safe in rows_by_date.get(dt, []):
+				for (
+					ticker_id,
+					stock_data_fields_safe,
+					label_safe,
+				) in rows_by_date.get(dt, []):
 					t_idx = ticker_id - 1
 					if 0 <= t_idx < T:
 						X[d_idx, t_idx, :] = stock_data_fields_safe
 						Y[d_idx, t_idx] = label_safe
-			# Save to cache file for future calls.
-			try:
-				os.makedirs(cache_dir, exist_ok=True)
-				np.savez(cache_file, dates=dates, X=X, Y=Y)
-			except Exception:
-				# Caching is a best-effort optimization; ignore failures.
-				pass
-			return dates, X, Y
 		else:
-			X = np.full((Number_Of_dates_found, T * Number_of_fields_per_ticker_symbol), np.nan, dtype=np.float64)
+			X = np.full(
+				(Number_Of_dates_found, T * Number_of_fields_per_ticker_symbol),
+				np.nan,
+				dtype=np.float64,
+			)
 			Y = np.full((Number_Of_dates_found, T), np.nan, dtype=np.float64)
 			for d_idx, dt in enumerate(dates_list):
-				for ticker_id, stock_data_fields_safe, label_safe in rows_by_date.get(dt, []):
+				for (
+					ticker_id,
+					stock_data_fields_safe,
+					label_safe,
+				) in rows_by_date.get(dt, []):
 					base = (ticker_id - 1) * Number_of_fields_per_ticker_symbol
 					if 0 <= base < T * Number_of_fields_per_ticker_symbol:
-						X[d_idx, base:base + Number_of_fields_per_ticker_symbol] = stock_data_fields_safe
+						X[d_idx, base : base + Number_of_fields_per_ticker_symbol] = (
+							stock_data_fields_safe
+						)
 						Y[d_idx, ticker_id - 1] = label_safe
-			# Save to cache file for future calls.
-			try:
-				os.makedirs(cache_dir, exist_ok=True)
-				np.savez(cache_file, dates=dates, X=X, Y=Y)
-			except Exception:
-				# Caching is a best-effort optimization; ignore failures.
-				pass
-			return dates, X, Y
+
+		# Save to cache file for future processes.
+		try:
+			os.makedirs(cache_dir, exist_ok=True)
+			np.savez(cache_file, dates=dates, X=X, Y=Y)
+		except Exception:
+			# Caching is a best-effort optimization; ignore failures.
+			pass
+
+		return dates, X, Y
 	finally:
 		try:
 			conn.close()

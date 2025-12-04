@@ -60,6 +60,7 @@ import argparse
 import json
 import os
 import re
+from datetime import date, datetime
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
@@ -113,10 +114,10 @@ def ensure_schema(cursor) -> None:
 		CREATE TABLE IF NOT EXISTS raw_stock_data (
 			ticker_id INT NOT NULL,
 			date_id INT NOT NULL,
-			`open` DECIMAL(19,4) NULL,
+			open DECIMAL(19,4) NULL,
 			high DECIMAL(19,4) NULL,
-			`low` DECIMAL(19,4) NULL,
-			`close` DECIMAL(19,4) NULL,
+			low DECIMAL(19,4) NULL,
+			close DECIMAL(19,4) NULL,
 			volume BIGINT UNSIGNED NULL,
 			vwap DECIMAL(19,4) NULL,
 			transactions BIGINT NULL,
@@ -192,12 +193,33 @@ def batch_insert_raw_stock_data(cursor, rows: List[Tuple[int, int, Optional[Deci
 	if not rows:
 		return
 	sql = (
-		"INSERT INTO raw_stock_data (ticker_id, date_id, `open`, high, `low`, `close`, volume, vwap, transactions) "
-		"VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) "
-		"ON DUPLICATE KEY UPDATE `open`=VALUES(`open`), high=VALUES(high), `low`=VALUES(`low`), "
-		"`close`=VALUES(`close`), volume=VALUES(volume), vwap=VALUES(vwap), transactions=VALUES(transactions)"
+		f"INSERT INTO raw_stock_data (ticker_id, date_id, open, high, low, close, volume, vwap, transactions) "
+		f"VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+		f"ON DUPLICATE KEY UPDATE "
+		f"open=VALUES(open), "
+		f"high=VALUES(high), "
+		f"low=VALUES(low), "
+		f"close=VALUES(close), "
+		f"volume=VALUES(volume), "
+		f"vwap=VALUES(vwap), "
+		f"transactions=VALUES(transactions);"
 	)
-	cursor.executemany(sql, rows)
+	print(f"batch_insert_raw_stock_data: {len(rows)} rows")
+	print(f"sql is {sql}")
+	print(f"rows are {rows[0]}")
+	sql_return = cursor.executemany(sql, rows)
+
+	# Different drivers report affected rows differently.
+	# - PyMySQL: executemany() returns an int total affected rows.
+	# - mysql-connector: executemany() returns None; cursor.rowcount holds the
+	#   affected-row count for the *last* statement in the batch.
+	affected = sql_return
+	if affected is None:
+		affected = getattr(cursor, "rowcount", None)
+	if affected is None:
+		print(f"Warning: Could not determine affected-row count for {len(rows)} rows")
+	else:
+		print(f"Rows affected by batch insert: {affected}")
 
 
 def process_file(conn, cursor, path: Path, date_str: str, ticker_map: Dict[str, int]) -> Tuple[int, int, int]:
@@ -268,6 +290,14 @@ def parse_args(argv: Optional[List[str]] = None):
 	p.add_argument("--database", default="stockforecasting", help="Database/schema name (default: stockforecasting)")
 	p.add_argument("--driver", default="auto", choices=["auto", "mysqlconnector", "pymysql"], help="DB driver (default: auto)")
 	p.add_argument("--root", default=str(DEFAULT_ROOT), help="Root folder for market summary files (default: data/market_summary)")
+	p.add_argument(
+		"--start-date",
+		default=None,
+		help=(
+			"Optional ISO date (YYYY-MM-DD). If provided, only NDJSON files with "
+			"a date strictly more recent than this value will be processed."
+		),
+	)
 	p.add_argument("--limit", type=int, default=0, help="Limit number of files to process (0 = all)")
 	return p.parse_args(argv)
 
@@ -277,6 +307,26 @@ def main(argv: Optional[List[str]] = None) -> None:
 
 	root = Path(args.root)
 	files = discover_files(root)
+
+	# If a starting date is provided, restrict processing to files strictly
+	# after that calendar date.  This allows incremental backfills driven by
+	# the latest date already present in raw_stock_data.
+	if args.start_date:
+		try:
+			start_d = datetime.fromisoformat(args.start_date).date()
+		except ValueError:
+			raise SystemExit(f"Invalid --start-date value (expected YYYY-MM-DD): {args.start_date}")
+
+		filtered: List[Tuple[str, Path]] = []
+		for date_str, path in files:
+			try:
+				file_d = datetime.fromisoformat(date_str).date()
+			except ValueError:
+				# Filenames are discovered via DATE_FILE_RE, but be defensive.
+				continue
+			if file_d > start_d:
+				filtered.append((date_str, path))
+		files = filtered
 	if args.limit and args.limit > 0:
 		files = files[: args.limit]
 
@@ -312,6 +362,8 @@ def main(argv: Optional[List[str]] = None) -> None:
 			print(f"    Lines: {total_lines}, inserted/updated: {inserted}, skipped: {skipped}")
 
 		print(f"Done. Files: {total_files}, rows inserted/updated: {grand_total}, skipped: {grand_skipped}")
+	except Exception as e:
+		print(f"[ERROR] {e}")
 	finally:
 		try:
 			cursor.close()

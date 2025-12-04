@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import argparse
 import os
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Dict
 
 import numpy as np
 
@@ -32,16 +32,19 @@ from data_loading_shared import to_torch
 
 
 SELECT_SQL = (
-    """
+	"""
 SELECT
-    rsd.ticker_id,
-    rsd.date_id,
-    rsd.open,
-    rsd.close
+	rsd.ticker_id,
+	rsd.date_id,
+	rsd.open,
+	rsd.close
 FROM raw_stock_data rsd
 ORDER BY rsd.date_id ASC, rsd.ticker_id ASC
-    """
+	"""
 )
+
+
+_DISK_RAW_CACHE_CLEARED_ONCE: bool = False
 
 
 def fetch_as_numpy(
@@ -58,12 +61,13 @@ def fetch_as_numpy(
     keys: shape (N, 2) -> (date_id, ticker_id)
     features: shape (N, 2) -> (open, close)
 
-    Results are cached on disk under a ``cache`` subdirectory next to this
-    module. On subsequent calls with the same ``limit`` value, the cached
-    NumPy file is loaded instead of querying the database again. Caching is
-    a best-effort optimisation: any errors while reading or writing the cache
-    are silently ignored and the database is queried as a fallback.
+    Disk results are cached under a ``cache`` subdirectory next to this module.
+    On the first call in a given Python execution, any existing cache file for
+    the chosen configuration is deleted so that fresh DB data is loaded once.
+    Subsequent calls in the same process then reuse the on-disk cache.
     """
+
+    global _DISK_RAW_CACHE_CLEARED_ONCE
 
     # Build cache path in a dedicated "cache" subdirectory. We include the
     # ``limit`` value (when provided) in the filename so that partial-debug
@@ -73,6 +77,17 @@ def fetch_as_numpy(
     cache_name = f"raw_stock_data{suffix}.npz"
     cache_file = os.path.join(cache_dir, cache_name)
 
+    # On first call in this Python process, delete any existing cache file so
+    # that we recompute from the DB once.
+    if not _DISK_RAW_CACHE_CLEARED_ONCE:
+        try:
+            if os.path.exists(cache_file):
+                os.remove(cache_file)
+        except Exception:
+            # Best-effort: ignore failures deleting stale cache.
+            pass
+        _DISK_RAW_CACHE_CLEARED_ONCE = True
+
     try:
         if os.path.exists(cache_file):
             loaded = np.load(cache_file)
@@ -81,7 +96,14 @@ def fetch_as_numpy(
         # If anything goes wrong while loading the cache, fall back to DB.
         pass
 
-    conn = get_connection(host=host, database=database, user=user, password=password, port=port, driver=driver)
+    conn = get_connection(
+        host=host,
+        database=database,
+        user=user,
+        password=password,
+        port=port,
+        driver=driver,
+    )
     try:
         cur = conn.cursor()
         sql = SELECT_SQL
@@ -111,7 +133,11 @@ def fetch_as_numpy(
             if date_ids
             else np.empty((0, 2), dtype=np.int32)
         )
-        features = np.asarray(feats, dtype=np.float64) if feats else np.empty((0, 2), dtype=np.float64)
+        features = (
+            np.asarray(feats, dtype=np.float64)
+            if feats
+            else np.empty((0, 2), dtype=np.float64)
+        )
 
         # Save to cache file for future invocations. Ignore any failures.
         try:

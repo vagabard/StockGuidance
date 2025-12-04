@@ -1,0 +1,524 @@
+import os
+import re
+import json
+import sys
+from datetime import datetime
+from typing import Any, Dict, List, Tuple
+
+
+def debug(msg: str, *args: Any, **kwargs: Any) -> None:
+    """Lightweight debug logger shared by compare_*_viewer modules.
+
+    It is intentionally dependency‑free so it can be imported from both the
+    main compare_runs_viewer and any specialised viewers (such as the
+    statistics viewer added later).
+
+    The implementation mirrors the original helper that lived in
+    ``compare_runs_viewer.py``.
+    """
+
+    try:
+        if args or kwargs:
+            msg = msg % args if args else msg.format(**kwargs)
+    except Exception:
+        msg = f"{msg} | args={args!r} kwargs={kwargs!r}"
+
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"\n\nDEBUGGING  [{ts}] {msg}", file=sys.stderr, flush=True)
+
+
+def _is_timestamp_dir(name: str) -> bool:
+    """Return ``True`` if *name* looks like a YYYYMMDD_HHMMSS timestamp.
+
+    This helper is used by :func:`scan_runs` and therefore shared between the
+    different viewers.
+    """
+
+    return re.fullmatch(r"\d{8}_\d{6}", name or "") is not None
+
+
+def _safe_cast(value: str) -> Any:
+    """Best‑effort cast from a runParameters.txt value to a Python type.
+
+    The behaviour intentionally mirrors the original implementation in
+    ``compare_runs_viewer.py`` so that existing runs continue to parse
+    identically after this refactor.
+    """
+
+    s = (value or "").strip()
+    if s == "None":
+        return None
+    if s in ("True", "False"):
+        return s == "True"
+    try:
+        if s and not any(c in s for c in ".,[]{} "):
+            return int(s)
+    except Exception:
+        pass
+    try:
+        return float(s)
+    except Exception:
+        pass
+    try:
+        if s.startswith("[") and s.endswith("]"):
+            return json.loads(s)
+        if s.startswith("{") and s.endswith("}"):
+            return json.loads(s)
+    except Exception:
+        pass
+    if "," in s and "[" not in s and "]" not in s:
+        parts = [p.strip() for p in s.split(",") if p.strip() != ""]
+        casted = []
+        for p in parts:
+            casted.append(_safe_cast(p))
+        return casted
+    return s
+
+
+def parse_run_parameters(params_path: str) -> Dict[str, Any]:
+    """Parse a ``runParameters.txt`` file into a ``dict``.
+
+    The format is the one produced by the training scripts in this project
+    (header lines followed by indented ``key: value`` pairs).  Values are
+    passed through :func:`_safe_cast`.
+    """
+
+    data: Dict[str, Any] = {}
+    if not os.path.exists(params_path):
+        return data
+    try:
+        with open(params_path, "r", encoding="utf-8") as f:
+            lines = f.read().splitlines()
+        for line in lines:
+            if not line.strip():
+                continue
+            if line.startswith("Run Timestamp:"):
+                ts = line.split(":", 1)[1].strip()
+                data["run_timestamp"] = ts
+                continue
+            if line.startswith("Parameters:"):
+                continue
+            if ":" in line:
+                stripped = line.strip()
+                if ":" in stripped:
+                    k, v = stripped.split(":", 1)
+                    data[k.strip()] = _safe_cast(v.strip())
+    except Exception as e:  # pragma: no cover - defensive
+        data["_parse_error"] = str(e)
+    return data
+
+
+def scan_runs(base_dir: str) -> List[Tuple[str, Dict[str, Any]]]:
+    """Return ``(run_dir_name, params_dict)`` pairs discovered under *base_dir*.
+
+    This is the factored‑out version of the logic used by
+    ``compare_runs_viewer`` so that multiple viewers can share the same
+    filesystem convention:
+
+    * each timestamp directory (``YYYYMMDD_HHMMSS``) may contain ``rep*``
+      subdirectories, each with its own ``runParameters.txt``;
+    * if no ``rep*`` subdirectories are present, the timestamp directory
+      itself is treated as a single run.
+    """
+
+    runs: List[Tuple[str, Dict[str, Any]]] = []
+    if not os.path.isdir(base_dir):
+        return runs
+
+    try:
+        for ts_name in os.listdir(base_dir):
+            if not _is_timestamp_dir(ts_name):
+                continue
+
+            ts_path = os.path.join(base_dir, ts_name)
+            if not os.path.isdir(ts_path):
+                continue
+
+            try:
+                entries = os.listdir(ts_path)
+            except OSError:
+                continue
+
+            rep_subdirs = [
+                e
+                for e in entries
+                if e.lower().startswith("rep")
+                and os.path.isdir(os.path.join(ts_path, e))
+            ]
+
+            if rep_subdirs:
+                parent_rp = os.path.join(ts_path, "runParameters.txt")
+                parent_params: Dict[str, Any] | None = None
+                if os.path.exists(parent_rp):
+                    try:
+                        parent_params = parse_run_parameters(parent_rp)
+                    except Exception:  # pragma: no cover - defensive
+                        parent_params = None
+
+                for rep_name in sorted(rep_subdirs):
+                    rep_path = os.path.join(ts_path, rep_name)
+                    rp = os.path.join(rep_path, "runParameters.txt")
+
+                    if os.path.exists(rp):
+                        params = parse_run_parameters(rp)
+                    elif parent_params is not None:
+                        params = dict(parent_params)
+                    else:
+                        continue
+
+                    params["_dir"] = f"{ts_name}/{rep_name}"
+                    params.setdefault("_ts", ts_name)
+                    runs.append((f"{ts_name}/{rep_name}", params))
+            else:
+                rp = os.path.join(ts_path, "runParameters.txt")
+                if not os.path.exists(rp):
+                    continue
+                params = parse_run_parameters(rp)
+                params["_dir"] = ts_name
+                params.setdefault("_ts", ts_name)
+                runs.append((ts_name, params))
+    except Exception:  # pragma: no cover - robust against partial trees
+        return sorted(runs, key=lambda t: t[0])
+
+    return sorted(runs, key=lambda t: t[0])
+
+
+def compute_common_params(selected: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Return the subset of parameters that are identical across *selected*.
+
+    ``selected`` is expected to be a list of per‑run parameter dictionaries as
+    produced by :func:`scan_runs` / :func:`parse_run_parameters`.
+    """
+
+    if not selected:
+        return {}
+
+    # Work with the intersection of keys that are present in *all* runs so
+    # that we only ever label parameters as "common" when they are actually
+    # defined everywhere.
+    keys = set.intersection(*(set(r.keys()) for r in selected)) if selected else set()
+
+    common: Dict[str, Any] = {}
+    for k in keys:
+        # Values coming from ``runParameters.txt`` (and from derived
+        # statistics added by viewers) may be lists, dictionaries, or other
+        # unhashable types.  Using them directly in a ``set`` will raise
+        # ``TypeError: unhashable type``.  To robustly compare values across
+        # runs we therefore normalise each one into a JSON string
+        # representation, mirroring the approach used by the more advanced
+        # ``_compute_common_params`` helper in ``compare_runs_viewer.py``.
+        try:
+            serialised_vals = {
+                json.dumps(r.get(k), sort_keys=True, default=str) for r in selected
+            }
+        except TypeError:
+            # As a last‑ditch fallback, compare by ``str()`` conversion so we
+            # never blow up on exotic objects.
+            serialised_vals = {str(r.get(k)) for r in selected}
+
+        if len(serialised_vals) == 1:
+            # All runs agree on this parameter after normalisation; expose the
+            # original (un‑normalised) value from the first run so callers get
+            # back something that is convenient to display in the UI.
+            common[k] = selected[0].get(k)
+
+    return common
+
+
+def runs_to_dataframe_dicts(runs: List[Dict[str, Any]], exclude_keys: List[str]) -> List[Dict[str, Any]]:
+    """Convert parameter dictionaries to row dictionaries for ``pandas``.
+
+    This mirrors the behaviour of ``_to_dataframe_dicts`` in the original
+    viewer but lives here so multiple viewers can share the same table
+    representation.
+    """
+
+    rows: List[Dict[str, Any]] = []
+    for r in runs:
+        row: Dict[str, Any] = {k: v for k, v in r.items() if k not in exclude_keys}
+        row = {
+            "run": r.get("_ts") or r.get("_dir"),
+            "run_timestamp": r.get("run_timestamp"),
+        } | row
+        rows.append(row)
+    return rows
+
+
+def group_runs_by_timestamp(runs: List[Tuple[str, Dict[str, Any]]]) -> Dict[str, List[Tuple[str, Dict[str, Any]]]]:
+    """Group ``(run_name, params)`` pairs by their timestamp identifier.
+
+    The returned mapping is used by both viewers to drive sidebar selection
+    controls and to ensure that timestamp‑level operations (like selecting a
+    range of runs) behave consistently.
+    """
+
+    ts_to_runs: Dict[str, List[Tuple[str, Dict[str, Any]]]] = {}
+    for name, params in runs:
+        ts_name = params.get("_ts")
+        if not ts_name:
+            dname = params.get("_dir") or name
+            parts = str(dname).split("/")
+            ts_name = parts[0] if parts else str(dname)
+        ts_to_runs.setdefault(str(ts_name), []).append((name, params))
+    return ts_to_runs
+
+
+def build_timestamp_list(ts_to_runs: Dict[str, List[Tuple[str, Dict[str, Any]]]]) -> List[str]:
+    """Return timestamp keys ordered newest‑to‑oldest for UI drop‑downs.
+
+    Timestamp directories follow the ``YYYYMMDD_HHMMSS`` pattern, so a simple
+    reverse lexicographical sort yields descending chronological order.  This
+    ensures that Start/End selectors in viewers list the latest runs first.
+    """
+
+    return sorted(ts_to_runs.keys(), reverse=True)
+
+
+def compute_selected_timestamps(
+    start: str,
+    end: str,
+    start_family: str,
+    end_family: str,
+    timestamp_names: List[str],
+    family_names: List[str],
+    family_to_ts: Dict[str, List[str]],
+) -> List[str]:
+    """Expand Start/End run and run‑family selections into timestamps.
+
+    This helper encapsulates the common logic used by the Streamlit viewers
+    for interpreting the "Start run", "End run", "Start run family" and
+    "End run family" selectors.
+
+    Behaviour mirrors the original implementations:
+
+    * If both ``start`` and ``end`` are set to concrete timestamp names
+      (not ``"(none)"``), the inclusive range between them in
+      ``timestamp_names`` is returned.
+    * Otherwise, if both ``start_family`` and ``end_family`` are set (and
+      ``family_names`` is non‑empty), we expand the selected families into
+      their member timestamps using ``family_to_ts`` and return the
+      de‑duplicated list in selection order.
+    * If neither condition is met, an empty list is returned.
+    """
+
+    # First preference: explicit Start/End run range.
+    selected_ts: List[str] = []
+    if start != "(none)" and end != "(none)" and timestamp_names:
+        try:
+            i0 = timestamp_names.index(start)
+            i1 = timestamp_names.index(end)
+        except ValueError:
+            i0, i1 = 0, len(timestamp_names) - 1
+        if i0 > i1:
+            i0, i1 = i1, i0
+        selected_ts = timestamp_names[i0 : i1 + 1]
+
+    # Second preference: Start/End run‑family range, expanded to member
+    # timestamps when no explicit run range is configured.
+    if (not selected_ts) and start_family != "(none)" and end_family != "(none)" and family_names:
+        try:
+            fi0 = family_names.index(start_family)
+            fi1 = family_names.index(end_family)
+        except ValueError:
+            fi0, fi1 = 0, len(family_names) - 1
+        if fi0 > fi1:
+            fi0, fi1 = fi1, fi0
+        selected_families = family_names[fi0 : fi1 + 1]
+        seen_ts: set[str] = set()
+        expanded: List[str] = []
+        for fam in selected_families:
+            for ts_name in family_to_ts.get(fam, []):
+                if ts_name not in seen_ts:
+                    expanded.append(ts_name)
+                    seen_ts.add(ts_name)
+        selected_ts = expanded
+
+    return selected_ts
+
+
+def _normalise_family_params(params: Dict[str, Any]) -> str:
+    """Return a JSON normalised signature for *params* used in families.
+
+    The goal is to detect whether a given ``initial_run`` family truly
+    represents *multiple distinct parameter sets* or merely multiple
+    repetitions (``rep`` sub‑runs) of an identical configuration.
+
+    We therefore ignore purely metadata keys that should not contribute to
+    the logical hyper‑parameter identity, such as the run directory or
+    timestamp.  All remaining keys are serialised via ``json.dumps`` with a
+    stable ordering so that semantically equal dictionaries yield identical
+    signatures.
+    """
+
+    # Keys that are treated as metadata and not part of the logical
+    # hyper‑parameter set for a family.  ``initial_run`` itself is included
+    # here because it is used as the *identifier* for the family rather than
+    # a tunable parameter.
+    meta_keys = {"_dir", "_ts", "_parse_error", "run_timestamp", "initial_run"}
+
+    payload: Dict[str, Any] = {
+        k: v for k, v in params.items() if k not in meta_keys
+    }
+
+    try:
+        return json.dumps(payload, sort_keys=True, default=str)
+    except TypeError:
+        # Fall back to a lossy but robust representation that still groups
+        # runs with the same stringified parameters together.
+        return json.dumps({k: str(v) for k, v in payload.items()}, sort_keys=True)
+
+
+def build_run_families(
+    runs: List[Tuple[str, Dict[str, Any]]],
+    *,
+    require_multiple_param_sets: bool = True,
+) -> Tuple[Dict[str, List[str]], List[str]]:
+    """Group runs into *families* based on the ``initial_run`` identifier.
+
+    Parameters
+    ----------
+    runs:
+        List of ``(run_name, params)`` pairs as produced by :func:`scan_runs`.
+
+    require_multiple_param_sets:
+        When ``True`` (the default), only include families that exhibit more
+        than one distinct *parameter set* when looking at the underlying
+        ``runParameters`` contents.  This matches the behaviour requested for
+        the viewers' "Start run family" / "End run family" selectors: if the
+        only multiplicity within a family comes from simple ``rep`` sub‑runs
+        that share an identical configuration, that family is *excluded* from
+        the run‑family drop‑downs.
+
+    Returns
+    -------
+    family_to_ts, family_names
+        ``family_to_ts`` maps each family identifier (stringified
+        ``initial_run`` value or fallback timestamp/directory) to the list of
+        timestamp names that contain runs from that family.  ``family_names``
+        is a newest‑first list of the same identifiers, suitable for use as a
+        drop‑down options list.
+    """
+
+    # First build an unfiltered mapping from family id -> {timestamps,
+    # param_signatures}.  The family id is based on ``initial_run`` when
+    # present, otherwise a stable fallback to the logical timestamp name or
+    # directory.  We also track which families actually came from an
+    # explicit ``initial_run`` so that run‑family drop‑downs can ignore
+    # standalone runs that never participated in a compound family.
+    raw_family_to_ts: Dict[str, List[str]] = {}
+    family_param_sigs: Dict[str, set[str]] = {}
+    families_with_explicit_initial: set[str] = set()
+
+    for name, params in runs:
+        explicit_initial = params.get("initial_run")
+        fam_id = explicit_initial
+        if not fam_id:
+            fam_id = params.get("_ts") or params.get("_dir") or name
+
+        ts_name = params.get("_ts")
+        if not ts_name:
+            dname = params.get("_dir") or name
+            parts = str(dname).split("/")
+            ts_name = parts[0] if parts else str(dname)
+
+        fam_key = str(fam_id)
+        ts_str = str(ts_name)
+
+        if explicit_initial is not None:
+            families_with_explicit_initial.add(fam_key)
+
+        bucket = raw_family_to_ts.setdefault(fam_key, [])
+        if ts_str not in bucket:
+            bucket.append(ts_str)
+
+        sig_set = family_param_sigs.setdefault(fam_key, set())
+        sig_set.add(_normalise_family_params(params))
+
+    # Optionally filter down to families that represent true *variations* in
+    # run parameters (i.e. more than one unique parameter signature).  This
+    # is what prevents families with only repeated reps from appearing in the
+    # viewers' run‑family selectors.
+    family_to_ts: Dict[str, List[str]] = {}
+    if require_multiple_param_sets:
+        for fam_key, ts_list in raw_family_to_ts.items():
+            sigs = family_param_sigs.get(fam_key) or set()
+            # Only expose *true* run families here: those that both have
+            # more than one distinct parameter signature and originated from
+            # an explicit ``initial_run`` identifier.  This mirrors the
+            # behaviour expected in the viewers, where the Start/End run
+            # family drop‑downs should list only harness/compound runs, not
+            # every standalone timestamp that happens to exist.
+            if len(sigs) > 1 and fam_key in families_with_explicit_initial:
+                # Preserve the existing order of timestamps, but ensure they
+                # are strings.
+                family_to_ts[fam_key] = [str(ts) for ts in ts_list]
+    else:
+        family_to_ts = {k: [str(ts) for ts in v] for k, v in raw_family_to_ts.items()}
+
+    # Sort family identifiers newest‑first, mirroring the behaviour of the
+    # timestamp ordering where identifiers follow the same pattern.
+    family_names: List[str] = sorted(family_to_ts.keys(), reverse=True)
+
+    return family_to_ts, family_names
+
+
+def plot_lines(
+    plot_df,
+    x_enc: str,
+    height: int = 260,
+    y_ref: float | None = None,
+    log_y: bool = False,
+):  # type: ignore[override]
+    """Shared small plotting helper for viewers.
+
+    ``plot_df`` is a tidy pandas DataFrame with one column designated for the
+    x‑axis and all remaining columns treated as separate numeric series.
+
+    The implementation is intentionally basic and self‑contained so that it
+    can be used as a fallback when Altair is unavailable.  It mirrors the
+    behaviour of ``_plot_lines`` in the original compare_runs_viewer.
+    """
+
+    try:  # pragma: no cover - plotting is hard to test automatically
+        import streamlit as st  # type: ignore
+        import plotly.graph_objects as go  # type: ignore
+
+        fig = go.Figure()
+        for col in plot_df.columns:
+            if col == x_enc:
+                continue
+            try:
+                fig.add_trace(
+                    go.Scatter(x=plot_df[x_enc], y=plot_df[col], mode="lines", name=str(col))
+                )
+            except Exception:
+                continue
+
+        if y_ref is not None:
+            try:
+                fig.add_hline(y=y_ref, line_dash="dash", line_color="gray")
+            except Exception:
+                pass
+
+        # Optionally switch to a logarithmic Y‑axis. This is controlled by
+        # the caller so that viewers can expose a simple checkbox to toggle
+        # between linear and log scaling.
+        if log_y:
+            try:
+                fig.update_yaxes(type="log")
+            except Exception:
+                pass
+
+        fig.update_layout(height=height, margin=dict(l=40, r=20, t=30, b=40))
+        st.plotly_chart(fig, width='stretch')
+    except Exception:
+        # As an ultra‑simple fallback, show the data table so that the user at
+        # least sees the numeric values even if plotting backends are missing.
+        try:
+            import streamlit as st  # type: ignore
+
+            st.dataframe(plot_df.set_index(x_enc), width="stretch")
+        except Exception:
+            # Last‑ditch: print to stderr.
+            debug("plot_lines fallback: unable to display plot or dataframe")
+
