@@ -1,33 +1,45 @@
 from __future__ import annotations
 
-from typing import Optional, Tuple
+import traceback
+from typing import TYPE_CHECKING, Optional
 
-from .compat import torch, nn, optim
+from trainer.torch_interface.compat import torch, optim
+
+if TYPE_CHECKING:  # pragma: no cover - import for type checkers only
+	from trainer.state.family_run import FamilyRun
 
 try:
 	from models import make_model  # type: ignore
 except Exception as e:
-	print("make model error ", e.get_message(), "   ", e.get_stacktrace())
+	traceback.print_exception(e)
 	make_model = None  # type: ignore
 
 
-def create_model_and_optimizer(args, input_size: int, output_size: int, num_layers: int, activation: str, device, lr: float):
+def create_model_and_optimizer(
+    family_run: FamilyRun,
+    input_size: int,
+    output_size: int,
+    num_layers: int,
+    activation: str,
+    device: torch.device,
+    lr: float,
+) -> tuple[torch.nn.Module, optim.Optimizer, torch.amp.GradScaler, bool, Optional[torch.dtype]]:
 	"""Instantiate model via make_model and create Adam optimizer and AMP scaler."""
 	if make_model is None:
 		raise RuntimeError("models.make_model is unavailable")
 
 	model = make_model(
-		arch=str(args.arch),
+		arch=str(family_run.neural_network_type),
 		input_size=int(input_size),
 		output_size=int(output_size),
-		hidden_layers=int(args.hidden_layers),
+		hidden_layers=int(family_run.hidden_layer_size),
 		num_layers=int(num_layers),
 		activation=str(activation),
 	)
 	model = model.to(device)
 	optimizer = optim.Adam(model.parameters(), lr=float(lr))  # type: ignore[attr-defined]
 
-	requested_precision = (args.precision or "auto").lower()
+	requested_precision = (family_run.precision or "auto").lower()
 	use_amp = (device.type == "cuda") and (requested_precision in ("auto", "fp16", "bf16"))  # type: ignore[union-attr]
 	amp_dtype = None
 	if use_amp:

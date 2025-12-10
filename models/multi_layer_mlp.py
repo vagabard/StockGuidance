@@ -64,7 +64,7 @@ class MultiLayerLinearNet(nn.Module):
 
 		self.net = nn.Sequential(*layers)
 
-	def forward(self, x: "torch.Tensor") -> "torch.Tensor":
+	def forward(self, x: "torch_interface.Tensor") -> "torch_interface.Tensor":
 		if x.dim() == 1:
 			x = x.unsqueeze(0)
 		return self.net(x)

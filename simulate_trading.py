@@ -1,5 +1,4 @@
 import argparse
-import math
 import os
 import time
 from typing import Tuple, Dict, Optional, List, Set
@@ -15,7 +14,8 @@ from feature_windowing import (
 )
 from load_database_rows_into_tensors import fetch_grouped_by_date
 from load_raw_stock_data_rows import fetch_as_numpy as fetch_raw_oc
-from trainer.argparse_utils import parse_int_list
+from trainer.state.single_run import SingleRun
+from trainer.util.argparse_utils import parse_int_list
 
 
 def _build_open_close_matrices(
@@ -115,6 +115,7 @@ def _average_scores(score_list: List[np.ndarray]) -> np.ndarray:
 
 
 def simulate(
+	single_run: SingleRun,
 	model_path: str,
 	top_k:List[int],
 	host: str,
@@ -129,11 +130,15 @@ def simulate(
 	prefer_prior_only: bool = True,
 	debug_sim_output: bool = False,
 	device: str = "auto",
- dates_to_handle: Optional[List[int]] = None,
+	dates_to_handle: Optional[List[int]] = None,
+	single_logic:bool = True,
+	single_model_rec: Optional[StockRecommenderFromModel] = None,
 	ensemble_logic: bool = False,
-	ensemble_recs: Optional[List[StockRecommenderFromModel]] = None,
+#	ensemble_recs: Optional[List[StockRecommenderFromModel]] = None,
+	ensemble_normalize: bool = False,
 ) -> str:
 	"""Run a trading simulation for a single model or an ensemble of models.
+	return a csv filename with the results.
 
 	When ``ensemble_logic`` is False (default), ``model_path`` should point to a
 	single training run directory or manifest and a single
@@ -149,45 +154,46 @@ def simulate(
 	* divide by the number of models,
 	* use the averaged scores to pick the top-K tickers and compute returns.
 	"""
-	if ensemble_logic:
-		if not ensemble_recs:
-			raise ValueError("ensemble_logic=True requires a non-empty ensemble_recs list")
-		# Use the first model as canonical and validate compatibility
-		rec = ensemble_recs[0]
-		for other in ensemble_recs[1:]:
-			if (
-				other.get_input_size() != rec.get_input_size()
-				or other._output_size != rec._output_size  # type: ignore[attr-defined]
-				or other.get_required_previous_days() != rec.get_required_previous_days()
-				or other.get_current_day_change_used() != rec.get_current_day_change_used()
-				or other.get_volume_ratio_used() != rec.get_volume_ratio_used()
-				or other.get_vwap_ratio_used() != rec.get_vwap_ratio_used()
-				or other.get_tranaction_ratio_used() != rec.get_tranaction_ratio_used()
-			):
-				raise ValueError("All ensemble models must have identical input/output sizes and feature flags")
-	else:
-		if loaded_model is not None:
-			rec = StockRecommenderFromModel(loaded_model,model_path=model_path, model_dict=model_dict, device=device)
-		else:
-			rec = StockRecommenderFromModel(model_path, device=device)
-		ensemble_recs = [rec]
+	ensemble_recs: List[StockRecommenderFromModel] = []
+	if ensemble_logic and len(ensemble_recs)== 0:
+		rec = StockRecommenderFromModel(
+			model_path,
+			device=device,
+			ensemble_normalize=ensemble_normalize,
+		)
 
-	required_prior = int(rec.get_required_previous_days())
-	expected_inp = int(rec.get_input_size())
-	#print("close only is ", close_ratio_only)
-	# but we no longer compute or track an S&P 500 benchmark in this function.
-	print("prefer prior only is ", prefer_prior_only)
-	print("expected inp is ", expected_inp)
-	print("required prior is ", required_prior)
-	print("top k is ", top_k)
-	print("limit is ", limit)
-	print("driver is ", driver)
-	print("port is ", port)
-	print("user is ", user)
-	print("current day change used is ", rec.get_current_day_change_used())
-	print("volume ratio used is ", rec.get_volume_ratio_used())
-	print("vwap ratio used is ", rec.get_vwap_ratio_used())
-	print("tranaction ratio used is ", rec.get_tranaction_ratio_used())
+	if single_logic:
+		if single_model_rec is not None:
+			rec = single_model_rec
+		elif loaded_model is not None:
+			rec = StockRecommenderFromModel(
+				loaded_model,
+				model_path=model_path,
+				model_dict=model_dict,
+				device=device,
+				ensemble_normalize=ensemble_normalize,
+			)
+		else:
+			rec = StockRecommenderFromModel(
+				model_path,
+				device=device,
+				ensemble_normalize=ensemble_normalize,
+			)
+	#Ensemble calculations handled inside StockRecommenderFromModel
+	ensemble_recs = [rec]
+
+	required_prior = int(single_run.prior_days) if single_run is not None else 0
+	expected_inp = int(rec.get_input_size()) if rec is not None else 0
+	# print("prefer prior only is ", prefer_prior_only)
+	# print("expected inp is ", expected_inp)
+	# print("required prior is ", required_prior)
+	# print("top k is ", top_k)
+	# print("limit is ", limit)
+	# print("driver is ", driver)
+	# print("port is ", port)
+	# print("user is ", user)
+	# print("current day change used is ", rec.get_current_day_change_used())
+	# print("features used is ", single_run.include_features if single_run is not None else "")
 	# Load per-date flattened features (X_flat) and dates
 	dates, X_flat, _Y = fetch_grouped_by_date(
 		host=host,
@@ -205,7 +211,7 @@ def simulate(
 	)
 
 	D = int(dates.shape[0])
-	T = rec._output_size  # number of tickers
+	T = rec.output_size  # number of tickers
 	TF = int(X_flat.shape[1])
 	if TF % T != 0:
 		raise ValueError(f"Feature width {TF} is not divisible by T={T}.")
@@ -295,16 +301,26 @@ def simulate(
 	portfolio_values_by_k: Dict[int, float] = {k: 1000.0 for k in top_k}
 
 	# Prepare output file path
+	# We normalise the filename scheme so that both single-model and ensemble
+	# simulations use the same ``stock_simulation_<size>.csv`` pattern, with
+	# ensembles simply gaining an ``ensemble_`` prefix.  The ``<size>`` suffix
+	# encodes either the number of simulated days (``Nd``) or an approximate
+	# percentage of the available window (``Np``), matching what the
+	# comparison/visualisation tools expect.
+	stock_simulation_size = (
+		f"{str(len(date_ids_to_simulate_trading_on))}days"
+		if date_ids_to_simulate_trading_on
+		else f"{str(int(pct))}percent"
+	)
 	if ensemble_logic:
 		# For ensembles, prefer the directory passed in as model_path (root of reps)
 		if os.path.isdir(model_path):
 			model_dir = os.path.abspath(model_path)
 		else:
-			model_dir = os.path.dirname(os.path.abspath(rec._resolve_manifest_path(model_path)))
-		out_name = f"stock_simulation_ensemble_{int(pct)}.csv"
+			model_dir = os.path.dirname(os.path.abspath(rec.resolve_manifest_path(model_path)))
+		out_name = f"stock_simulation_ensemble_{stock_simulation_size}.csv"
 	else:
-		model_dir = os.path.dirname(os.path.abspath(rec._resolve_manifest_path(model_path)))
-		stock_simulation_size = f"{str(len(date_ids_to_simulate_trading_on))}d" if date_ids_to_simulate_trading_on else f"{str(int(pct))}p"
+		model_dir = os.path.dirname(os.path.abspath(rec.resolve_manifest_path(model_path)))
 		out_name = f"stock_simulation_{stock_simulation_size}.csv"
 	out_path = os.path.join(model_dir, out_name)
 
@@ -314,6 +330,9 @@ def simulate(
 			"feature_date_id",
 			"open_date_id",
 			"close_date_id",
+			"top1_market_percentile",
+			"top1_daily_return",
+			"topNRecommends",
 		]
 		if len(top_k) == 1:
 			# Extended header to include explicit date ids used
@@ -357,7 +376,7 @@ def simulate(
 				all_scores: List[np.ndarray] = []
 				for m in ensemble_recs or []:
 					model_scores, _ = m.getBuyRecommendations(
-						feat_vec, top_k=req_k, return_scores=True, index_base=0
+						feat_vec, top_k=req_k, index_base=0
 					)
 					all_scores.append(model_scores)
 				avg_scores = _average_scores(all_scores)
@@ -366,18 +385,17 @@ def simulate(
 				idx_desc = np.argsort(avg_scores)[::-1]
 				idx_desc = idx_desc[: min(req_k, T_local)]
 				# Map to ticker ids using the canonical recommender's mapping
-				if rec._ticker_id_map and len(rec._ticker_id_map) == rec._output_size:  # type: ignore[attr-defined]
-					top_ids_all = [int(rec._ticker_id_map[i]) for i in idx_desc]
-				else:
+				# if rec._ticker_id_map and len(rec._ticker_id_map) == rec._output_size:  # type: ignore[attr-defined]
+				# 	top_ids_all = [int(rec._ticker_id_map[i]) for i in idx_desc]
+				# else:
 					# Dense indices -> 1..T
-					top_ids_all = [int(i + 1) for i in idx_desc]
+				top_ids_all = [int(i + 1) for i in idx_desc]
 				# For debug columns we treat the averaged scores as the score vector
 				scores_all = avg_scores
-			else:
+			if single_logic:
 				# Single-model case (backwards compatible path)
 				scores_all, top_ids_all = rec.getBuyRecommendations(
-					feat_vec, top_k=req_k, return_scores=True, index_base=1
-				)
+					feat_vec, top_k=req_k, index_base=1)
 
 			# Compute portfolio daily return using equal-weight allocation among valid picks
 			# IMPORTANT: Trades are executed the day AFTER the feature vector date.
@@ -409,6 +427,34 @@ def simulate(
 				else:
 					# No valid trades; remain in cash
 					portfolio_values_by_k[k] *= 1.0
+
+			# --- Calculate Top 1 Market Percentile (CDF) and daily return ---
+			top1_ret_val = float('nan')
+			cdf_val = float('nan')
+			if top_ids_all and len(top_ids_all) >= 1:
+				t1 = int(top_ids_all[0])
+				idx1 = t1 - 1
+				if 0 <= idx1 < T:
+					o1 = todays_open[idx1]
+					c1 = todays_close[idx1]
+					if np.isfinite(o1) and np.isfinite(c1) and o1 > 0:
+						top1_ret_val = (c1 / o1) - 1.0
+
+						# Market returns
+						valid_mask = (todays_open > 0) & np.isfinite(todays_open) & np.isfinite(todays_close)
+						if np.any(valid_mask):
+							m_opens = todays_open[valid_mask]
+							m_closes = todays_close[valid_mask]
+							m_rets = (m_closes / m_opens) - 1.0
+							cdf_val = np.mean(m_rets <= top1_ret_val)
+
+			cdf_str = f"{cdf_val:.6f}" if np.isfinite(cdf_val) else ""
+			top1_ret_str = f"{top1_ret_val:.6f}" if np.isfinite(top1_ret_val) else ""
+
+			# --- Top-N recommended tickers (largest k) ---
+			max_k = max(top_k)
+			rec_ids = top_ids_all[: max_k] if top_ids_all is not None else []
+			topn_str = "|".join(str(int(tid)) for tid in rec_ids) if rec_ids else ""
 
 			# Record trade date ids as the next day's date (buy and sell same day)
 			open_date_id = int(dates[trade_idx])
@@ -466,6 +512,9 @@ def simulate(
 					str(feature_date_id if feature_date_id is not None else ""),
 					str(open_date_id),
 					str(close_date_id),
+					cdf_str,
+					top1_ret_str,
+					topn_str,
 					f"{portfolio_values_by_k[only_k]:.6f}",
 				]
 				if debug_sim_output:
@@ -476,6 +525,9 @@ def simulate(
 					str(feature_date_id if feature_date_id is not None else ""),
 					str(open_date_id),
 					str(close_date_id),
+					cdf_str,
+					top1_ret_str,
+					topn_str,
 				]
 				row_vals += [f"{portfolio_values_by_k[k]:.6f}" for k in top_k]
 				if debug_sim_output:
@@ -536,121 +588,51 @@ def parse_args(argv: Optional[List[str]] = None):
 			"a directory is provided, a separate simulation is run for each rep* subdirectory."
 		),
 	)
+	p.add_argument(
+		"--ensemble-normalize",
+		action="store_true",
+		help=(
+			"If set, enable score normalization at the StockRecommenderFromModel level "
+			"(mirrors run_recommender_from_model_dir's --ensemble-normalize flag)."
+		),
+	)
 	return p.parse_args(argv)
 
+def simulate_using_models_on_path(path: str, args: argparse.Namespace, visited: Optional[Set[str]] = None, top_k_parsed=None,
+                                  dates_to_handle=None, include_ensemble: bool = False) -> None:
+	"""Recursively run simulations starting from ``path``.
 
-def main(argv: Optional[List[str]] = None) -> None:
-	args = parse_args(argv)
-	print(f"Starting simulation with args: {args}")
+	Behaviour matches the previous flat-directory logic but, when a directory
+	contains neither rep* subdirectories nor a model manifest, we descend into
+	its subdirectories and repeat the same checks.
 
-	# Parse --top-k which may be a single int or comma-separated list
-	top_k_parsed = parse_int_list(args.top_k, "top-k")
-	dates_to_handle = parse_int_list(args.date_range, "date-range") if args.date_range is not None else None
+	Additionally, we record and print the wall-clock time taken to process
+	each path (directory or single-model file), including any recursive
+	descendants.
+	"""
+	if visited is None:
+		visited = set()
+	abs_path = os.path.abspath(path)
+	if abs_path in visited:
+		print(f"Skipping already-visited directory: {abs_path}")
+		return
+	visited.add(abs_path)
 
-	model_arg = args.model
+	start_time = time.perf_counter()
+	print(f"Starting simulations for {path}...")
+	try:
+		if os.path.isdir(path):
+			all_models_found: List[
+				StockRecommenderFromModel] = create_list_of_stock_recommender_models_from_single_run_directory_with_repeats(args,path)
 
-	def _dir_has_model(run_dir: str) -> bool:
-		"""Return True if the directory appears to contain a model manifest.
-
-		We reuse StockRecommenderFromModel._resolve_manifest_path to locate a
-		candidate manifest and then check that it exists on disk. This does not
-		instantiate any models or require PyTorch.
-		"""
-		try:
-			manifest_path = StockRecommenderFromModel._resolve_manifest_path(run_dir)  # type: ignore[attr-defined]
-		except Exception:
-			return False
-		return os.path.isfile(manifest_path)
-
-	def _run_for_path(path: str, visited: Optional[Set[str]] = None) -> None:
-		"""Recursively run simulations starting from ``path``.
-
-		Behaviour matches the previous flat-directory logic but, when a directory
-		contains neither rep* subdirectories nor a model manifest, we descend into
-		its subdirectories and repeat the same checks.
-
-		Additionally, we record and print the wall-clock time taken to process
-		each path (directory or single-model file), including any recursive
-		descendants.
-		"""
-		if visited is None:
-			visited = set()
-		abs_path = os.path.abspath(path)
-		if abs_path in visited:
-			print(f"Skipping already-visited directory: {abs_path}")
-			return
-		visited.add(abs_path)
-
-		start_time = time.perf_counter()
-		print(f"Starting simulations for {path}...")
-		try:
-			if os.path.isdir(path):
-				entries = sorted(os.listdir(path))
-				rep_dirs = [
-					os.path.join(path, name)
-					for name in entries
-					if name.lower().startswith("rep") and os.path.isdir(os.path.join(path, name))
-				]
-
-				# Always run individual rep simulations for any detected rep* dirs
-				if rep_dirs:
-					print(f"Detected {len(rep_dirs)} rep* directories under {path}; running simulation separately for each rep.")
-					last_out: Optional[str] = None
-					for d in rep_dirs:
-						print(f"Running simulation for {d}...")
-						last_out = simulate(
-							model_path=d,
-							top_k=top_k_parsed,
-							host=args.host,
-							database=args.database,
-							user=args.user,
-							password=args.password,
-							port=args.port,
-							driver=args.driver,
-							limit=args.limit,
-							prefer_prior_only=bool(args.prior_only),
-							debug_sim_output=bool(args.debug_sim_output),
-							device=str(args.device),
-							dates_to_handle=dates_to_handle,
-						)
-					if last_out is not None:
-						print(f"Simulation complete for reps under {path}. Last results written to: {last_out}")
-
-					# If ensemble logic is requested and we have multiple reps, run an
-					# additional ensemble simulation over all rep* runs.
-					if args.ensemble_logic and len(rep_dirs) > 1:
-						print(
-							f"Detected {len(rep_dirs)} rep* directories under {path}; "
-							"running additional ensemble simulation with averaged scores "
-							"after individual rep simulations."
-						)
-						ensemble_recs: List[StockRecommenderFromModel] = [
-							StockRecommenderFromModel(d, device=args.device) for d in rep_dirs
-						]
-						out_path = simulate(
-							model_path=path,
-							top_k=top_k_parsed,
-							host=args.host,
-							database=args.database,
-							user=args.user,
-							password=args.password,
-							port=args.port,
-							driver=args.driver,
-							limit=args.limit,
-							prefer_prior_only=bool(args.prior_only),
-							debug_sim_output=bool(args.debug_sim_output),
-							device=str(args.device),
-							ensemble_logic=True,
-							ensemble_recs=ensemble_recs,
-							dates_to_handle=dates_to_handle,
-						)
-						print(f"Ensemble simulation complete. Results written to: {out_path}")
-					return
-
-				# No rep* directories. If this directory itself contains a model
-				# manifest, behave like the original single-model path.
-				if _dir_has_model(path):
-					out_path = simulate(
+			# Always run individual rep simulations for any detected rep* dirs
+			if all_models_found:
+				print(f"Detected {len(all_models_found)} rep* directories under {path}; running simulation separately for each rep.")
+				last_out: Optional[str] = None
+				for one_recommender in all_models_found:
+					print(f"Running simulation for  ...")
+					last_out = simulate(
+						None,
 						model_path=path,
 						top_k=top_k_parsed,
 						host=args.host,
@@ -664,26 +646,46 @@ def main(argv: Optional[List[str]] = None) -> None:
 						debug_sim_output=bool(args.debug_sim_output),
 						device=str(args.device),
 						dates_to_handle=dates_to_handle,
+						single_model_rec=one_recommender,
+						ensemble_normalize=bool(args.ensemble_normalize),
 					)
-					print(f"Simulation complete. Results written to: {out_path}")
-					return
+				if last_out is not None:
+					print(f"Simulation complete for reps under {path}. Last results written to: {last_out}")
 
-				# Directory without rep* subdirectories and without a model manifest:
-				# descend into its subdirectories and repeat the same checks.
-				subdirs = [
-					os.path.join(path, name)
-					for name in entries
-					if os.path.isdir(os.path.join(path, name))
-				]
-				if not subdirs:
-					print(f"No models or rep* directories found in {path} and no subdirectories to search.")
-					return
-				for sub in subdirs:
-					print(f"Descending into subdirectory {sub} to search for models or rep* runs...")
-					_run_for_path(sub, visited)
-			else:
-				# Non-directory path: single-model behaviour.
+				# If ensemble logic is requested and we have multiple reps, run an
+				# additional ensemble simulation over all rep* runs.
+				if include_ensemble and len(all_models_found) > 1:
+					print(
+						f"Detected {len(all_models_found)} rep* directories under {path}; "
+						"running additional ensemble simulation with averaged scores "
+						"after individual rep simulations."
+					)
+					out_path = simulate(
+						None,
+						model_path=path,
+						top_k=top_k_parsed,
+						host=args.host,
+						database=args.database,
+						user=args.user,
+						password=args.password,
+						port=args.port,
+						driver=args.driver,
+						limit=args.limit,
+						prefer_prior_only=bool(args.prior_only),
+						debug_sim_output=bool(args.debug_sim_output),
+						device=str(args.device),
+						ensemble_logic=True,
+						dates_to_handle=dates_to_handle,
+						ensemble_normalize=bool(args.ensemble_normalize),
+					)
+					print(f"Ensemble simulation complete. Results written to: {out_path}")
+				return
+
+			# No rep* directories. If this directory itself contains a model
+			# manifest, behave like the original single-model path.
+			if _dir_has_model(path):
 				out_path = simulate(
+					None,
 					model_path=path,
 					top_k=top_k_parsed,
 					host=args.host,
@@ -697,14 +699,95 @@ def main(argv: Optional[List[str]] = None) -> None:
 					debug_sim_output=bool(args.debug_sim_output),
 					device=str(args.device),
 					dates_to_handle=dates_to_handle,
+					ensemble_normalize=bool(args.ensemble_normalize),
 				)
 				print(f"Simulation complete. Results written to: {out_path}")
+				return
 
-		finally:
-			elapsed = time.perf_counter() - start_time
-			print(f"Completed simulations for {path} in {elapsed:.2f} seconds")
+			# Directory without rep* subdirectories and without a model manifest:
+			# descend into its subdirectories and repeat the same checks.
+			entries = sorted(os.listdir(path))
+			subdirs = [
+				os.path.join(path, name)
+				for name in entries
+				if os.path.isdir(os.path.join(path, name))
+			]
+			if not subdirs:
+				print(f"No models or rep* directories found in {path} and no subdirectories to search.")
+				return
+			for sub in subdirs:
+				print(f"Descending into subdirectory {sub} to search for models or rep* runs...")
+				simulate_using_models_on_path(sub, args, visited,top_k_parsed= top_k_parsed,dates_to_handle= dates_to_handle,include_ensemble= include_ensemble)
+		else:
+			# Non-directory path: single-model behaviour.
+			out_path = simulate(
+				None,
+				model_path=path,
+				top_k=top_k_parsed,
+				host=args.host,
+				database=args.database,
+				user=args.user,
+				password=args.password,
+				port=args.port,
+				driver=args.driver,
+				limit=args.limit,
+				prefer_prior_only=bool(args.prior_only),
+				debug_sim_output=bool(args.debug_sim_output),
+				device=str(args.device),
+				dates_to_handle=dates_to_handle,
+			)
+			print(f"Simulation complete. Results written to: {out_path}")
+
+	finally:
+		elapsed = time.perf_counter() - start_time
+		print(f"Completed simulations for {path} in {elapsed:.2f} seconds")
+
+def create_list_of_stock_recommender_models_from_single_run_directory_with_repeats(args:argparse.Namespace ,  repeat_run_home_dir: str) -> list[
+	StockRecommenderFromModel]:
+	entries = sorted(os.listdir(repeat_run_home_dir))
+	rep_dirs = [
+		os.path.join(repeat_run_home_dir, name)
+		for name in entries
+		if name.lower().startswith("rep") and os.path.isdir(os.path.join(repeat_run_home_dir, name))
+	]
+	return [
+		StockRecommenderFromModel(
+			d,
+			device=args.device,
+			ensemble_normalize=bool(args.ensemble_normalize),
+		)
+		for d in rep_dirs
+	]
+
+
+def _dir_has_model(run_dir: str) -> bool:
+	"""Return True if the directory appears to contain a model manifest.
+
+	We reuse StockRecommenderFromModel.resolve_manifest_path to locate a
+	candidate manifest and then check that it exists on disk. This does not
+	instantiate any models or require PyTorch.
+	"""
+	try:
+		manifest_path = StockRecommenderFromModel.resolve_manifest_path(run_dir)  # type: ignore[attr-defined]
+	except Exception:
+		return False
+	return os.path.isfile(manifest_path)
+
+def main(argv: Optional[List[str]] = None) -> None:
+	args = parse_args(argv)
+	print(f"Starting simulation with args: {args}")
+
+	# Parse --top-k which may be a single int or comma-separated list
+	top_k_parsed = parse_int_list(args.top_k, "top-k")
+	dates_to_handle = parse_int_list(args.date_range, "date-range") if args.date_range is not None else None
+	include_ensemble = args.include_ensemble
+
+	model_arg = args.model
+
+
+
 	# Start processing from the user-provided model argument
-	_run_for_path(model_arg)
+	simulate_using_models_on_path(model_arg, args, top_k_parsed=top_k_parsed, dates_to_handle=dates_to_handle, include_ensemble=include_ensemble)
 
 
 if __name__ == "__main__":

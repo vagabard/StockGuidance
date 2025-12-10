@@ -28,32 +28,28 @@ in `polygon_fetch.py` – it only updates the daily market grouped summary.
 from __future__ import annotations
 
 import argparse
-import os
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import List, Optional
 
-from polygon_fetch import (
-	DEFAULT_API_KEY,
-	fetch_market_summary_day,
-	market_summary_file_path,
-	iso_date,
-)
+import numpy as np
 
+from StockRecommenderFromModel import StockRecommenderFromModel
+from db_connect import get_connection
+from feature_windowing import best_fit_feature_vector
+from load_database_rows_into_tensors import fetch_grouped_by_date
 from load_latest_raw_stock_data_date import (
 	get_latest_raw_stock_data,
 	parse_args as parse_db_args,
 )
-
+from polygon_fetch import (
+	fetch_market_summary_day,
+	market_summary_file_path,
+	iso_date,
+)
 from populate_db_raw_stock_info import main as populate_raw_stock_main
-from db_connect import get_connection
 from train_pytorch_network import TrainPytorchNetwork
-from StockRecommenderFromModel import StockRecommenderFromModel
-from load_database_rows_into_tensors import fetch_grouped_by_date
-from feature_windowing import best_fit_feature_vector
-import numpy as np
-
 
 # Time (UTC) after which the current day's market data is considered stable
 # enough to download grouped daily summaries. Before this cutoff, the
@@ -218,7 +214,7 @@ def _get_recent_date_id_window_from_daily_delta_stock_data(
 		date_ids = [int(r[0]) for r in rows]
 		end_id = max(date_ids)
 		start_id = min(date_ids)
-		return (start_id, end_id)
+		return start_id, end_id
 	finally:
 		try:
 			conn.close()
@@ -479,10 +475,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 	parser.add_argument(
 		"--end-date",
 		default=None,
-		help=(
-			"Optional ISO date (YYYY-MM-DD), inclusive. If omitted, uses "
+		help="Optional ISO date (YYYY-MM-DD), inclusive. If omitted, uses "
 			"today (UTC).",
-		),
 	)
 	parser.add_argument(
 		"--max-retries",
@@ -725,9 +719,9 @@ def main(argv: Optional[List[str]] = None) -> int:
 	final_activation = "sigmoid"
 	day_change_centered = "zero"
 	precision = "fp32"
-	learning_rate = "3e-7"
+	learning_rate = "0.000005"
 	batch_size = 128
-	epochs = 10000
+	epochs = 4000
 
 	train_argv = [
 		"--mode=train",
@@ -761,7 +755,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 		print(f"Training failed with exit code {exit_code}; aborting recommendations.")
 		return int(exit_code)
 
-	run_dir = trainer.get_training_directory()
+	run_dir = trainer.training_directory
 	if not run_dir:
 		print("Training did not report a run directory; cannot load model for recommendations.")
 		return 0
@@ -832,7 +826,6 @@ def main(argv: Optional[List[str]] = None) -> int:
 	scores, top_ids = rec.getBuyRecommendations(
 		feat_vec,
 		top_k=5,
-		return_scores=True,
 		index_base=1,
 	)
 
@@ -852,16 +845,10 @@ def main(argv: Optional[List[str]] = None) -> int:
 	# to a timestamped recommendations-<timestamp>.txt file.
 	rec_output_lines: list[str] = []
 
+	header = f"Top 5 stock recommendations from freshly trained model for date_id {feature_date_id}:"
 	if recent_tx_date is not None:
-		header = (
-			"Top 5 stock recommendations from freshly trained model "
-			f"for date_id {feature_date_id}, transaction_date {recent_tx_date}:"
-		)
-	else:
-		header = (
-			"Top 5 stock recommendations from freshly trained model "
-			f"for date_id {feature_date_id}:"
-		)
+		header = header +f", transaction_date {recent_tx_date}:"
+
 
 	print(header)
 	rec_output_lines.append(header)

@@ -112,7 +112,7 @@ def ranking_error_from_positions(positions: List[int]) -> float:
 def vector_to_ranking_indices(vec) -> List[int]:
 	"""Return a ranking of indices for a 1D vector of scores.
 
-	- Input can be: torch.Tensor (1D), numpy.ndarray (1D), or any sequence of numbers.
+	- Input can be: torch_interface.Tensor (1D), numpy.ndarray (1D), or any sequence of numbers.
 	- Higher score ranks earlier (descending).
 	- Ties are broken deterministically by smaller index (i comes before j when scores are equal).
 

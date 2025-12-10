@@ -31,13 +31,15 @@ Notes on shapes:
   - Returned labels shape: (T,)
 
 By default, NumPy arrays are returned. If PyTorch is installed and you pass
-use_torch=True, results are returned as torch.FloatTensors.
+use_torch=True, results are returned as torch_interface.FloatTensors.
 """
 from __future__ import annotations
 
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Any
 
 import numpy as np
+from numpy import dtype, ndarray
+from torch import Tensor
 
 from load_database_rows_into_tensors import (
     fetch_grouped_by_date,
@@ -46,9 +48,9 @@ from load_database_rows_into_tensors import (
 from feature_windowing import concat_features_current_then_prior
 
 try:
-    # reuse the torch instance created in the loader if available
+    # reuse the torch_interface instance created in the loader if available
     from load_database_rows_into_tensors import torch  # type: ignore
-except Exception:  # pragma: no cover - torch is optional
+except Exception:  # pragma: no cover - torch_interface is optional
     torch = None  # type: ignore
 
 
@@ -74,10 +76,10 @@ class TrainingInstanceProvider:
 
         The underlying fetch returns:
           - dates: shape (D,)
-          - X_flat: shape (D, T*F)
-          - Y: shape (D, T)
+          - ticker_data_list_flat: shape (D, T*F)
+          - labels_for_training: shape (D, T)
         """
-        dates, X_flat, Y = fetch_grouped_by_date(
+        dates, ticker_data_list_flat, labels_for_training = fetch_grouped_by_date(
             host=host,
             database=database,
             user=user,
@@ -94,8 +96,8 @@ class TrainingInstanceProvider:
         )
 
         self._dates: np.ndarray = dates.astype(np.int32, copy=False)
-        self._X_flat: np.ndarray = X_flat.astype(np.float64, copy=False)
-        self._Y: np.ndarray = Y.astype(np.float64, copy=False)
+        self.ticker_data_list_flat: np.ndarray = ticker_data_list_flat.astype(np.float64, copy=False)
+        self.labels_for_training: np.ndarray = labels_for_training.astype(np.float64, copy=False)
         self._num_prior: int = 0
         self._use_torch: bool = bool(use_torch and TORCH_AVAILABLE)
         self._current_day_change: bool = current_day_change
@@ -106,9 +108,9 @@ class TrainingInstanceProvider:
 
 
         # Derived dims
-        self._D: int = int(self._X_flat.shape[0])
-        self._TF: int = int(self._X_flat.shape[1]) if self._X_flat.ndim == 2 else 0
-        self._T: int = int(self._Y.shape[1]) if self._Y.ndim == 2 else 0
+        self.number_of_dates_or_dates_times_number_of_features_times_number_tickers: int = int(self.ticker_data_list_flat.shape[0])
+        self.ticker_feature_quantity: int = int(self.ticker_data_list_flat.shape[1]) if self.ticker_data_list_flat.ndim == 2 else 0
+        self.ticker_label_for_training_quantity: int = int(self.labels_for_training.shape[1]) if self.labels_for_training.ndim == 2 else 0
 
     # Public API (names kept as requested)
     def set_how_many_days_in_past_to_use(self, number_of_prior_dates: int) -> None:
@@ -120,18 +122,19 @@ class TrainingInstanceProvider:
             raise TypeError("number_of_prior_dates must be an int")
         if number_of_prior_dates < 0:
             raise ValueError("number_of_prior_dates must be >= 0")
-        if number_of_prior_dates >= self._D:
+        if number_of_prior_dates >= self.number_of_dates_or_dates_times_number_of_features_times_number_tickers:
             # Would leave no valid instances
             raise ValueError(
-                f"number_of_prior_dates ({number_of_prior_dates}) must be < total dates ({self._D})"
+                f"number_of_prior_dates ({number_of_prior_dates}) must be < total dates ({self.number_of_dates_or_dates_times_number_of_features_times_number_tickers})"
             )
         self._num_prior = number_of_prior_dates
 
     def get_maximum_number_of_test_train_instances(self) -> int:
         """Total number of 1-based instances available with current window size."""
-        return max(0, self._D - self._num_prior)
+        return max(0, self.number_of_dates_or_dates_times_number_of_features_times_number_tickers - self._num_prior)
 
-    def get_feature_and_label_pair(self, selected_training_instance: int):
+    def get_feature_and_label_pair(self, selected_training_instance: int) -> tuple[Tensor, Tensor] | tuple[
+	    ndarray[tuple[Any, ...], dtype[Any]], Any]:
         """Return (features, labels) for a 1-based instance index.
 
         The mapping is defined so that instance index 1 corresponds to the earliest
@@ -151,9 +154,9 @@ class TrainingInstanceProvider:
         d = self._num_prior + (selected_training_instance - 1)
 
         # Concatenate features for [d, d-1, ..., d-num_prior] using shared utility
-        feats = concat_features_current_then_prior(self._X_flat, d, self._num_prior)
+        feats = concat_features_current_then_prior(self.ticker_data_list_flat, d, self._num_prior)
 
-        labels = self._Y[d]
+        labels = self.labels_for_training[d]
 
         if self._use_torch:
             # Convert to float32 tensors (typical for NN inputs)

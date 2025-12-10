@@ -61,7 +61,7 @@ import time
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
-from trainer.argparse_utils import parse_int_list
+from trainer.util.argparse_utils import parse_int_list
 from training_instance_provider import TrainingInstanceProvider
 
 
@@ -154,7 +154,7 @@ def _run_one_window(
 	from train_pytorch_network import TrainPytorchNetwork  # Imported lazily
 
 	# Force a fresh metrics file path per window so that each run creates its
-	# own timestamped subdirectory beneath ``metrics_dir``.
+	# own timestamped subdirectory beneath ``run_group_dir``.
 	metrics_file = os.path.join(metrics_dir, "training_metrics.csv")
 
 	argv = list(base_args)
@@ -189,7 +189,7 @@ def _run_one_window(
 			f"train_end_date_id={train_end_date_id} with exit code {exit_code}"
 		)
 
-	run_dir = runner.get_training_directory()
+	run_dir = runner.training_directory
 	if not run_dir:
 		raise RuntimeError(
 			"Training completed but no run directory was reported by TrainPytorchNetwork"

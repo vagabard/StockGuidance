@@ -189,4 +189,4 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 
 if __name__ == "__main__":  # pragma: no cover - manual invocation
-    raise SystemExit(main())
+	raise SystemExit(main())

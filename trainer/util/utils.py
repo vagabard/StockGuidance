@@ -5,14 +5,16 @@ import csv
 import numpy as np
 from typing import Tuple
 
-from .compat import TORCH_AVAILABLE, torch
+import torch
+
+from trainer.torch_interface.compat import TORCH_AVAILABLE
 
 
 def tensorize_and_sanitize(x, y):
-    """Convert inputs to float32 torch tensors and replace NaN/Inf values.
+    """Convert inputs to float32 torch_interface tensors and replace NaN/Inf values.
 
     Constructs tensors directly on the CUDA device when available to avoid
-    extra host→device copies. If torch is not available, returns inputs
+    extra host→device copies. If torch_interface is not available, returns inputs
     unchanged (memest mode).
     """
     if not TORCH_AVAILABLE:
@@ -41,7 +43,7 @@ def tensorize_and_sanitize(x, y):
 
 
 def count_elements(a) -> int:
-    """Return number of elements for torch.Tensor or numpy.ndarray."""
+    """Return number of elements for torch_interface.Tensor or numpy.ndarray."""
     if hasattr(a, "numel"):
         try:
             return int(a.numel())  # type: ignore[attr-defined]

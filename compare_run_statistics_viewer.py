@@ -2,8 +2,9 @@ import os
 import re
 from typing import Any, Dict, List, Tuple
 
-import pandas as pd  # type: ignore
+#import pandas as pd  # type: ignore
 import streamlit as st  # type: ignore
+from pandas import read_csv, DataFrame
 
 from compare_runs_shared import (
     build_run_families,
@@ -27,7 +28,8 @@ def _find_epoch_files(run_path: str) -> List[Tuple[int, int, str]]:
 
     try:
         fnames = os.listdir(run_path)
-    except Exception:
+    except Exception as e:
+        print(f"Error in _find_epoch_files listdir for {run_path}: {e}")
         return []
 
     results: List[Tuple[int, int, str]] = []
@@ -37,15 +39,17 @@ def _find_epoch_files(run_path: str) -> List[Tuple[int, int, str]]:
         #   stock_simulation_10d_epoch_3.csv
         #   stock_simulation_10p_epoch_3.csv
         # We ignore the optional d/p variant when parsing set_size.
-        m = re.match(r"stock_simulation_(\d+)(?:[dp])?_epoch_(\d+)\.csv$", fname)
+        m = re.match(r"stock_simulation_(\d+)(?:days|percent)?_epoch_(\d+)\.csv$", fname)
         if not m:
             continue
         try:
             set_size = int(m.group(1))
             epoch = int(m.group(2))
-        except Exception:
+        except Exception as e:
+            print(f"Error parsing epoch filename {fname}: {e}")
             continue
-        results.append((set_size, epoch, os.path.join(run_path, fname)))
+        full_path = os.path.normpath(os.path.join(run_path, fname))
+        results.append((set_size, epoch, full_path))
 
     # Sort by set_size then epoch for deterministic processing
     results.sort(key=lambda t: (t[0], t[1]))
@@ -60,7 +64,8 @@ def _load_end_csv(run_path: str) -> Dict[int, str]:
 
     try:
         fnames = os.listdir(run_path)
-    except Exception:
+    except Exception as e:
+        print(f"Error in _load_end_csv listdir for {run_path}: {e}")
         return {}
 
     mapping: Dict[int, str] = {}
@@ -70,14 +75,15 @@ def _load_end_csv(run_path: str) -> Dict[int, str]:
         #   stock_simulation_10d.csv
         #   stock_simulation_10p.csv
         # The optional d/p suffix is ignored when deriving set_size.
-        m = re.match(r"stock_simulation_(\d+)(?:[dp])?\.csv$", fname)
+        m = re.match(r"stock_simulation_(\d+)(?:days|percent)?\.csv$", fname)
         if not m:
             continue
         try:
             set_size = int(m.group(1))
-        except Exception:
+        except Exception as e:
+            print(f"Error parsing end csv filename {fname}: {e}")
             continue
-        mapping[set_size] = os.path.join(run_path, fname)
+        mapping[set_size] = os.path.normpath(os.path.join(run_path, fname))
     return mapping
 
 
@@ -103,52 +109,79 @@ def _compute_run_statistics_for_path(run_path: str) -> Dict[str, Any]:
 
     # --- End-of-training values from stock_simulation_<set_size>.csv ---------
     #
-    # Earlier versions only looked at a single ``portfolio_top<set_size>``
-    # column that matched the numeric suffix in the filename
-    # (e.g. stock_simulation_5.csv -> portfolio_top5).  However, the
-    # simulation CSVs can expose *multiple* portfolio_topN columns in the
-    # same file (typically N = 1, 3, 5).  To support columns such as
-    # ``end1`` and ``end3`` alongside ``end5`` we now scan *all*
-    # ``portfolio_top<N>`` columns in each file and compute endN for every
-    # N we find.
+    # Legacy runs exposed ``portfolio_top<N>`` columns, whereas the newer
+    # JSON/SingleRun-based pipeline writes a single ``portfolio_value``
+    # column.  To stay compatible we first look for any ``portfolio_top<N>``
+    # columns; if none are found we fall back to treating
+    # ``portfolio_value`` as the series to summarise.
+    print(f"[crsv] computing statistics for run_path={run_path}")
     end_files = _load_end_csv(run_path)
+    print(f"[crsv] end_files discovered: {list(end_files.values())}")
     for _set_size, fpath in end_files.items():
         try:
-            df = pd.read_csv(fpath)
+            df = read_csv(fpath)
         except Exception:
+            print(f"[crsv] failed to read end CSV {fpath}")
             continue
         if df.empty:
+            print(f"[crsv] end CSV empty: {fpath}")
             continue
 
-        for col in df.columns:
-            if not isinstance(col, str):
-                continue
-            if not col.startswith("portfolio_top"):
-                continue
-            suffix = col[len("portfolio_top") :]
-            try:
-                n = int(suffix)
-            except Exception:
-                continue
+        # Prefer legacy portfolio_top<N> columns when present.
+        top_cols = [
+            c
+            for c in df.columns
+            if isinstance(c, str) and c.startswith("portfolio_top")
+        ]
 
-            try:
-                end_val = float(df[col].iloc[-1])
-            except Exception:
-                continue
+        if top_cols:
+            for col in top_cols:
+                suffix = col[len("portfolio_top") :]
+                try:
+                    n = int(suffix)
+                except Exception as e:
+                    print(f"[crsv] Error parsing end-file column suffix {col}: {e}")
+                    continue
 
-            # If multiple files provide the same N we simply let the last
-            # one win; in typical layouts each N appears in a single file.
-            stats[f"end{n}"] = end_val
+                try:
+                    end_val = float(df[col].iloc[-1])
+                except Exception as e:
+                    print(f"[crsv] Error extracting end value for {col} in {_set_size}: {e}")
+                    continue
+
+                # If multiple files provide the same N we simply let the last
+                # one win; in typical layouts each N appears in a single file.
+                stats[f"end{n}"] = end_val
+        else:
+            # Newer schema: single portfolio_value column.
+            if "portfolio_value" in df.columns:
+                try:
+                    end_val = float(df["portfolio_value"].iloc[-1])
+                except Exception as e:
+                    print(f"[crsv] Error extracting end portfolio_value: {e}")
+                    end_val = None
+                if end_val is not None:
+                    # Use a fixed index (0) when no explicit N exists so
+                    # callers can still rely on end0.
+                    stats["end0"] = end_val
 
     # --- Per‑epoch statistics from stock_simulation_<set_size>_epoch_*.csv ---
     epoch_files = _find_epoch_files(run_path)
+    if epoch_files:
+        sample = [p for _, _, p in epoch_files[:3]]
+        print(f"[crsv] epoch_files discovered: {len(epoch_files)} files. Sample: {sample}")
+    else:
+        print("[crsv] epoch_files discovered: []")
+
     if not epoch_files:
         return stats
 
     # Instead of tying statistics to the single set_size encoded in the
     # filename, scan all ``portfolio_top<N>`` columns in each epoch file so
     # we expose metrics for N = 1, 3, 5, ... as separate columns (max1,
-    # max3, max5, etc.).
+    # max3, max5, etc.).  When no ``portfolio_top<N>`` columns exist (new
+    # CSV schema), we fall back to ``portfolio_value`` with an implicit
+    # index ``0`` so callers can still reason about max0 / max_epoch0.
 
     max_val: Dict[int, float] = {}
     max_epoch: Dict[int, int] = {}
@@ -157,30 +190,46 @@ def _compute_run_statistics_for_path(run_path: str) -> Dict[str, Any]:
 
     for _set_size, epoch, fpath in epoch_files:
         try:
-            df = pd.read_csv(fpath)
-        except Exception:
+            df = read_csv(fpath)
+        except Exception as e:
+            print(f"[crsv] failed to read epoch CSV {fpath}: {e}")
             continue
         if df.empty:
+            print(f"[crsv] epoch CSV empty: {fpath}")
+            continue
+        # Legacy: one or more portfolio_top<N> columns.
+        top_cols = [
+            c
+            for c in df.columns
+            if isinstance(c, str) and c.startswith("portfolio_top")
+        ]
+
+        # New schema: fall back to single portfolio_value column.
+        if not top_cols and "portfolio_value" in df.columns:
+            top_cols = ["portfolio_value"]
+
+        if not top_cols:
+            print(f"[crsv] no portfolio columns found in epoch CSV {fpath}, cols={list(df.columns)}")
             continue
 
-        for col in df.columns:
-            if not isinstance(col, str):
-                continue
-            if not col.startswith("portfolio_top"):
-                continue
-
-            suffix = col[len("portfolio_top") :]
-            try:
-                n = int(suffix)
-            except Exception:
-                continue
+        for col in top_cols:
+            if col == "portfolio_value":
+                n = 0
+            else:
+                suffix = col[len("portfolio_top") :]
+                try:
+                    n = int(suffix)
+                except Exception as e:
+                    print(f"[crsv] Error parsing epoch-file column suffix {col}: {e}")
+                    continue
 
             series = df[col]
 
-            # Final value for this epoch / portfolio_topN
+            # Final value for this epoch / portfolio_topN (or portfolio_value when n == 0)
             try:
                 final_val = float(series.iloc[-1])
-            except Exception:
+            except Exception as e:
+                print(f"[crsv] Error extracting final val for {col} in epoch {epoch}: {e}")
                 final_val = None
 
             if final_val is not None:
@@ -189,14 +238,15 @@ def _compute_run_statistics_for_path(run_path: str) -> Dict[str, Any]:
                     max_val[n] = final_val
                     max_epoch[n] = epoch
 
-            # Best of the first five days for this epoch / portfolio_topN
+            # Best of the first five days for this epoch / portfolio_topN or portfolio_value
             try:
                 head = series.iloc[:5]
                 if not head.empty:
                     head_max = float(head.max())
                 else:
                     head_max = None
-            except Exception:
+            except Exception as e:
+                print(f"[crsv] Error extracting first5 for {col} in epoch {epoch}: {e}")
                 head_max = None
 
             if head_max is not None:
@@ -243,7 +293,17 @@ def _build_statistics_rows(base_dir: str, ts_to_runs: Dict[str, List[Tuple[str, 
         # Preference order:
         #   1. Timestamp directory itself (for ensemble epoch files)
         #   2. First rep or run directory underneath the timestamp
+
         ts_path = os.path.join(base_dir, ts_name)
+        # If the run is nested, ts_name alone isn't enough to find the directory.
+        # Use the first run's _dir to find the actual timestamp container.
+        dname_0 = params.get("_dir")
+        if dname_0:
+            parent_rel = os.path.dirname(dname_0)
+            candidate = os.path.join(base_dir, parent_rel)
+            if os.path.isdir(candidate):
+                ts_path = candidate
+
         run_path = ts_path if os.path.isdir(ts_path) else None
 
         if run_path is None or not _find_epoch_files(run_path):
@@ -307,90 +367,54 @@ def _run_as_script() -> None:
     )
 
     # ------------------------------------------------------------------
-    # Sidebar run range selection (Start run / End run) and run-family
-    # selection (Start run family / End run family).
-    #
-    # When the Start/End run boxes are both set, we treat the inclusive
-    # timestamp range between them as the selected runs. When those are
-    # left as "(none)" but the Start/End run family boxes are set, we
-    # instead expand the chosen families (based on initial_run) into their
-    # member timestamps and use that as the selected set.
-
-    # Provide a small refresh control just above the Start/End selectors.
-    # Pressing this button causes Streamlit to rerun the script, which in
-    # turn re-executes `scan_runs(base_dir)` and repopulates the Start/End
-    # boxes with any newly created timestamp directories.
+    # Sidebar selection: run family -> underlying builds (timestamps)
+    # ------------------------------------------------------------------
+    # Provide a small refresh control above the selectors. Pressing this
+    # button causes Streamlit to rerun the script, re-executing
+    # ``scan_runs(base_dir)`` and repopulating the family/build lists with
+    # any newly created timestamp directories.
     st.sidebar.button("Refresh runs list")
-    st.sidebar.subheader("Select runs")
-    options_list = ["(none)"] + timestamp_names
+    st.sidebar.subheader("Select family and builds")
 
-    # Persist Start/End selections across reruns, using keys that are
-    # specific to this viewer to avoid interfering with the main
-    # compare_runs_viewer when both are open in the same Streamlit app.
-    if "crsv_start_run_sel" not in st.session_state:
-        st.session_state["crsv_start_run_sel"] = "(none)"
-    if "crsv_end_run_sel" not in st.session_state:
-        st.session_state["crsv_end_run_sel"] = "(none)"
-
-    # Persist Start/End run-family selections for this viewer.
-    if "crsv_start_family_sel" not in st.session_state:
-        st.session_state["crsv_start_family_sel"] = "(none)"
-    if "crsv_end_family_sel" not in st.session_state:
-        st.session_state["crsv_end_family_sel"] = "(none)"
-
-    cur_start = st.session_state.get("crsv_start_run_sel", "(none)")
-    if cur_start not in options_list:
-        cur_start = "(none)"
-    cur_end = st.session_state.get("crsv_end_run_sel", "(none)")
-    if cur_end not in options_list:
-        cur_end = "(none)"
-
-    start = st.sidebar.selectbox(
-        "Start run",
-        options=options_list,
-        index=options_list.index(cur_start),
-        key="crsv_start_run_sel",
-    )
-    end = st.sidebar.selectbox(
-        "End run",
-        options=options_list,
-        index=options_list.index(cur_end),
-        key="crsv_end_run_sel",
-    )
-
-    # Run-family selectors
-    family_options = ["(none)"] + family_names
-    cur_fam_start = st.session_state.get("crsv_start_family_sel", "(none)")
-    if cur_fam_start not in family_options:
-        cur_fam_start = "(none)"
-    cur_fam_end = st.session_state.get("crsv_end_family_sel", "(none)")
-    if cur_fam_end not in family_options:
-        cur_fam_end = "(none)"
-
-    start_family = st.sidebar.selectbox(
-        "Start run family",
+    # Primary selector: run families derived from ``initial_run``. The
+    # "(all families)" option allows cross-family comparisons based purely
+    # on build (timestamp) selection.
+    family_options = ["(all families)"] + family_names
+    fam_key = "crsv_family_sel"
+    cur_family = st.session_state.get(fam_key, "(all families)")
+    if cur_family not in family_options:
+        cur_family = "(all families)"
+    family_sel = st.sidebar.selectbox(
+        "Run family",
         options=family_options,
-        index=family_options.index(cur_fam_start),
-        key="crsv_start_family_sel",
-    )
-    end_family = st.sidebar.selectbox(
-        "End run family",
-        options=family_options,
-        index=family_options.index(cur_fam_end),
-        key="crsv_end_family_sel",
+        index=family_options.index(cur_family),
+        key=fam_key,
     )
 
-    # Expand Start/End run and run-family selections into timestamps using
-    # the shared helper, mirroring the behaviour in the main viewer.
-    range_selected_ts: List[str] = compute_selected_timestamps(
-        start,
-        end,
-        start_family,
-        end_family,
-        timestamp_names,
-        family_names,
-        family_to_ts,
+    # Determine which timestamped builds are available for the chosen
+    # family. When "(all families)" is selected we expose every
+    # discovered timestamp.
+    if family_sel == "(all families)":
+        available_builds = timestamp_names
+    else:
+        available_builds = family_to_ts.get(family_sel, [])
+
+    # Multiselect of builds (logical single runs) within the chosen
+    # family. Persisted across reruns.
+    builds_ms_key = "crsv_build_multiselect"
+    builds_default = st.session_state.get(builds_ms_key)
+    if not builds_default:
+        builds_default = list(available_builds)
+    builds_default = [b for b in builds_default if b in available_builds]
+    selected_builds = st.sidebar.multiselect(
+        "Builds (timestamps)",
+        options=available_builds,
+        default=builds_default,
+        key=builds_ms_key,
+        help="Select which timestamped single runs to include in the statistics table.",
     )
+
+    selected_builds_set = set(selected_builds or available_builds)
 
     # Build per‑timestamp statistics rows
     stat_rows = _build_statistics_rows(base_dir, ts_to_runs)
@@ -408,16 +432,12 @@ def _run_as_script() -> None:
     # columns (``run`` / ``run_timestamp``) show up consistently.
     exclude_keys = ["_dir"] + common_keys
     table_rows = runs_to_dataframe_dicts(stat_rows, exclude_keys)
-    df = pd.DataFrame(table_rows)
+    df = DataFrame(table_rows)
 
-    # If the user selected a Start/End range (either by run or run family)
-    # in the sidebar, *also* apply that range to the main grid so that the
-    # selection controls trim down which runs are visible in the table (and
-    # therefore in the CSV download). This mirrors the behaviour of
-    # ``compare_runs_viewer``, where the range selection constrains the
-    # comparison set rather than affecting charts only.
-    if range_selected_ts and "run" in df.columns:
-        df = df[df["run"].astype(str).isin(set(range_selected_ts))]
+    # Apply the family/build selection from the sidebar to the grid so
+    # that only the chosen builds are visible (and included in downloads).
+    if selected_builds_set and "run" in df.columns:
+        df = df[df["run"].astype(str).isin(selected_builds_set)]
 
     # Simple substring filter (applied on top of the Start/End range).
     with st.expander("Filter runs", expanded=False):
@@ -488,7 +508,6 @@ def _run_as_script() -> None:
         selection = (dataframe_viewer_return or {}).get("selection") or {}
         selected_rows = selection.get("rows") or []
     except Exception:
-        selection = {}
         selected_rows = []
 
     if selected_rows:
@@ -501,17 +520,11 @@ def _run_as_script() -> None:
         except Exception:
             selected_ts = []
     else:
-        # Fallback: nothing selected in the grid. Prefer the sidebar
-        # Start/End range if configured; otherwise default to all visible
-        # runs from the filtered table.
+        # Fallback: nothing selected in the grid. Default to all visible
+        # runs from the filtered table, already constrained by the
+        # family/build selection in the sidebar.
         visible_runs = [str(r) for r in fdf.get("run", [])]
-        if range_selected_ts:
-            # Maintain timestamp ordering while intersecting with the
-            # currently visible rows.
-            sidebar_filtered = [ts for ts in range_selected_ts if ts in visible_runs]
-            selected_ts = sidebar_filtered or visible_runs
-        else:
-            selected_ts = visible_runs
+        selected_ts = visible_runs
 
     # Persist last selection so navigation within the app feels stable
     st.session_state["crsv_last_selection"] = selected_ts
@@ -561,7 +574,17 @@ def _run_as_script() -> None:
         # build a list of *all* relevant run directories for the timestamp
         # and render charts for each one.
 
+        # Determine the correct path to the timestamp directory.  For nested runs
+        # (inside run_family_...), the timestamp directory is not directly under
+        # base_dir, so we derive its location from the first run's _dir.
         ts_path = os.path.join(base_dir, ts_name)
+        if run_list:
+            dname = run_list[0][1].get("_dir")
+            if dname:
+                parent_rel = os.path.dirname(dname)
+                candidate = os.path.join(base_dir, parent_rel)
+                if os.path.isdir(candidate):
+                    ts_path = candidate
 
         run_paths: List[Tuple[str, str]] = []  # (label, path)
 
@@ -577,14 +600,17 @@ def _run_as_script() -> None:
             dname = params.get("_dir")
             if not dname:
                 continue
-            parts = str(dname).split("/")
-            if len(parts) != 2:
+            parts = re.split(r'[\\/]', str(dname))
+            if len(parts) < 2:
                 continue
-            ts_part, rep_name = parts
+
+            rep_name = parts[-1]
+            ts_part = parts[-2]
+
             if ts_part != ts_name:
                 continue
 
-            rep_path = os.path.join(base_dir, dname)
+            rep_path = str(os.path.join(base_dir, dname))
             if not os.path.isdir(rep_path):
                 continue
             if not _find_epoch_files(rep_path):
@@ -616,32 +642,38 @@ def _run_as_script() -> None:
 
             for _set_size, epoch, fpath in epoch_files:
                 try:
-                    df = pd.read_csv(fpath)
-                except Exception:
+                    df = read_csv(fpath)
+                except Exception as e:
+                    print(f"Error reading csv {fpath}: {e}")
                     continue
                 if df.empty:
                     continue
 
-                for col in df.columns:
-                    if not isinstance(col, str):
-                        continue
-                    if not col.startswith("portfolio_top"):
-                        continue
+                # Identify columns to plot
+                top_cols = [c for c in df.columns if isinstance(c, str) and c.startswith("portfolio_top")]
+                if not top_cols and "portfolio_value" in df.columns:
+                    top_cols = ["portfolio_value"]
 
-                    suffix = col[len("portfolio_top") :]
-                    try:
-                        n = int(suffix)
-                    except Exception:
-                        # Ignore columns that don't match the expected pattern
-                        # (e.g. portfolio_topX where X is not an int).
-                        continue
+                for col in top_cols:
+                    if col == "portfolio_value":
+                        n = 0
+                    else:
+                        suffix = col[len("portfolio_top") :]
+                        try:
+                            n = int(suffix)
+                        except Exception as e:
+                            print(f"Error parsing column suffix {col}: {e}")
+                            # Ignore columns that don't match the expected pattern
+                            # (e.g. portfolio_topX where X is not an int).
+                            continue
 
                     series = df[col]
 
                     # Final value
                     try:
                         final_val = float(series.iloc[-1])
-                    except Exception:
+                    except Exception as e:
+                        print(f"Error extracting final value for {col}: {e}")
                         final_val = None
 
                     if final_val is not None:
@@ -654,7 +686,8 @@ def _run_as_script() -> None:
                             first5_val = float(head.max())
                         else:
                             first5_val = None
-                    except Exception:
+                    except Exception as e:
+                        print(f"Error extracting first 5 value for {col}: {e}")
                         first5_val = None
 
                     if first5_val is not None:
@@ -673,8 +706,11 @@ def _run_as_script() -> None:
                     continue
                 epochs = sorted(epoch_map.keys())
                 values = [epoch_map[e] for e in epochs]
-                plot_df = pd.DataFrame({"epoch": epochs, f"final_top{n}": values})
-                st.markdown(f"**Final portfolio_top{n} by epoch**")
+
+                label_key = f"final_top{n}" if n != 0 else "final_value"
+                plot_df = DataFrame({"epoch": epochs, label_key: values})
+
+                st.markdown(f"**Final {label_key} by epoch**")
                 plot_lines(plot_df, "epoch", height=260, y_ref=1000.0, log_y=log_y)
 
             # 2) Best first‑five‑days value vs epoch
@@ -683,8 +719,11 @@ def _run_as_script() -> None:
                     continue
                 epochs = sorted(epoch_map.keys())
                 values = [epoch_map[e] for e in epochs]
-                plot_df = pd.DataFrame({"epoch": epochs, f"first5_best_top{n}": values})
-                st.markdown(f"**Best first‑5‑day portfolio_top{n} by epoch**")
+
+                label_key = f"first5_best_top{n}" if n != 0 else "first5_best_value"
+                plot_df = DataFrame({"epoch": epochs, label_key: values})
+
+                st.markdown(f"**Best first‑5‑day {label_key} by epoch**")
                 plot_lines(plot_df, "epoch", height=260, y_ref=1000.0, log_y=log_y)
 
 

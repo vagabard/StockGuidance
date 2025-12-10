@@ -78,7 +78,7 @@ def test_stock_recommender_random_inputs_vary_argmax(tmp_path):
     trials = 12
     for _ in range(trials):
         x = np.random.randn(input_size).astype(np.float32)
-        scores, top_ids = rec.getBuyRecommendations(x, top_k=1, return_scores=True)
+        scores, top_ids = rec.getBuyRecommendations(x, top_k=1)
         #print(top_ids[0])
         assert scores.shape == (output_size,)
         assert len(top_ids) == 1

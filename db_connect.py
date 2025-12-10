@@ -2,7 +2,7 @@
 Simple MySQL connectivity helper for the local instance.
 
 Defaults:
-- host: mysql95
+- host: localhost
 - database/schema: stockforecasting
 - port: 3306
 - credentials from environment variables if not provided via CLI:
@@ -64,12 +64,12 @@ def _try_import_drivers(prefer: str = "auto") -> Tuple[str, object]:
 
 
 def get_connection(
-    host: str = "mysql95",
+    host: str = "localhost",
     database: str = "stockforecasting",
     user: Optional[str] = None,
     password: Optional[str] = None,
     port: int = 3306,
-    driver: str = "pymysql",
+    driver: str = "auto",
 ):
     """Create and return a live MySQL connection using the requested driver.
 
@@ -157,12 +157,37 @@ def _print_connection_info(conn, cursor):
 
 
 def main(argv: Optional[list[str]] = None) -> int:
-    parser = argparse.ArgumentParser(description="Test connection to local MySQL (mysql95/stockforecasting)")
-    parser.add_argument("--host", default="mysql95", help="MySQL host name or IP (default: mysql95)")
-    parser.add_argument("--db", "--database", dest="database", default="stockforecasting", help="Database/schema name (default: stockforecasting)")
-    parser.add_argument("--user", default=None, help="Username (default: from env MYSQL_USER)")
-    parser.add_argument("--password", default=None, help="Password (default: from env MYSQL_PASSWORD)")
-    parser.add_argument("--port", type=int, default=int(os.getenv("MYSQL_PORT", 3306)), help="Port (default: 3306 or env MYSQL_PORT)")
+    parser = argparse.ArgumentParser(
+        description="Test connection to local MySQL (localhost/stockforecasting)"
+    )
+    parser.add_argument(
+        "--host",
+        default="localhost",
+        help="MySQL host name or IP (default: localhost)",
+    )
+    parser.add_argument(
+        "--db",
+        "--database",
+        dest="database",
+        default="stockforecasting",
+        help="Database/schema name (default: stockforecasting)",
+    )
+    parser.add_argument(
+        "--user",
+        default=None,
+        help="Username (default: from env MYSQL_USER)",
+    )
+    parser.add_argument(
+        "--password",
+        default=None,
+        help="Password (default: from env MYSQL_PASSWORD)",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=int(os.getenv("MYSQL_PORT", 3306)),
+        help="Port (default: 3306 or env MYSQL_PORT)",
+    )
     parser.add_argument(
         "--driver",
         choices=["auto", "mysqlconnector", "pymysql"],

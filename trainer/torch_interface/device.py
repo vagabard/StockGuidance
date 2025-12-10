@@ -1,15 +1,20 @@
 from __future__ import annotations
 
 import os
-from typing import Optional, Tuple
+from typing import Optional, Tuple, TYPE_CHECKING
 
-from .compat import TORCH_AVAILABLE, torch
+import torch
+
+from trainer.torch_interface.compat import TORCH_AVAILABLE
+
+if TYPE_CHECKING:  # pragma: no cover - import for type checkers only
+    from trainer.state.family_run import FamilyRun
 
 
-def setup_device_and_precision(args) -> Tuple["torch.device", str, bool, Optional["torch.dtype"]]:
-    """Resolve torch device and AMP precision settings.
+def setup_device_and_precision(family_run: "FamilyRun") -> Tuple["torch.device", str, bool, Optional["torch.dtype"]]:
+    """Resolve torch_interface device and AMP precision settings.
 
-    Returns (device, eff_precision:str, use_amp:bool, amp_dtype:Optional[torch.dtype]).
+    Returns (device, eff_precision:str, use_amp:bool, amp_dtype:Optional[torch_interface.dtype]).
     """
     if not TORCH_AVAILABLE:
         raise RuntimeError("PyTorch is required for training. Please install a CUDA-enabled PyTorch build.")
@@ -27,12 +32,12 @@ def setup_device_and_precision(args) -> Tuple["torch.device", str, bool, Optiona
     except Exception:
         pass
 
-    if args.device == "auto":
+    if family_run.device == "auto":
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")  # type: ignore[attr-defined]
     else:
-        device = torch.device("cuda" if args.device == "cuda" else "cpu")  # type: ignore[attr-defined]
+        device = torch.device("cuda" if family_run.device == "cuda" else "cpu")  # type: ignore[attr-defined]
 
-    requested_precision = (args.precision or "auto").lower()
+    requested_precision = (family_run.precision or "auto").lower()
     raised_prec = requested_precision if requested_precision in ("auto", "fp32", "fp16", "bf16") else "auto"
     if raised_prec == "auto":
         eff_precision = "fp16" if device.type == "cuda" else "fp32"  # type: ignore[union-attr]
@@ -57,7 +62,7 @@ def enforce_cuda_or_fail(device) -> None:
     if device.type != "cuda":  # type: ignore[union-attr]
         if not torch.cuda.is_available():  # type: ignore[union-attr]
             raise RuntimeError(
-                "CUDA GPU is required for training, but torch.cuda.is_available() is False. "
+                "CUDA GPU is required for training, but torch_interface.cuda.is_available() is False. "
                 "Install a CUDA-enabled PyTorch build and ensure a compatible GPU/driver is present."
             )
         else:

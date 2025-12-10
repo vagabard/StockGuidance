@@ -59,7 +59,7 @@ class ConvolutionAndTransformerFeedForwareNet(nn.Module):
         self.proj = nn.Conv1d(channels, output_size, kernel_size=1)
         self.act = nn.ReLU()
 
-    def forward(self, x: "torch.Tensor") -> "torch.Tensor":
+    def forward(self, x: "torch_interface.Tensor") -> "torch_interface.Tensor":
         # Accept (B, S) or (S,)
         if x.dim() == 1:
             x = x.unsqueeze(0)

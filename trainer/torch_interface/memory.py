@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .utils import fmt_bytes
+from trainer.util.utils import fmt_bytes
 
 
 def estimate_memory(provider, args, input_size: int, output_size: int, n_total: int, train_ds, val_ds, test_ds) -> None:
@@ -29,9 +29,9 @@ def estimate_memory(provider, args, input_size: int, output_size: int, n_total: 
     activations_peak_train_bytes = activations_bytes * 2.0
     batch_input_bytes = B * S * 4.0
     batch_target_bytes = B * output_size * 4.0
-    D = int(provider._D)
-    TF = int(provider._TF)
-    T = int(provider._T)
+    D = int(provider.number_of_dates_or_dates_times_number_of_features_times_number_tickers)
+    TF = int(provider.ticker_feature_quantity)
+    T = int(provider.ticker_label_for_training_quantity)
     dates_bytes = provider._dates.size * 4.0
     X_bytes = D * TF * 8.0
     Y_bytes = D * T * 8.0

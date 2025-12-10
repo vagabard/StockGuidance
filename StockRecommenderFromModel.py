@@ -22,21 +22,22 @@ from __future__ import annotations
 
 import json
 import os
+import traceback
 from typing import Iterable, List, Tuple, Union, Optional
 
 import numpy as np
 
-try:  # torch is optional at import-time, but required for inference
+try:  # torch_interface is optional at import-time, but required for inference
 	import torch  # type: ignore
 	TORCH_AVAILABLE = True
-except Exception:  # pragma: no cover - allow environment without torch
+except Exception:  # pragma: no cover - allow environment without torch_interface
 	torch = None  # type: ignore
 	TORCH_AVAILABLE = False
 
 from models import load_model_from_manifest  # type: ignore
 
 
-ArrayLike = Union[np.ndarray, "torch.Tensor", Iterable[float]]
+ArrayLike = Union[np.ndarray, "torch_interface.Tensor", Iterable[float]]
 
 print_recommendation_type = False
 
@@ -44,7 +45,7 @@ print_recommendation_type = False
 class StockRecommenderFromModel:
 	def __init__(
 		self,
-		model_or_path: "torch.nn.Module | str",  # type: ignore[name-defined]
+		model_or_path: "torch_interface.nn.Module | str",  # type: ignore[name-defined]
 		model_path: Optional[str] = None,
 		model_dict: Optional[dict] = None,
 		device: str = "auto",
@@ -58,7 +59,7 @@ class StockRecommenderFromModel:
 		This constructor is intentionally backward compatible:
 		- If ``model_or_path`` is a string, it is treated as before: a path to
 		  either the model_manifest.json file or a directory containing it.
-		- If ``model_or_path`` is an already loaded ``torch.nn.Module`` then the
+		- If ``model_or_path`` is an already loaded ``torch_interface.nn.Module`` then the
 		  caller must also supply ``manifest`` describing the model metadata
 		  (at minimum ``input_size`` and ``output_size``). ``run_dir`` may be
 		  provided to point at the directory that would normally contain the
@@ -83,8 +84,9 @@ class StockRecommenderFromModel:
 			dev = device
 		self._device = torch.device(dev)  # type: ignore[call-arg]
 		self._ensemble_normalize: bool = bool(ensemble_normalize)
-		self._ensemble_models: List["torch.nn.Module"] = []  # type: ignore[name-defined]
+		self._ensemble_models: List["torch_interface.nn.Module"] = []  # type: ignore[name-defined]
 		self._is_ensemble: bool = False
+		self._manifest: dict = {}
 
 		# --- Mode 1: path/dir string (existing behaviour, extended for ensembles) ---
 		if isinstance(model_or_path, str):
@@ -110,10 +112,10 @@ class StockRecommenderFromModel:
 
 				# If we detected repeated-run directories, treat them as an ensemble.
 				if rep_dirs:
-					models: List["torch.nn.Module"] = []  # type: ignore[name-defined]
+					models: List["torch_interface.nn.Module"] = []  # type: ignore[name-defined]
 					manifests: List[dict] = []
 					for d in rep_dirs:
-						manifest_path = self._resolve_manifest_path(d)
+						manifest_path = self.resolve_manifest_path(d)
 						if not os.path.exists(manifest_path):
 							continue
 						m, man, _ = load_model_from_manifest(
@@ -121,71 +123,34 @@ class StockRecommenderFromModel:
 						)
 						models.append(m)
 						manifests.append(man)
+					self._manifest = dict(manifests[0]) # just grab the first one to get data from for formatting
+					self._is_ensemble = True
+					if len(models) != len(manifests):
+						raise ValueError(
+							"All ensemble members must have the same manifest.json"
+						)
+					if len(models) < 2:
+						raise ValueError(
+							"At least two ensemble members are required (found %d)" % len(models)
+						)
 
-					if not models:
-						# Fall back to single-model resolution below.
-						resolved_manifest = self._resolve_manifest_path(path_str)
-						if not os.path.exists(resolved_manifest):
-							raise FileNotFoundError(
-								f"Model manifest not found: {resolved_manifest}"
+					# Validate that all ensemble members share the same input/output sizes.
+					base_manifest = manifests[0]
+					input_size = int(base_manifest.get("input_size", 0))
+					output_size = int(base_manifest.get("output_size", 0))
+					for man in manifests[1:]:
+						if int(man.get("input_size", 0)) != input_size or int(
+							man.get("output_size", 0)
+						) != output_size:
+							raise ValueError(
+								"All ensemble members must share input_size and output_size"
 							)
-						model, manifest_dict, _ = load_model_from_manifest(
-							resolved_manifest, map_location=str(self._device)
-						)
-						self._model = model
-						self._manifest = manifest_dict
-						self._dir = os.path.dirname(os.path.abspath(resolved_manifest))
-					else:
-						# Validate that all ensemble members share the same input/output sizes.
-						base_manifest = manifests[0]
-						input_size = int(base_manifest.get("input_size", 0))
-						output_size = int(base_manifest.get("output_size", 0))
-						for man in manifests[1:]:
-							if int(man.get("input_size", 0)) != input_size or int(
-								man.get("output_size", 0)
-							) != output_size:
-								raise ValueError(
-									"All ensemble members must share input_size and output_size"
-								)
 
-						self._ensemble_models = [m.to(self._device).eval() for m in models]
-						self._is_ensemble = len(self._ensemble_models) > 1
-						# For backward-compatible attribute access, expose the first
-						# model/manifest as the primary.
-						self._model = self._ensemble_models[0]
-						self._manifest = dict(base_manifest)
-						self._dir = path_str
-				else:
-					# No repeated-run subdirectories; fall back to the original
-					# single-model directory/manifest resolution.
-					resolved_manifest = self._resolve_manifest_path(path_str)
-					if not os.path.exists(resolved_manifest):
-						raise FileNotFoundError(
-							f"Model manifest not found: {resolved_manifest}"
-						)
-
-					model, manifest_dict, _ = load_model_from_manifest(
-						resolved_manifest, map_location=str(self._device)
-					)
-					self._model = model
-					self._manifest = manifest_dict
-					self._dir = os.path.dirname(os.path.abspath(resolved_manifest))
-			else:
-				# Path is not a directory – treat as a file path as before.
-				resolved_manifest = self._resolve_manifest_path(path_str)
-				if not os.path.exists(resolved_manifest):
-					raise FileNotFoundError(f"Model manifest not found: {resolved_manifest}")
-
-				model, manifest_dict, _ = load_model_from_manifest(
-					resolved_manifest, map_location=str(self._device)
-				)
-				self._model = model
-				self._manifest = manifest_dict
-				self._dir = os.path.dirname(os.path.abspath(resolved_manifest))
+					self._ensemble_models = [m.to(self._device).eval() for m in models]
 		else:
-			# --- Mode 2: an already loaded torch.nn.Module -------------------
+			# --- Mode 2: an already loaded torch_interface.nn.Module -------------------
 			model = model_or_path
-			resolved_manifest = self._resolve_manifest_path(model_path or "")
+			resolved_manifest = self.resolve_manifest_path(model_path or "")
 			if model_dict:
 				manifest = model_dict
 			else:
@@ -197,22 +162,21 @@ class StockRecommenderFromModel:
 					"When passing an existing model instance, a manifest dict "
 					"with at least 'input_size' and 'output_size' must be provided."
 				)
-			self._model = model.to(self._device)
-			self._model.eval()
+			self._ensemble_models = [model.to(self._device).eval()]
 			self._manifest = dict(manifest)
-			self._dir = os.path.abspath(run_dir or os.getcwd())
+			# self._dir = os.path.abspath(run_dir or os.getcwd())
 
 		# Optional ticker id mapping sidecar
-		self._ticker_id_map: Optional[List[int]] = None
-		map_path = os.path.join(self._dir, "ticker_id_map.json")
-		if os.path.exists(map_path):
-			try:
-				with open(map_path, "r", encoding="utf-8") as f:
-					arr = json.load(f)
-				if isinstance(arr, list) and all(isinstance(x, int) for x in arr):
-					self._ticker_id_map = list(arr)
-			except Exception:
-				self._ticker_id_map = None
+		# self._ticker_id_map: Optional[List[int]] = None
+		# map_path = os.path.join(self._dir, "ticker_id_map.json")
+		# if os.path.exists(map_path):
+		# 	try:
+		# 		with open(map_path, "r", encoding="utf-8") as f:
+		# 			arr = json.load(f)
+		# 		if isinstance(arr, list) and all(isinstance(x, int) for x in arr):
+		# 			self._ticker_id_map = list(arr)
+		# 	except Exception:
+		# 		self._ticker_id_map = None
 
 		# Cache common dims
 		self._input_size: int = int(self._manifest.get("input_size", 0))
@@ -231,7 +195,7 @@ class StockRecommenderFromModel:
 		return dict(self._manifest)
 
 	@staticmethod
-	def _resolve_manifest_path(path: str) -> str:
+	def resolve_manifest_path(path: str) -> str:
 		"""Resolve a manifest path using the new convention:
 		- If a directory is provided, look for files that end with 'model_manifest.json'.
 		  If multiple are found, raise an error. If exactly one is found, use it.
@@ -241,12 +205,13 @@ class StockRecommenderFromModel:
 		"""
 		def _find_manifest_in_dir(d: str) -> str:
 			try:
-				candidates = [
-					os.path.join(d, f)
-					for f in os.listdir(d)
-					if f.lower().endswith("model_manifest.json")
-				]
-			except FileNotFoundError:
+				candidates = []
+				list_of_files = os.listdir(d)
+				for test_file in list_of_files:
+					if test_file.lower().endswith("model_manifest.json"):
+						candidates.append(os.path.join(d, test_file))
+			except FileNotFoundError as e:
+				traceback.print_exception(e)
 				candidates = []
 
 			if len(candidates) == 1:
@@ -330,7 +295,7 @@ class StockRecommenderFromModel:
 		"""Return the expected flattened input feature size."""
 		return self._input_size
 
-	def _to_tensor(self, x: ArrayLike) -> "torch.Tensor":  # type: ignore[name-defined]
+	def _to_tensor(self, x: ArrayLike) -> "torch_interface.Tensor":  # type: ignore[name-defined]
 		if torch is None:
 			raise RuntimeError("PyTorch is required for inference.")
 
@@ -354,7 +319,6 @@ class StockRecommenderFromModel:
 		self,
 		feature_vector: ArrayLike,
 		top_k: int = 10,
-		return_scores: bool = True,
 		index_base: int = 1,
 	) -> Tuple[np.ndarray, List[int]]:
 		"""Run the model and produce recommendations.
@@ -375,73 +339,63 @@ class StockRecommenderFromModel:
 			top_k = 1
 		top_k = int(min(top_k, self._output_size))
 
-		t = self._to_tensor(feature_vector)
+		feature_tensor = self._to_tensor(feature_vector)
 		with torch.no_grad():  # type: ignore[attr-defined]
-			t = torch.nan_to_num(t, nan=0.0, posinf=0.0, neginf=0.0)  # type: ignore[attr-defined]
-			inp = t.reshape(1, -1)
+			feature_tensor = torch.nan_to_num(feature_tensor, nan=0.0, posinf=0.0, neginf=0.0)  # type: ignore[attr-defined]
+			input_to_model = feature_tensor.reshape(1, -1)
 
 			# If this instance represents an ensemble of models (e.g. rep1/rep2
 			# directories under a common run directory), aggregate their outputs.
-			if getattr(self, "_is_ensemble", False) and getattr(self, "_ensemble_models", None):
-				model_count = len(self._ensemble_models)  # type: ignore[attr-defined]
-				# Log how many models are being used for this recommendation call.
-				print(
-					f"StockRecommenderFromModel: using {model_count} model(s) "
-					"for ensemble recommendations.",
-				)
-				agg: Optional["torch.Tensor"] = None  # type: ignore[name-defined]
-				for m in self._ensemble_models:  # type: ignore[attr-defined]
-					out = m(inp)
-					out = torch.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0)  # type: ignore[attr-defined]
-					out_flat = out.reshape(-1).to(torch.float32)  # type: ignore[attr-defined]
-					if self._ensemble_normalize:
-						# Normalize this model's scores so they sum to 1. Guard against
-						# degenerate all-zero outputs by leaving them as-is.
-						if not print_recommendation_type:
-							print(
-								"StockRecommenderFromModel: applying per-model "
-								"normalization before ensemble aggregation.",
-							)
-							print_recommendation_type = True
-						total = float(out_flat.sum().item())
-						if total > 0.0:
-							out_flat = out_flat / total
-					if agg is None:
-						agg = out_flat
-					else:
-						agg = agg + out_flat
+			# model_count = len(self._ensemble_models)  # type: ignore[attr-defined]
+			# Log how many models are being used for this recommendation call.
+			# print(
+			# 	f"StockRecommenderFromModel: using {model_count} model(s) "
+			# 	"for ensemble recommendations.",
+			# )
+			agg: Optional["torch_interface.Tensor"] = None  # type: ignore[name-defined]
+			for one_model in self._ensemble_models:  # type: ignore[attr-defined]
+				raw_output_from_model = one_model(input_to_model)
+				raw_output_from_model = torch.nan_to_num(raw_output_from_model, nan=0.0, posinf=0.0, neginf=0.0)  # type: ignore[attr-defined]
+				out_from_model_flat = raw_output_from_model.reshape(-1).to(torch.float32)  # type: ignore[attr-defined]
+				if self._ensemble_normalize:
+					# Normalize this model's scores so they sum to 1. Guard against
+					# degenerate all-zero outputs by leaving them as-is.
+					if not print_recommendation_type:
+						print(
+							"StockRecommenderFromModel: applying per-model "
+							"normalization before ensemble aggregation.",
+						)
+						print_recommendation_type = True
+					total = float(out_from_model_flat.sum().item())
+					if total > 0.0:
+						out_from_model_flat = out_from_model_flat / total
 				if agg is None:
-					# Fallback: no ensemble members produced outputs; behave like a
-					# single zero vector to avoid crashes.
-					agg = torch.zeros(self._output_size, dtype=torch.float32, device=self._device)  # type: ignore[attr-defined]
-				out_flat = agg.detach().cpu()
-			else:
-				# Single-model case: preserve original behaviour.
-				if not print_recommendation_type:
-					print(
-						"StockRecommenderFromModel: using 1 model (no ensemble) "
-						"for recommendations.",
-					)
-					print_recommendation_type = True
-				out = self._model(inp)
-				out = torch.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0)  # type: ignore[attr-defined]
-				# Ensure 1D output shape (T,)
-				out_flat = out.reshape(-1).detach().cpu().to(torch.float32)  # type: ignore[attr-defined]
+					agg = out_from_model_flat
+				else:
+					agg = agg + out_from_model_flat
+			if agg is None:
+				raise RuntimeError("Ensemble aggregation failed.")
+				# Fallback: no ensemble members produced outputs; behave like a
+				# single zero vector to avoid crashes.
+#				agg = torch.zeros(self._output_size, dtype=torch.float32, device=self._device)  # type: ignore[attr-defined]
+			out_from_model_flat = agg.detach().cpu()
 
 		# Convert to numpy for easy handling
-		scores_np = out_flat.numpy()
+		scores_np = out_from_model_flat.numpy()
 
 		# Argpartition/argsort for top-k indices (largest first)
-		# Use torch.topk for simplicity and speed
-		topk_vals, topk_idx = torch.topk(out_flat, k=top_k, largest=True, sorted=True)  # type: ignore[attr-defined]
+		# Use torch_interface.topk for simplicity and speed
+		topk_vals, topk_idx = torch.topk(out_from_model_flat, k=top_k, largest=True, sorted=True)  # type: ignore[attr-defined]
 		idx_list = topk_idx.tolist()
 
 		# Map to ticker ids if mapping present; else convert to index_base offset
 		top_ids: List[int] = []
-		if self._ticker_id_map and len(self._ticker_id_map) == self._output_size:
-			for i in idx_list:
-				top_ids.append(int(self._ticker_id_map[i]))
-		else:
+		# if self._ticker_id_map and len(self._ticker_id_map) == self._output_size:
+		# 	for i in idx_list:
+		# 		if self._ticker_id_map[i]:
+		# 			top_ids.append(int(self._ticker_id_map[i]))
+		# else:
+		if True:
 			# Dense slots -> ticker ids 1..T or 0..T-1
 			offset = 1 if int(index_base) == 1 else 0
 			for i in idx_list:
@@ -449,5 +403,14 @@ class StockRecommenderFromModel:
 
 		return scores_np, top_ids
 
+	@property
+	def output_size(self):
+		return self._output_size
+
+def main(self):
+	print("got path ", self.resolve_manifest_path("C:\\Projects\\StockGuidance\\data\\run_family_20251208_222008\\20251208_222008\\rep1"))
+
+
+__name__ == "__main__" and main(StockRecommenderFromModel)
 
 __all__ = ["StockRecommenderFromModel"]

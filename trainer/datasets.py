@@ -3,16 +3,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterator, Tuple, List
 
-import numpy as np
+import torch
 
-from .compat import TORCH_AVAILABLE, torch
-from .utils import tensorize_and_sanitize
+from trainer.torch_interface.compat import TORCH_AVAILABLE
+from trainer.util.utils import tensorize_and_sanitize
+from training_instance_provider import TrainingInstanceProvider
 
 
 @dataclass
 class RangeDataset:
     """Dataset that pulls instances from the provider by 1-based index range."""
-    provider: object
+    provider: TrainingInstanceProvider
     start_idx: int
     end_idx: int
 
@@ -34,7 +35,7 @@ class RangeDataset:
 @dataclass
 class IndexDataset:
     """Dataset that pulls instances by explicit 1-based index list (possibly shuffled)."""
-    provider: object
+    provider: TrainingInstanceProvider
     indices: List[int]
 
     def __len__(self) -> int:
@@ -52,10 +53,10 @@ class IndexDataset:
         return tensorize_and_sanitize(x, y)
 
 
-def batched(iterable: Iterator[Tuple["torch.Tensor", "torch.Tensor"]], batch_size: int):
+def batched(iterable: Iterator[Tuple["torch_interface.Tensor", "torch_interface.Tensor"]], batch_size: int):
     """Simple batching utility yielding (xb, yb) tensors of size <= batch_size."""
     if not TORCH_AVAILABLE:
-        raise RuntimeError("Batched iteration requires torch in train mode")
+        raise RuntimeError("Batched iteration requires torch_interface in train mode")
     batch_x = []
     batch_y = []
     for x, y in iterable:

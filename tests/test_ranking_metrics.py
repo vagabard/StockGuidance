@@ -75,7 +75,7 @@ class TestRankingMetrics(unittest.TestCase):
 		with self.assertRaises(ValueError):
 			ranking_score(["x", "y"], ["x", "z"])
 
-	@unittest.skipIf(torch is None, "torch not available")
+	@unittest.skipIf(torch is None, "torch_interface not available")
 	def test_ranking_surrogate_loss_zero_when_equal(self):
 		assert torch is not None
 		# Two samples, four items each
@@ -88,7 +88,7 @@ class TestRankingMetrics(unittest.TestCase):
 		loss = ranking_surrogate_loss(y_pred, y_true, temperature=1.0)
 		self.assertLess(float(loss.item()), 0.000001, "loss should be zero when predictions are identical")
 
-	@unittest.skipIf(torch is None, "torch not available")
+	@unittest.skipIf(torch is None, "torch_interface not available")
 	def test_ranking_surrogate_loss_increases_when_permuted(self):
 		assert torch is not None
 		# One sample, deterministic labels
@@ -110,7 +110,7 @@ class TestRankingMetrics(unittest.TestCase):
 		self.assertLess(float(loss_good.item()), 0.000001, "loss should be zero when predictions are identical")
 		self.assertGreater(float(loss_bad.item()), float(loss_good.item()) + 1e-4)
 
-	@unittest.skipIf(torch is None, "torch not available")
+	@unittest.skipIf(torch is None, "torch_interface not available")
 	def test_ranking_surrogate_loss_batchmean_reduction_stability(self):
 		assert torch is not None
 		# Single sample
@@ -128,7 +128,7 @@ class TestRankingMetrics(unittest.TestCase):
 		# With reduction='batchmean', duplicating identical samples should keep the loss approximately the same
 		self.assertAlmostEqual(float(loss_batch.item()), float(loss_single.item()), places=6)
 
-	@unittest.skipIf(torch is None, "torch not available")
+	@unittest.skipIf(torch is None, "torch_interface not available")
 	def test_surrogate_emphasizes_top_ranks(self):
 		"""Verify that mistakes involving the very top item are penalized more.
 

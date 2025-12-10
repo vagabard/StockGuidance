@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
 import requests
+from requests import Response
+
 last_api_call = 0.0
 POLYGON_BASE = "https://api.massive.com"
 TICKERS_ENDPOINT = f"{POLYGON_BASE}/v3/reference/tickers"
@@ -161,7 +163,7 @@ def throttle_sleep(last_call_ts: float) -> None:
 
 
 def http_get(url: str, params: Dict[str, str], headers: Dict[str, str], *,
-			 max_retries: int) -> requests.Response:
+			 max_retries: int) -> Response | None:
 	attempt = 0
 	global last_api_call
 	backoff = REQUIRED_DELAY_BETWEEN_API_CALLS
@@ -574,7 +576,8 @@ def main() -> int:
 					out_file = day_file_path(output_dir, ticker, day)
 					count = fetch_overview_day(api_key, ticker, day, out_file, max_retries=args.max_retries)
 					print(f"OK (checkpoint) {ticker} {iso_date(day)}: overview saved ({count} object(s))")
-				remove_checkpoint(checkpoints_path, ticker, day_str)
+				if ticker:
+					remove_checkpoint(checkpoints_path, ticker, day_str)
 			except Exception as e:
 				print(f"FAIL (checkpoint) {ticker} {iso_date(day)} [{kind or 'overview'}]: {e}")
 				# leave checkpoint

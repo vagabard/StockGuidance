@@ -9,7 +9,7 @@ Outputs
 - Keys array: shape (N, 2) with (date_id, ticker_id)
 - Features array: shape (N, 2) with (open, close) as float64
 
-Optional outputs with --to-torch: same data as torch tensors (int64 keys, float32 features).
+Optional outputs with --to-torch_interface: same data as torch_interface tensors (int64 keys, float32 features).
 You can also persist results via --save-npz or --save-pt.
 """
 from __future__ import annotations
@@ -38,8 +38,8 @@ SELECT
 	rsd.date_id,
 	rsd.open,
 	rsd.close
-FROM raw_stock_data rsd
-ORDER BY rsd.date_id ASC, rsd.ticker_id ASC
+	FROM raw_stock_data rsd
+	ORDER BY rsd.date_id ASC, rsd.ticker_id ASC
 	"""
 )
 
@@ -48,7 +48,7 @@ _DISK_RAW_CACHE_CLEARED_ONCE: bool = False
 
 
 def fetch_as_numpy(
-    host: str = "mysql95",
+	host: str = "localhost",
     database: str = "stockforecasting",
     user: Optional[str] = "Redbeard",
     password: Optional[str] = "3YZs#z5GOJKdea",
@@ -164,9 +164,9 @@ def parse_args(argv: Optional[list[str]] = None):
     p.add_argument("--driver", default="auto", choices=["auto", "mysqlconnector", "pymysql"], help="DB driver to use")
     p.add_argument("--limit", type=int, default=None, help="Optional LIMIT for debugging")
 
-    p.add_argument("--to-torch", action="store_true", help="Also convert outputs to torch.Tensor (if torch available)")
+    p.add_argument("--to-torch_interface", action="store_true", help="Also convert outputs to torch_interface.Tensor (if torch_interface available)")
     p.add_argument("--save-npz", default=None, help="Path to save NumPy arrays as .npz (keys, features)")
-    p.add_argument("--save-pt", default=None, help="Path to save PyTorch tensors as .pt (requires --to-torch)")
+    p.add_argument("--save-pt", default=None, help="Path to save PyTorch tensors as .pt (requires --to-torch_interface)")
     return p.parse_args(argv)
 
 
@@ -202,7 +202,7 @@ def main(argv: Optional[list[str]] = None) -> None:
 
     if args.to_torch:
         if not TORCH_AVAILABLE:
-            raise SystemExit("--to-torch specified but PyTorch is not installed. Install torch or omit the flag.")
+            raise SystemExit("--to-torch_interface specified but PyTorch is not installed. Install torch_interface or omit the flag.")
         keys_t, feats_t = to_torch(keys_np, feats_np)
         print(
             f"Torch tensors: keys {tuple(keys_t.shape)} {keys_t.dtype}, features {tuple(feats_t.shape)} {feats_t.dtype}"

@@ -2,7 +2,7 @@
 Load rows from MySQL table `daily_delta_stock_data` and convert them into tensors/arrays.
 
 Connection is created via `db_connect.get_connection` (same defaults as the rest of the repo):
-- host: mysql95
+- host: localhost
 - database: stockforecasting
 - port: 3306
 - credentials: env vars MYSQL_USER / MYSQL_PASSWORD if not provided
@@ -26,7 +26,7 @@ Outputs
   - Labels array/tensor: shape (N,) with `next_day_change_in_price`
 
 By default, outputs are NumPy arrays. If PyTorch is installed and you pass
-`--to-torch`, the script will also produce torch.Tensors.
+`--to-torch_interface`, the script will also produce torch_interface.Tensors.
 
 You can optionally persist outputs using `--save-npz` (NumPy .npz) or `--save-pt`
 for PyTorch `.pt` files.
@@ -35,7 +35,7 @@ Usage examples:
   python load_database_rows_into_tensors.py --user scott --password tiger --host localhost \
 	  --save-npz data/daily_delta_tensors.npz
 
-  python load_database_rows_into_tensors.py --to-torch --save-pt data/daily_delta_tensors.pt
+  python load_database_rows_into_tensors.py --to-torch_interface --save-pt data/daily_delta_tensors.pt
 """
 from __future__ import annotations
 
@@ -236,12 +236,12 @@ _DISK_GROUPED_CACHE_CLEARED_ONCE = False
 
 
 def fetch_grouped_by_date(
-	host: str = "mysql95",
+	host: str = "localhost",
 	database: str = "stockforecasting",
 	user: Optional[str] = "Redbeard",
 	password: Optional[str] = "3YZs#z5GOJKdea",
 	port: int = 3306,
-	driver: str = "pymysql",
+	driver: str = "auto",
 	limit: Optional[int] = None,
 	return_2d: bool = False,
 	current_day_change: bool = False,
@@ -471,7 +471,7 @@ def to_torch(keys_np: np.ndarray, features_np: np.ndarray, labels_np: Optional[n
 
 def parse_args(argv: Optional[list[str]] = None):
 	p = argparse.ArgumentParser(description="Load daily_delta_stock_data into tensors/arrays.")
-	p.add_argument("--host", default=os.getenv("MYSQL_HOST", "mysql95"))
+	p.add_argument("--host", default=os.getenv("MYSQL_HOST", "localhost"))
 	p.add_argument("--database", "--db", dest="database", default=os.getenv("MYSQL_DB", "stockforecasting"))
 	p.add_argument("--user", default=os.getenv("MYSQL_USER"))
 	p.add_argument("--password", default=os.getenv("MYSQL_PASSWORD", ""))
@@ -502,7 +502,7 @@ def parse_args(argv: Optional[list[str]] = None):
 		),
 	)
 
-	p.add_argument("--to-torch", action="store_true", help="Also convert outputs to torch.Tensor (if torch available)")
+	p.add_argument("--to-torch", action="store_true", help="Also convert outputs to torch_interface.Tensor (if torch_interface available)")
 	p.add_argument(
 		"--save-npz",
 		default=None,
@@ -511,7 +511,7 @@ def parse_args(argv: Optional[list[str]] = None):
 			"for per-date layouts saves dates/X/Y."
 		),
 	)
-	p.add_argument("--save-pt", default=None, help="Path to save PyTorch tensors as .pt (requires --to-torch)")
+	p.add_argument("--save-pt", default=None, help="Path to save PyTorch tensors as .pt (requires --to-torch_interface)")
 	return p.parse_args(argv)
 
 
@@ -551,13 +551,13 @@ def main(argv: Optional[list[str]] = None) -> None:
 	#
 	# 	if args.to_torch:
 	# 		if not TORCH_AVAILABLE:
-	# 			raise SystemExit("--to-torch specified but PyTorch is not installed. Install torch or omit the flag.")
+	# 			raise SystemExit("--to-torch_interface specified but PyTorch is not installed. Install torch_interface or omit the flag.")
 	# 		keys_t, feats_t, labels_t = to_torch(keys_np, feats_np, labels_np)
 	# 		print(
 	# 			f"Torch tensors: keys {tuple(keys_t.shape)} {keys_t.dtype}, features {tuple(feats_t.shape)} {feats_t.dtype}, labels {tuple(labels_t.shape)} {labels_t.dtype}"
 	# 		)
 	# 		if args.save_pt:
-	# 			torch.save({"keys": keys_t, "features": feats_t, "labels": labels_t}, args.save_pt)
+	# 			torch_interface.save({"keys": keys_t, "features": feats_t, "labels": labels_t}, args.save_pt)
 	# 			print(f"Saved PyTorch tensors to {args.save_pt}")
 	# else:
 	return_2d = args.layout == "per-date-2d"
@@ -606,7 +606,7 @@ def main(argv: Optional[list[str]] = None) -> None:
 
 	if args.to_torch:
 		if not TORCH_AVAILABLE:
-			raise SystemExit("--to-torch specified but PyTorch is not installed. Install torch or omit the flag.")
+			raise SystemExit("--to-torch_interface specified but PyTorch is not installed. Install torch_interface or omit the flag.")
 		dates_t = torch.from_numpy(dates_np.astype(np.int64, copy=False))
 		X_t = torch.from_numpy(X_np.astype(np.float32, copy=False))
 		Y_t = torch.from_numpy(Y_np.astype(np.float32, copy=False))

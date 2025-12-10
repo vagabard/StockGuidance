@@ -167,7 +167,7 @@ def _load_daily_delta(cur, date_id: int) -> Dict[int, Dict[str, Optional[float]]
     return out
 
 
-def main(argv: Optional[list[str]] = None) -> int:
+def main(argv: Optional[list[str]] = None) -> int | None:
     args = parse_args(argv)
     if args.seed is not None:
         random.seed(args.seed)

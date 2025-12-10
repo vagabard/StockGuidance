@@ -16,11 +16,67 @@ def build_parser() -> argparse.ArgumentParser:
 		description="Train a PyTorch dense network on stock instances.",
 	)
 	parser.add_argument(
+		"--resume-directory",
+		type=str,
+		default=None,
+		help=(
+			"Path to a run-family directory to resume. When provided, other hyper-parameter "
+			"arguments are ignored and the script resumes from stored state."
+		),
+	)
+	parser.add_argument(
 		"--mode",
 		type=str,
 		default="train",
 		choices=["train", "memest"],
 		help="Run mode: train or memest (memory estimate only)",
+	)
+	parser.add_argument(
+		"--torch_interface-profiler",
+		action="store_true",
+		default=False,
+		help=(
+			"If set, enable torch_interface.profiler with CUDA memory profiling for a short window "
+			"so you can inspect which ops allocate GPU memory. "
+			"Produces traces viewable in TensorBoard."
+		),
+	)
+	parser.add_argument(
+		"--torch_interface-profiler-dir",
+		type=str,
+		default=os.path.join("data", "torch_profiler"),
+		help=(
+			"Output directory for torch_interface.profiler TensorBoard traces "
+			"(per-run subdirectories will be created under this)."
+		),
+	)
+	parser.add_argument(
+		"--torch_interface-profiler-wait",
+		type=int,
+		default=1,
+		help="Profiler schedule: number of initial steps to skip (wait phase).",
+	)
+	parser.add_argument(
+		"--torch_interface-profiler-warmup",
+		type=int,
+		default=1,
+		help="Profiler schedule: number of warmup steps before active profiling.",
+	)
+	parser.add_argument(
+		"--torch_interface-profiler-active",
+		type=int,
+		default=10,
+		help="Profiler schedule: number of active profiling steps.",
+	)
+	parser.add_argument(
+		"--ensemble-interval",
+		type=int,
+		default=0,
+		help=(
+			"If > 0 and run-repeats > 1, run an ensemble simulate_trading pass across all "
+			"repeats every N epochs. Works similarly to --trading-interval but operates "
+			"on the ensemble of repeated runs."
+		),
 	)
 	# Accept single int or inclusive range like "2-4" for multiple runs
 	parser.add_argument(
@@ -149,15 +205,6 @@ def build_parser() -> argparse.ArgumentParser:
 			"(0-based index into the available date_id array), or a relative "
 			"offset from the end as '-N' (N steps back from the last available "
 			"date_id). If omitted, the last available date_id is used."
-		),
-	)
-	parser.add_argument(
-		"--dry-run",
-		action="store_true",
-		help=(
-			"Perform a dry run: build the dataset splits using the current "
-			"arguments, print the effective usable window after any head/tail "
-			"trimming, and exit without estimating memory or training."
 		),
 	)
 	parser.add_argument(
@@ -322,7 +369,7 @@ def build_parser() -> argparse.ArgumentParser:
 		"--dont-use-dataloader",
 		action="store_true",
 		help=(
-			"don't use torch DataLoader for batching (enables workers, pin_memory, "
+			"don't use torch_interface DataLoader for batching (enables workers, pin_memory, "
 			"and optional shuffling)"
 		),
 	)
@@ -346,12 +393,6 @@ def build_parser() -> argparse.ArgumentParser:
 			"Top-K tickers to buy per day for simulate_trading. Accepts a single int "
 			"(e.g., 10) or a comma-separated list (e.g., 3,5,10)."
 		),
-	)
-	parser.add_argument(
-		"--simulate-sp500-id",
-		type=int,
-		default=None,
-		help="Optional ticker id to use as S&P500 benchmark during simulation",
 	)
 	parser.add_argument(
 		"--simulate-prior-only",

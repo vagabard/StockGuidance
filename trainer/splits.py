@@ -2,20 +2,23 @@ from __future__ import annotations
 
 import math
 import random
-from typing import Tuple
+from typing import TYPE_CHECKING
 
-from .datasets import RangeDataset, IndexDataset
+from trainer.datasets import RangeDataset, IndexDataset
+
+if TYPE_CHECKING:  # pragma: no cover - import for type checkers only
+	from trainer.state.family_run import FamilyRun
 
 
 def split_datasets(
 	provider,
-	args,
+	family_run: "FamilyRun",
 	max_inst: int,
 	train_validation_and_test_set_start_date_id: int | None = None,
 	train_validation_and_test_set_end_date_id: int | None = None,
 	train_percent: float = 0.90,
 	validation_percent: float = 0.05,
-):
+) -> tuple[RangeDataset | IndexDataset, RangeDataset | IndexDataset, RangeDataset | IndexDataset]:
 	"""Create train/val/test datasets according to split mode and args.seed.
 
 	The caller can optionally restrict the *source region* of the dataset from
@@ -44,9 +47,6 @@ def split_datasets(
 	#   * Otherwise we retain the original behaviour based on
 	#     data_head_ignore_percent / data_tail_ignore_percent.
 
-	# Default to the full range; branches below will tighten this.
-	date_array_index_for_start_date = 1
-	date_array_index_for_end_date = length_of_date_id_array
 
 	if (
 		train_validation_and_test_set_start_date_id is not None
@@ -118,17 +118,9 @@ def split_datasets(
 				date_array_index_for_start_date,
 			)
 	else:
-		# Legacy behaviour: derive usable window from fractional head/tail
-		# trimming. These attributes are used by the existing tests and by
-		# callers that do not care about explicit date_id ranges.
-		head_frac = float(getattr(args, "data_head_ignore_percent", 0.0) or 0.0)
-		tail_frac = float(getattr(args, "data_tail_ignore_percent", 0.0) or 0.0)
-		head_count = int(math.floor(head_frac * length_of_date_id_array))
-		date_array_index_for_start_date = 1 + head_count
-		# Use the same formula as the tests when converting tail_frac to an
-		# index so behaviour remains consistent: base_end = floor((1 - tail) * N).
-		date_array_index_for_end_date = int(
-			math.floor((1.0 - tail_frac) * length_of_date_id_array),
+		raise RuntimeError(
+			f"Requested train_start_date_id/train_end_date_id ({train_validation_and_test_set_start_date_id}, {train_validation_and_test_set_end_date_id}) "
+			"do not overlap with available instances"
 		)
 
 	# Ensure the range is valid and within bounds.
@@ -146,7 +138,7 @@ def split_datasets(
 	usable_total = date_array_index_for_end_date - date_array_index_for_start_date + 1
 
 
-	if args.split_mode == "sequential":
+	if family_run.split_mode == "sequential":
 		total_instances_end_date_index_for_training = date_array_index_for_start_date + int(math.floor(train_percent * usable_total)) - 1
 		total_instances_end_date_index_for_validation = date_array_index_for_start_date + int(math.floor((train_percent + validation_percent) * usable_total)) - 1
 		total_instances_end_date_index_for_training = max(date_array_index_for_start_date, min(total_instances_end_date_index_for_training, date_array_index_for_end_date))
@@ -158,11 +150,11 @@ def split_datasets(
 		test_ds = RangeDataset(provider, total_instances_start_date_index_for_testing, date_array_index_for_end_date) if total_instances_start_date_index_for_testing <= date_array_index_for_end_date else RangeDataset(provider, date_array_index_for_start_date, date_array_index_for_start_date - 1)
 #		mixed_n = total_instances_end_date_index_for_training - date_array_index_for_start_date + 1  + total_instances_end_date_index_for_validation - total_instances_start_date_index_for_validation + 1
 #		print(f"Sequential Training set size: {total_instances_end_date_index_for_training}, validation set size: {total_instances_end_date_index_for_validation}, totalk testing set size: {total_instances_start_date_index_for_testing},   total instances: {usable_total}")
-	elif args.split_mode == "random_order_train_validation" :
+	elif family_run.split_mode == "random_order_train_validation" :
 		# Build the list of indices only from the usable subrange.
 		indices = list(range(date_array_index_for_start_date, date_array_index_for_end_date + 1))
-		if args.seed is not None:
-			rng = random.Random(int(args.seed))
+		if family_run.random_seed_splits is not None:
+			rng = random.Random(int(family_run.random_seed_splits))
 			rng.shuffle(indices)
 		else:
 			random.shuffle(indices)
@@ -194,9 +186,9 @@ def split_datasets(
 		# Indices date_array_index_for_start_date..date_array_index_for_start_date+mixed_n-1 are used for mixed
 		# train/validation.
 		mixed_indices = list(range(date_array_index_for_start_date, date_array_index_for_start_date + mixed_n))
-		if args.seed is not None:
+		if family_run.random_seed_splits is not None:
 			# Use a deterministic RNG so that runs are repeatable given the same seed.
-			rng = random.Random(int(args.seed))
+			rng = random.Random(int(family_run.random_seed_splits))
 			rng.shuffle(mixed_indices)
 		else:
 			random.shuffle(mixed_indices)

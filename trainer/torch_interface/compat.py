@@ -1,6 +1,6 @@
-"""Compatibility layer for optional torch dependency.
+"""Compatibility layer for optional torch_interface dependency.
 
-Provides TORCH_AVAILABLE and re-exports commonly used torch symbols when available.
+Provides TORCH_AVAILABLE and re-exports commonly used torch_interface symbols when available.
 """
 
 try:  # pragma: no cover - runtime dependency
@@ -10,7 +10,7 @@ try:  # pragma: no cover - runtime dependency
     from torch.utils.data import DataLoader  # type: ignore
     import torch.nn.functional as F  # type: ignore
     TORCH_AVAILABLE = True
-except Exception:  # pragma: no cover - allow memest without torch
+except Exception:  # pragma: no cover - allow memest without torch_interface
     torch = None  # type: ignore
     nn = None  # type: ignore
     optim = None  # type: ignore

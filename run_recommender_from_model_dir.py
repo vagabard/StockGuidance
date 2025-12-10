@@ -223,7 +223,6 @@ def main(argv: Optional[list[str]] = None) -> int:
 	scores, top_ids = rec.getBuyRecommendations(
 		feat_vec,
 		top_k=int(args.top_k),
-		return_scores=True,
 		index_base=1,
 	)
 

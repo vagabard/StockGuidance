@@ -37,7 +37,7 @@ def general_arg_parser_understands_ranges(val: List[str]) -> List[str]:
 			# constrain to non-negative
 			a = max(0, a)
 			b = max(0, b)
-			parsed_list.extend(list(range(a, b + 1)))
+			parsed_list.extend([str(i) for i in range(a, b + 1)])
 		else:
 			parsed_list.append(one_val)
 	return parsed_list
