@@ -51,6 +51,12 @@ def setup_device_and_precision(family_run: "FamilyRun") -> Tuple["torch.device",
     device_name = torch.cuda.get_device_name(device) if device.type == "cuda" else "CPU"  # type: ignore[union-attr]
     print(f"Selected device: {device.type.upper()} ({device_name})")  # type: ignore[union-attr]
     print(f"Selected precision: {eff_precision.upper()} | autocast={'ON' if use_amp else 'OFF'}")
+    try :
+	    device_name.index("4070")
+	    #if this is found, it will continue and we throw an error.  If it isn't, it throws an exception
+	    raise RuntimeError("4070 is the wrong GPU, try again")
+    except ValueError:
+	    print("GPU is correct")
 
     return device, eff_precision, use_amp, amp_dtype
 

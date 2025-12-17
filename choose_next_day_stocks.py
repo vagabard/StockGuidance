@@ -36,12 +36,11 @@ from typing import List, Optional
 import numpy as np
 
 from StockRecommenderFromModel import StockRecommenderFromModel
-from db_connect import get_connection
+from database.db_connect import get_connection
 from feature_windowing import best_fit_feature_vector
 from load_database_rows_into_tensors import fetch_grouped_by_date
 from load_latest_raw_stock_data_date import (
-	get_latest_raw_stock_data,
-	parse_args as parse_db_args,
+    get_latest_raw_stock_data,
 )
 from polygon_fetch import (
 	fetch_market_summary_day,
@@ -92,7 +91,7 @@ def _normalize_db_transaction_date(raw: object) -> date:
 	raise TypeError(f"Unsupported transaction_date type from DB: {type(raw)!r}")
 
 
-def _load_latest_raw_stock_data_date() -> tuple[int, date]:
+def _load_latest_raw_stock_data_date(*, dbinfo_file: str = "dbinfo.id") -> tuple[int, date]:
 	"""Call ``load_latest_raw_stock_data_date`` logic and parse its return.
 
 	Uses the same default connection parameters as the helper script
@@ -101,15 +100,7 @@ def _load_latest_raw_stock_data_date() -> tuple[int, date]:
 	always a plain ``datetime.date`` instance.
 	"""
 
-	db_args = parse_db_args([])
-	result = get_latest_raw_stock_data(
-		host=db_args.host,
-		database=db_args.database,
-		user=db_args.user,
-		password=db_args.password,
-		port=db_args.port,
-		driver=db_args.driver,
-	)
+	result = get_latest_raw_stock_data(dbinfo_file=dbinfo_file)
 	if result is None:
 		raise RuntimeError("No rows found in raw_stock_data when loading latest date.")
 
@@ -119,15 +110,10 @@ def _load_latest_raw_stock_data_date() -> tuple[int, date]:
 
 
 def _populate_daily_delta_stock_data_range(
-	start_date_id: int,
-	end_date_id: int,
-	*,
-	host: str,
-	database: str,
-	user: Optional[str],
-	password: Optional[str],
-	port: int,
-	driver: str,
+    start_date_id: int,
+    end_date_id: int,
+    *,
+    dbinfo_file: str = "dbinfo.id",
 ) -> None:
 	"""Call the stored procedure to backfill ``daily_delta_stock_data``.
 
@@ -141,14 +127,7 @@ def _populate_daily_delta_stock_data_range(
 		# Nothing to do
 		return
 
-	conn = get_connection(
-		host=host,
-		database=database,
-		user=user,
-		password=password,
-		port=port,
-		driver=driver,
-	)
+	conn = get_connection(dbinfo_file=dbinfo_file)
 	try:
 		cur = conn.cursor()
 		# Use parameterised call to avoid any formatting issues.
@@ -170,14 +149,9 @@ def _populate_daily_delta_stock_data_range(
 
 
 def _get_recent_date_id_window_from_daily_delta_stock_data(
-	max_days: int,
-	*,
-	host: str,
-	database: str,
-	user: Optional[str],
-	password: Optional[str],
-	port: int,
-	driver: str,
+    max_days: int,
+    *,
+    dbinfo_file: str = "dbinfo.id",
 ) -> Optional[tuple[int, int]]:
 	"""Return an inclusive (start_id, end_id) window for the most recent days.
 
@@ -189,14 +163,7 @@ def _get_recent_date_id_window_from_daily_delta_stock_data(
 	if max_days <= 0:
 		return None
 
-	conn = get_connection(
-		host=host,
-		database=database,
-		user=user,
-		password=password,
-		port=port,
-		driver=driver,
-	)
+	conn = get_connection(dbinfo_file=dbinfo_file)
 	try:
 		cur = conn.cursor()
 		cur.execute(
@@ -223,14 +190,9 @@ def _get_recent_date_id_window_from_daily_delta_stock_data(
 
 
 def _lookup_transaction_date_for_date_id(
-	date_id: int,
-	*,
-	host: str,
-	database: str,
-	user: Optional[str],
-	password: Optional[str],
-	port: int,
-	driver: str,
+    date_id: int,
+    *,
+    dbinfo_file: str = "dbinfo.id",
 ) -> Optional[date]:
 	"""Return the ``transaction_date`` corresponding to a given ``date_id``.
 
@@ -238,14 +200,7 @@ def _lookup_transaction_date_for_date_id(
 	:class:`datetime.date`. Returns ``None`` if no matching row is found.
 	"""
 
-	conn = get_connection(
-		host=host,
-		database=database,
-		user=user,
-		password=password,
-		port=port,
-		driver=driver,
-	)
+	conn = get_connection(dbinfo_file=dbinfo_file)
 	try:
 		cur = conn.cursor()
 		cur.execute(
@@ -264,14 +219,9 @@ def _lookup_transaction_date_for_date_id(
 
 
 def _load_ticker_symbols(
-	ticker_ids: list[int],
-	*,
-	host: str,
-	database: str,
-	user: Optional[str],
-	password: Optional[str],
-	port: int,
-	driver: str,
+    ticker_ids: list[int],
+    *,
+    dbinfo_file: str = "dbinfo.id",
 ) -> dict[int, str]:
 	"""Load ``ticker_symbol`` strings for the given numeric ids.
 
@@ -282,14 +232,7 @@ def _load_ticker_symbols(
 	if not ticker_ids:
 		return {}
 
-	conn = get_connection(
-		host=host,
-		database=database,
-		user=user,
-		password=password,
-		port=port,
-		driver=driver,
-	)
+	conn = get_connection(dbinfo_file=dbinfo_file)
 	try:
 		cur = conn.cursor()
 		placeholders = ",".join(["%s"] * len(ticker_ids))
@@ -452,8 +395,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 		)
 	)
 	parser.add_argument(
+		"--dbinfo-file",
+		default="dbinfo.id",
+		help="Path to DB info file (default: dbinfo.id)",
+	)
+	parser.add_argument(
 		"--api-key",
-		default="y41KT5lnM51gLWEx_TbQ21DeQKxOabXk",#os.getenv("POLYGON_API_KEY", DEFAULT_API_KEY),
+		default="y41KT5lnM51gLWEx_TbQ21DeQKxOabXk",  # os.getenv("POLYGON_API_KEY", DEFAULT_API_KEY),
 		help=(
 			"Polygon.io API key. Defaults to POLYGON_API_KEY env or the "
 			"DEFAULT_API_KEY from polygon_fetch."
@@ -475,8 +423,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 	parser.add_argument(
 		"--end-date",
 		default=None,
-		help="Optional ISO date (YYYY-MM-DD), inclusive. If omitted, uses "
-			"today (UTC).",
+		help=(
+			"Optional ISO date (YYYY-MM-DD), inclusive. If omitted, uses "
+			"today (UTC)."
+		),
 	)
 	parser.add_argument(
 		"--max-retries",
@@ -518,7 +468,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 	# Determine the latest date already present in raw_stock_data so we can
 	# later backfill any newer NDJSON files into the database.
-	latest_date_id, latest_date = _load_latest_raw_stock_data_date()
+	latest_date_id, latest_date = _load_latest_raw_stock_data_date(dbinfo_file=args.dbinfo_file)
 
 	api_key = args.api_key
 	if not api_key:
@@ -591,17 +541,10 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 	# After ensuring on-disk market_summary files are up to date, populate the
 	# database with any days strictly more recent than the last date already
-	# present in raw_stock_data.  We reuse the same connection defaults that
-	# load_latest_raw_stock_data_date.py uses.
-
-	db_args = parse_db_args([])
+	# present in raw_stock_data.
 
 	populate_argv = [
-		f"--host={db_args.host}",
-		f"--user={db_args.user}",
-		f"--password={db_args.password}",
-		f"--database={db_args.database}",
-		f"--driver={db_args.driver}",
+		f"--dbinfo-file={args.dbinfo_file}",
 		f"--start-date={latest_date.isoformat()}",
 	]
 
@@ -613,14 +556,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 	# Now that raw_stock_data has been updated, call the stored procedure to
 	# populate daily_delta_stock_data for the new date_id range.
-	latest_after = get_latest_raw_stock_data(
-		host=db_args.host,
-		database=db_args.database,
-		user=db_args.user,
-		password=db_args.password,
-		port=db_args.port,
-		driver=db_args.driver,
-	)
+	latest_after = get_latest_raw_stock_data(dbinfo_file=args.dbinfo_file)
 
 	if latest_after is None:
 		print("No rows found in raw_stock_data after population; skipping delta population.")
@@ -635,12 +571,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 	# is lagging behind raw_stock_data.
 	delta_window = _get_recent_date_id_window_from_daily_delta_stock_data(
 		1,
-		host=db_args.host,
-		database=db_args.database,
-		user=db_args.user,
-		password=db_args.password,
-		port=db_args.port,
-		driver=db_args.driver,
+		dbinfo_file=args.dbinfo_file,
 	)
 	if delta_window is None:
 		# No existing daily_delta_stock_data rows; start from the very first
@@ -666,12 +597,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 	_populate_daily_delta_stock_data_range(
 		latest_delta_date_id + 1,
 		latest_after_date_id,
-		host=db_args.host,
-		database=db_args.database,
-		user=db_args.user,
-		password=db_args.password,
-		port=db_args.port,
-		driver=db_args.driver,
+		dbinfo_file=args.dbinfo_file,
 	)
 
 	print("Done populating daily_delta_stock_data.")
@@ -683,12 +609,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 	window = _get_recent_date_id_window_from_daily_delta_stock_data(
 		1000,
-		host=db_args.host,
-		database=db_args.database,
-		user=db_args.user,
-		password=db_args.password,
-		port=db_args.port,
-		driver=db_args.driver,
+		dbinfo_file=args.dbinfo_file,
 	)
 	if window is None:
 		print("No date_id window available in daily_delta_stock_data; skipping training.")
@@ -719,9 +640,9 @@ def main(argv: Optional[List[str]] = None) -> int:
 	final_activation = "sigmoid"
 	day_change_centered = "zero"
 	precision = "fp32"
-	learning_rate = "0.000005"
-	batch_size = 128
-	epochs = 4000
+	learning_rate = "0.00005"
+	batch_size = 256
+	epochs = 10000
 
 	train_argv = [
 		"--mode=train",
@@ -767,12 +688,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 	# ------------------------------------------------------------------
 	print("Fetching grouped features from database for recommendation step...")
 	dates, X_flat, _Y = fetch_grouped_by_date(
-		host=db_args.host,
-		database=db_args.database,
-		user=db_args.user,
-		password=db_args.password,
-		port=db_args.port,
-		driver=db_args.driver,
+		dbinfo_file=args.dbinfo_file,
 		day_change_centered=day_change_centered,
 		current_day_change=False,
 		volume_ratio=False,
@@ -788,12 +704,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 	feature_date_id = int(dates[last_idx])
 	recent_tx_date = _lookup_transaction_date_for_date_id(
 		feature_date_id,
-		host=db_args.host,
-		database=db_args.database,
-		user=db_args.user,
-		password=db_args.password,
-		port=db_args.port,
-		driver=db_args.driver,
+		dbinfo_file=args.dbinfo_file,
 	)
 	if recent_tx_date is not None:
 		print(
@@ -812,7 +723,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 		ensemble_normalize=bool(getattr(args, "ensemble_normalize", False)),
 	)
 	required_prior = rec.get_required_previous_days()
-	expected_input_size = rec.get_input_size()
+	expected_input_size = rec.input_size
 
 	feat_vec = best_fit_feature_vector(
 		X_flat,
@@ -827,18 +738,15 @@ def main(argv: Optional[List[str]] = None) -> int:
 		feat_vec,
 		top_k=5,
 		index_base=1,
+		current_date_id=feature_date_id,
+		dbinfo_file=args.dbinfo_file,
 	)
 
 	# Load human-readable ticker symbols for the recommended ids.
 	top_ticker_ids = [int(t) for t in top_ids]
 	ticker_map = _load_ticker_symbols(
 		top_ticker_ids,
-		host=db_args.host,
-		database=db_args.database,
-		user=db_args.user,
-		password=db_args.password,
-		port=db_args.port,
-		driver=db_args.driver,
+		dbinfo_file=args.dbinfo_file,
 	)
 
 	# Collect final recommendation output so we can both print it and save it

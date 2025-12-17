@@ -41,8 +41,9 @@ from __future__ import annotations
 
 import argparse
 import os
-from typing import Optional, Tuple, List, Dict, Union
 import time
+import traceback
+from typing import Optional, Tuple, List, Dict
 
 import numpy as np
 
@@ -53,8 +54,7 @@ except Exception:
 	torch = None  # type: ignore
 	TORCH_AVAILABLE = False
 
-from db_connect import get_connection
-from data_loading_shared import to_torch
+from database.db_connect import get_connection
 
 
 # Streaming helper to avoid loading millions o rows with fetchall()
@@ -236,12 +236,8 @@ _DISK_GROUPED_CACHE_CLEARED_ONCE = False
 
 
 def fetch_grouped_by_date(
-	host: str = "localhost",
-	database: str = "stockforecasting",
-	user: Optional[str] = "Redbeard",
-	password: Optional[str] = "3YZs#z5GOJKdea",
-	port: int = 3306,
-	driver: str = "auto",
+	*,
+	dbinfo_file: str = "dbinfo.id",
 	limit: Optional[int] = None,
 	return_2d: bool = False,
 	current_day_change: bool = False,
@@ -312,19 +308,14 @@ def fetch_grouped_by_date(
 				loaded["X"],
 				loaded["Y"],
 			)
-	except Exception:
+	except Exception as e:
+		traceback.print_exception(e)
 		# If anything goes wrong while loading the cache, fall back to DB.
 		pass
 
-	print("Fetching rows from database... user= ", user, "")
-	conn = get_connection(
-		host=host,
-		database=database,
-		user=user,
-		password=password,
-		port=port,
-		driver=driver,
-	)
+
+	print("Fetching rows from database using dbinfo file:", dbinfo_file)
+	conn = get_connection(dbinfo_file=dbinfo_file)
 	try:
 		cur = conn.cursor()
 		sql = SELECT_VARIABLE_DATA_SQL(
@@ -471,12 +462,7 @@ def to_torch(keys_np: np.ndarray, features_np: np.ndarray, labels_np: Optional[n
 
 def parse_args(argv: Optional[list[str]] = None):
 	p = argparse.ArgumentParser(description="Load daily_delta_stock_data into tensors/arrays.")
-	p.add_argument("--host", default=os.getenv("MYSQL_HOST", "localhost"))
-	p.add_argument("--database", "--db", dest="database", default=os.getenv("MYSQL_DB", "stockforecasting"))
-	p.add_argument("--user", default=os.getenv("MYSQL_USER"))
-	p.add_argument("--password", default=os.getenv("MYSQL_PASSWORD", ""))
-	p.add_argument("--port", type=int, default=int(os.getenv("MYSQL_PORT", "3306")))
-	p.add_argument("--driver", default="auto", choices=["auto", "mysqlconnector", "pymysql", "jdbc"], help="DB driver to use")
+	p.add_argument("--dbinfo-file", default="dbinfo.id", help="Path to DB info file (default: dbinfo.id)")
 	p.add_argument("--limit", type=int, default=None, help="Optional LIMIT for debugging")
 	p.add_argument("--day-change-centered", default="one", choices=["one", "half", "zero"], help="The centroid of ratio of next_day_change_in_price")
 	p.add_argument("--current-day-change", action="store_true", help="Include current_day_change_in_price")
@@ -563,12 +549,7 @@ def main(argv: Optional[list[str]] = None) -> None:
 	return_2d = args.layout == "per-date-2d"
 	print(f"user arg: {args}")
 	dates_np, X_np, Y_np = fetch_grouped_by_date(
-		host=args.host,
-		database=args.database,
-		user=args.user,
-		password=args.password,
-		port=args.port,
-		driver=args.driver,
+		dbinfo_file=args.dbinfo_file,
 		limit=args.limit,
 		return_2d=return_2d,
 		day_change_centered=args.day_change_centered,
@@ -576,7 +557,6 @@ def main(argv: Optional[list[str]] = None) -> None:
 		volume_ratio=args.volume_ratio,
 		vwap_ratio=args.vwap_ratio,
 		tranaction_ratio=args.tranaction_ratio,
-
 	)
 
 	layout_desc = "(D, T, F)" if return_2d else "(D, T*F)"

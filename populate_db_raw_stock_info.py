@@ -65,7 +65,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
-from db_connect import get_connection
+from database.db_connect import get_connection
 
 DEFAULT_ROOT = Path("data") / "market_summary"
 BATCH_SIZE = 1000
@@ -283,23 +283,27 @@ def process_file(conn, cursor, path: Path, date_str: str, ticker_map: Dict[str, 
 
 
 def parse_args(argv: Optional[List[str]] = None):
-	p = argparse.ArgumentParser(description="Populate raw_stock_data from market summary NDJSON files.")
-	p.add_argument("--host", default="localhost", help="MySQL host (default: localhost)")
-	p.add_argument("--user", required=True, help="MySQL user")
-	p.add_argument("--password", required=True, help="MySQL password")
-	p.add_argument("--database", default="stockforecasting", help="Database/schema name (default: stockforecasting)")
-	p.add_argument("--driver", default="auto", choices=["auto", "mysqlconnector", "pymysql"], help="DB driver (default: auto)")
-	p.add_argument("--root", default=str(DEFAULT_ROOT), help="Root folder for market summary files (default: data/market_summary)")
-	p.add_argument(
-		"--start-date",
-		default=None,
-		help=(
-			"Optional ISO date (YYYY-MM-DD). If provided, only NDJSON files with "
-			"a date strictly more recent than this value will be processed."
-		),
-	)
-	p.add_argument("--limit", type=int, default=0, help="Limit number of files to process (0 = all)")
-	return p.parse_args(argv)
+    p = argparse.ArgumentParser(description="Populate raw_stock_data from market summary NDJSON files.")
+    p.add_argument("--dbinfo-file", default="dbinfo.id", help="Path to DB info file (default: dbinfo.id)")
+    p.add_argument("--root", default=str(DEFAULT_ROOT), help="Root folder for market summary files (default: data/market_summary)")
+    p.add_argument(
+        "--start-date",
+        default=None,
+        help=(
+            "Optional ISO date (YYYY-MM-DD). If provided, only NDJSON files with "
+            "a date strictly more recent than this value will be processed."
+        ),
+    )
+    p.add_argument(
+        "--end-date",
+        default=None,
+        help=(
+            "Optional ISO date (YYYY-MM-DD). If provided, only NDJSON files with "
+            "a date strictly less recent than this value will be processed."
+        ),
+    )
+    p.add_argument("--limit", type=int, default=0, help="Limit number of files to process (0 = all)")
+    return p.parse_args(argv)
 
 
 def main(argv: Optional[List[str]] = None) -> None:
@@ -327,6 +331,22 @@ def main(argv: Optional[List[str]] = None) -> None:
 			if file_d > start_d:
 				filtered.append((date_str, path))
 		files = filtered
+	if args.end_date:
+		try:
+			end_d = datetime.fromisoformat(args.end_date).date()
+		except ValueError:
+			raise SystemExit(f"Invalid --start-date value (expected YYYY-MM-DD): {args.end_date}")
+
+		filtered: List[Tuple[str, Path]] = []
+		for date_str, path in files:
+			try:
+				file_d = datetime.fromisoformat(date_str).date()
+			except ValueError:
+				# Filenames are discovered via DATE_FILE_RE, but be defensive.
+				continue
+			if file_d < end_d:
+				filtered.append((date_str, path))
+		files = filtered
 	if args.limit and args.limit > 0:
 		files = files[: args.limit]
 
@@ -334,13 +354,7 @@ def main(argv: Optional[List[str]] = None) -> None:
 		print(f"No NDJSON files found under: {root}")
 		return
 
-	conn = get_connection(
-		host=args.host,
-		database=args.database,
-		user=args.user,
-		password=args.password,
-		driver=args.driver,
-	)
+	conn = get_connection(dbinfo_file=args.dbinfo_file)
 
 	cursor = conn.cursor()
 	try:

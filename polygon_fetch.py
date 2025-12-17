@@ -3,6 +3,7 @@ import os
 import sys
 import time
 import json
+import traceback
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
@@ -408,6 +409,63 @@ def discover_consistent_tickers(
 
 	return inter, final_full
 
+def fetch_daily_market_summary(
+	api_key: str,
+	day: datetime,
+	*,
+	adjusted: bool = True,
+	max_retries: int = 5,
+	output_dir: Optional[Path] = None,
+	use_local_if_available: bool = False,
+) -> List[Dict]:
+	"""Return the grouped daily market summary (US stocks) for a given UTC date.
+
+	Parameters:
+	- api_key: Polygon.io API key
+	- day: datetime date (UTC or naive interpreted as UTC)
+	- adjusted: whether to request adjusted data
+	- max_retries: number of retries for transient errors
+	- output_dir: base directory where market summary files are stored (for reuse)
+	- use_local_if_available: if True and a non-empty local file exists in
+	  ``output_dir`` for ``day``, load and return that data instead of
+	  performing an HTTP request.
+
+	Returns a list of result objects (one per symbol) or an empty list if none.
+	"""
+	# If requested, try to serve from an existing, non-empty local file first.
+	if use_local_if_available and output_dir is not None:
+		ms_path = market_summary_file_path(output_dir, day)
+		if ms_path.exists() and ms_path.stat().st_size > 0:
+			loaded: List[Dict] = []
+			with ms_path.open("r", encoding="utf-8") as f:
+				for line in f:
+					line = line.strip()
+					if not line:
+						continue
+					try:
+						loaded.append(json.loads(line))
+					except Exception:
+						# If any line is malformed, fall back to refetching.
+						loaded = []
+						break
+			if loaded:
+				return loaded
+
+	# Otherwise, fetch from the API as before.
+	headers = {"Authorization": f"Bearer {api_key}"}
+	url = MARKET_GROUPED_ENDPOINT_TMPL.format(date=iso_date(day))
+	params = {
+		"adjusted": "true" if adjusted else "false",
+	}
+	resp = http_get(url, params, headers, max_retries=max_retries)
+	data = resp.json()
+	results = data.get("results") if isinstance(data, dict) else None
+	if isinstance(results, list):
+		return results
+	# Fallback: return the payload as a single-item list if it's a dict, else empty
+	if isinstance(data, dict) and data:
+		return [data]
+	return []
 
 def ensure_dir(path: Path) -> None:
 	path.mkdir(parents=True, exist_ok=True)
@@ -458,21 +516,21 @@ def fetch_overview_day(api_key: str, ticker: str, day: datetime, out_file: Path,
 	return total
 
 
-def fetch_market_summary_day(api_key: str, day: datetime, out_file: Path, *, max_retries: int) -> int:
+def fetch_market_summary_day(api_key: str, day: datetime, out_file: Path, *, max_retries: int, use_local_if_available: bool = False) -> int:
 	"""Fetch grouped daily market summary for all US stocks for a date and write NDJSON.
 
 	Returns the number of lines written. If the total number of transactions for the day is 0
 	(i.e., sum of 'n' across results is 0 or results is empty), the file is NOT written and 0 is returned.
 	"""
-	headers = {"Authorization": f"Bearer {api_key}"}
-	url = MARKET_GROUPED_ENDPOINT_TMPL.format(date=iso_date(day))
-	params = {
-		"adjusted": "true",
-		# "include_otc": "false",  # uncomment if supported by backend
-	}
-	resp = http_get(url, params, headers, max_retries=max_retries)
-	data = resp.json()
-	results = data.get("results") if isinstance(data, dict) else None
+	# Reuse the higher-level helper to avoid duplicating HTTP / parsing logic.
+	results = fetch_daily_market_summary(
+		api_key,
+		day,
+		adjusted=True,
+		max_retries=max_retries,
+		output_dir=None,
+		use_local_if_available=use_local_if_available,
+	)
 
 	# Determine total transactions across all symbols for the day
 	total_tx = 0
@@ -481,9 +539,9 @@ def fetch_market_summary_day(api_key: str, day: datetime, out_file: Path, *, max
 			try:
 				# Polygon grouped daily commonly uses 'n' as number of transactions
 				total_tx += int(obj.get("n", 0))
-			except Exception:
+			except Exception as e:
 				# If field missing or not an int, treat as 0
-				pass
+				traceback.print_exception(e)
 
 	# If no results or total transactions is 0, do NOT write the file
 	if not results or total_tx == 0:
@@ -632,10 +690,11 @@ def main() -> int:
 		ms_out = market_summary_file_path(output_dir, day)
 		if not (ms_out.exists() and ms_out.stat().st_size > 0):
 			try:
-				ms_count = fetch_market_summary_day(api_key, day, ms_out, max_retries=args.max_retries)
+				ms_count = fetch_market_summary_day(api_key, day, ms_out, max_retries=args.max_retries, use_local_if_available=True)
 				print(f"OK MARKET {iso_date(day)}: grouped summary saved ({ms_count} line(s))")
 			except Exception as e:
 				print(f"FAIL MARKET {iso_date(day)}: {e}")
+				traceback.print_exception(e)
 				append_checkpoint(checkpoints_path, "__MARKET__", day.isoformat(), str(e), kind="market_summary")
 				all_ok = False
 
@@ -683,28 +742,4 @@ if __name__ == "__main__":
 
 
 
-def fetch_daily_market_summary(api_key: str, day: datetime, *, adjusted: bool = True, max_retries: int = 5) -> List[Dict]:
-	"""Return the grouped daily market summary (US stocks) for a given UTC date.
 
-	Parameters:
-	- api_key: Polygon.io API key
-	- day: datetime date (UTC or naive interpreted as UTC)
-	- adjusted: whether to request adjusted data
-	- max_retries: number of retries for transient errors
-
-	Returns a list of result objects (one per symbol) or an empty list if none.
-	"""
-	headers = {"Authorization": f"Bearer {api_key}"}
-	url = MARKET_GROUPED_ENDPOINT_TMPL.format(date=iso_date(day))
-	params = {
-		"adjusted": "true" if adjusted else "false",
-	}
-	resp = http_get(url, params, headers, max_retries=max_retries)
-	data = resp.json()
-	results = data.get("results") if isinstance(data, dict) else None
-	if isinstance(results, list):
-		return results
-	# Fallback: return the payload as a single-item list if it's a dict, else empty
-	if isinstance(data, dict) and data:
-		return [data]
-	return []

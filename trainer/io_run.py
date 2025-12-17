@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 import time
-from typing import List, Tuple, TYPE_CHECKING
+from typing import List, Tuple, TYPE_CHECKING, Dict
 
 import numpy as np
 import torch
@@ -140,18 +140,27 @@ def save_model_and_manifest(single_run: SingleRun, model, optimizer, run_dir: st
 	optimizer_state_path = optimizer_state_path if optimizer_state_path else os.path.join(run_dir, f"{suffix}_optimizer_state.pt")
 	save_dir = os.path.dirname(model_state_path)
 	manifest_path = os.path.join(save_dir, f"{suffix}_model_manifest.json")
-	torch.save(model.state_dict(), model_state_path)
+	_save_model_state_dict(model.state_dict(), model_state_path)
 	try:
-		torch.save(optimizer.state_dict(), optimizer_state_path)
+		_save_optimizer_state_dict(optimizer.state_dict(), optimizer_state_path)
 	except Exception as opt_e:
 		print(f"Warning: could not save optimizer state: {opt_e}")
 
 	manifest = create_manifest_dictionary(single_run, model_state_path, optimizer_state_path, test_metrics_path, input_size, output_size)
-	with open(manifest_path, "w", encoding="utf-8") as mf:
-		json.dump(manifest, mf, indent=2)
+	_save_manifest(manifest, manifest_path)
 	print(f"Saved  Weights: {model_state_path}  Optimizer: {optimizer_state_path}  Manifest: {manifest_path}")
 	return manifest_path
 
+#break up for profiling easier
+def _save_model_state_dict(state_dict: Dict, model_state_path: str):
+	torch.save(state_dict, model_state_path)
+
+def _save_optimizer_state_dict(state_dict: Dict, model_state_path: str):
+	torch.save(state_dict, model_state_path)
+
+def _save_manifest(manifest: Dict, manifest_path: str):
+	with open(manifest_path, "w", encoding="utf-8") as mf:
+		json.dump(manifest, mf, indent=2)
 
 __all__ = [
 	"write_label_limits",

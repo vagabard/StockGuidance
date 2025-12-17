@@ -36,6 +36,7 @@ class SingleRun:
 	prior_days: int
 	mlp_layers: int
 	lr: float
+	learning_rate_adjustment_parameter: float
 	activation: str
 	final_activation: str
 	timestamp_id: str
@@ -57,6 +58,7 @@ class SingleRun:
 		prior_days: int,
 		mlp_layers: int,
 		lr: float,
+		learning_rate_adjustment_parameter: float = 0.998,
 		activation: str,
 		final_activation: str,
 		include_features: Sequence[str] | None = None,
@@ -77,6 +79,7 @@ class SingleRun:
 		self.prior_days = int(prior_days)
 		self.mlp_layers = int(mlp_layers)
 		self.lr = float(lr)
+		self.learning_rate_adjustment_parameter = float(learning_rate_adjustment_parameter)
 		self.activation = str(activation)
 		self.final_activation = str(final_activation)
 		self.include_features = include_features
@@ -106,6 +109,7 @@ class SingleRun:
 			prior_days=int(args.prior_days),
 			mlp_layers=int(args.mlp_layers),
 			lr=float(args.lr),
+			learning_rate_adjustment_parameter=float(getattr(args, "learning_rate_adjustment_parameter", 0.998)),
 			activation=str(args.activation),
 			final_activation=str(args.final_activation),
 			include_features=getattr(args, "include_features", None),
@@ -131,6 +135,7 @@ class SingleRun:
 			"prior_days": int(self.prior_days),
 			"mlp_layers": int(self.mlp_layers),
 			"lr": float(self.lr),
+			"learning_rate_adjustment_parameter": float(self.learning_rate_adjustment_parameter),
 			"activation": str(self.activation),
 			"final_activation": str(self.final_activation),
 			"timestamp_id": str(self.timestamp_id),
@@ -202,6 +207,7 @@ class SingleRun:
 			prior_days=int(sr_dict["prior_days"]),
 			mlp_layers=int(sr_dict["mlp_layers"]),
 			lr=float(sr_dict["lr"]),
+			learning_rate_adjustment_parameter=float(sr_dict.get("learning_rate_adjustment_parameter", 0.998)),
 			activation=str(sr_dict["activation"]),
 			final_activation=str(sr_dict["final_activation"]),
 			include_features=tuple(sr_dict.get("include_features") or []),

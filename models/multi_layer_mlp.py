@@ -36,7 +36,8 @@ class MultiLayerLinearNet(nn.Module):
 	):
 		super().__init__()
 		width = int(hidden_layers) if hidden_layers and hidden_layers > 0 else int(input_size)
-
+		self.input_size = input_size
+		self.output_size = output_size
 		# Default activation factory to ReLU if not provided
 		if activation_factory is None:
 			activation_factory = lambda: nn.ReLU()

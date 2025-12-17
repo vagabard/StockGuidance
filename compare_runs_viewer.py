@@ -22,7 +22,7 @@ from compare_runs_shared import (
 	group_runs_by_timestamp,
 	scan_runs,
 )
-from db_connect import get_connection
+from database.db_connect import get_connection
 
 from compare_runs_shared import scan_runs  # type: ignore[redefined-builtin]
 
@@ -41,7 +41,7 @@ def _fetch_market_deltas(min_date_id: int, max_date_id: int) -> Dict[int, List[f
 		print(
 			f"[_fetch_market_deltas] Requesting range min_date_id={min_date_id}, max_date_id={max_date_id}"
 		)
-		conn = get_connection(user="Redbeard", password="3YZs#z5GOJKdea")
+		conn = get_connection(dbinfo_file="dbinfo.id")
 		cur = conn.cursor()
 		query = """
 			SELECT ddsd.date_id,
@@ -103,7 +103,7 @@ def _fetch_rank_ratios(date_ticker_pairs: List[Tuple[int, int]]) -> Dict[Tuple[i
 
 	conn = None
 	try:
-		conn = get_connection(user="Redbeard", password="3YZs#z5GOJKdea")
+		conn = get_connection(dbinfo_file="dbinfo.id")
 		cur = conn.cursor()
 
 		# Build VALUES list for the target pairs
@@ -1605,9 +1605,14 @@ def _run_as_script():
 					st.caption("All stock simulation columns are currently hidden.")
 				continue
 
-			# Calculate CDFs dynamically for all portfolio columns
+			# Calculate CDFs dynamically for all portfolio/percent columns
 			# Filter numeric cols to exclude any existing CDF/percentile columns for the primary axis
 			primary_cols = [c for c in cols_here if "percentile" not in c and "CDF" not in c]
+
+			# Split into portfolio-value vs daily-return-percent series to avoid
+			# hiding small percent traces against ~1000-value portfolio curves.
+			percent_cols = [c for c in primary_cols if isinstance(c, str) and c.lower().startswith("return percent")]
+			value_cols = [c for c in primary_cols if c not in percent_cols]
 
 			# Build plot_df with just primary cols first
 			cols_needed = primary_cols[:]
@@ -1620,11 +1625,19 @@ def _run_as_script():
 				plot_df.insert(0, "index", range(len(plot_df)))
 				x_enc = "index"
 
+			# Ensure percent_cols are numeric (coerce errors to NaN so they still plot)
+			try:
+				for _c in percent_cols:
+					if _c in plot_df.columns:
+						plot_df[_c] = pd.to_numeric(plot_df[_c], errors="coerce")
+			except Exception:
+				pass
+
 			# Dynamic CDF calculation (optional)
 			cdf_cols = []
 			date_col = "open_date_id"
 
-			if show_cdf and date_col in dfs.columns and not dfs.empty and primary_cols:
+			if show_cdf and date_col in dfs.columns and not dfs.empty and value_cols:
 				print(
 					f"[stock_sim] starting CDF calc for title={title}: date_col='{date_col}', "
 					f"rows={len(dfs)}, primary_cols={primary_cols}"
@@ -1677,7 +1690,7 @@ def _run_as_script():
 						except Exception:
 							ret_override = None
 
-					for col in primary_cols:
+					for col in value_cols:
 						series = dfs[col].values
 						cdf_series: List[float] = []
 
@@ -1730,10 +1743,17 @@ def _run_as_script():
 					fig = make_subplots(specs=[[{"secondary_y": True}]])
 
 					# Primary: Portfolio Values
-					for col in primary_cols:
+					for col in value_cols:
 						fig.add_trace(
 							go.Scatter(x=plot_df[x_enc], y=plot_df[col], mode="lines", name=col),
 							secondary_y=False
+						)
+
+					# Secondary: Percent series (if any)
+					for col in percent_cols:
+						fig.add_trace(
+							go.Scatter(x=plot_df[x_enc], y=plot_df[col], mode="lines", name=col),
+							secondary_y=True
 						)
 
 					# Secondary: CDFs
@@ -1760,7 +1780,8 @@ def _run_as_script():
 						legend=dict(orientation="h"),
 					)
 					fig.update_yaxes(title_text="Portfolio Value", secondary_y=False)
-					fig.update_yaxes(title_text="Percentile", range=[-0.05, 1.05], secondary_y=True)
+					# If we have any percent series or CDFs, show a sensible secondary axis.
+					fig.update_yaxes(title_text="Percent / Percentile", range=[-0.05, 1.05], secondary_y=True)
 
 					st.plotly_chart(fig, width="stretch")
 
@@ -1768,8 +1789,34 @@ def _run_as_script():
 					print(f"[stock_sim] Plotly dual-axis error: {e}")
 					_plot_lines(plot_df[[x_enc] + primary_cols], x_enc, height=260, y_ref=1000.0)
 			else:
-				# Standard plotting
-				_plot_lines(plot_df[[x_enc] + primary_cols], x_enc, height=260, y_ref=1000.0)
+				# Standard plotting without CDFs.
+				# If we have a mix of portfolio and percent series, use dual-axis Plotly;
+				# otherwise fall back to the default helper.
+				if value_cols and percent_cols:
+					try:
+						import plotly.graph_objects as go
+						from plotly.subplots import make_subplots
+
+						fig = make_subplots(specs=[[{"secondary_y": True}]])
+						for col in value_cols:
+							fig.add_trace(
+								go.Scatter(x=plot_df[x_enc], y=plot_df[col], mode="lines", name=col),
+								secondary_y=False,
+							)
+						for col in percent_cols:
+							fig.add_trace(
+								go.Scatter(x=plot_df[x_enc], y=plot_df[col], mode="lines", name=col),
+								secondary_y=True,
+							)
+						fig.add_hline(y=1000.0, line=dict(color="red", dash="dash", width=1), secondary_y=False)
+						fig.update_layout(height=260, margin=dict(l=10, r=10, t=10, b=10), legend=dict(orientation="h"))
+						fig.update_yaxes(title_text="Portfolio Value", secondary_y=False)
+						fig.update_yaxes(title_text="Percent", secondary_y=True)
+						st.plotly_chart(fig, width='stretch')
+					except Exception:
+						_plot_lines(plot_df[[x_enc] + primary_cols], x_enc, height=260, y_ref=1000.0)
+				else:
+					_plot_lines(plot_df[[x_enc] + primary_cols], x_enc, height=260, y_ref=1000.0)
 
 			# ------------------------------------------------------------------
 			# Histogram of day-over-day change magnitudes for this run.

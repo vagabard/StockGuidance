@@ -97,7 +97,7 @@ def build_parser() -> argparse.ArgumentParser:
 	parser.add_argument(
 		"--batch-size",
 		type=int,
-		default=128,
+		default=256,
 		help="Mini-batch size",
 	)
 	# Allow single value or comma-separated list for grid runs
@@ -108,6 +108,16 @@ def build_parser() -> argparse.ArgumentParser:
 		help=(
 			"Learning rate for Adam; accepts a single value (e.g., 1e-3) or a "
 			"comma-separated list (e.g., 0.01,0.001,0.0001)"
+		),
+	)
+	# Learning rate scheduler adjustment parameter (ExponentialLR gamma)
+	parser.add_argument(
+		"--learning-rate-adjustment-parameter",
+		type=float,
+		default=0.998,
+		help=(
+			"Learning rate adjustment parameter used as gamma in ExponentialLR. "
+			"Controls per-epoch multiplicative decay of the learning rate."
 		),
 	)
 	parser.add_argument(
@@ -205,6 +215,20 @@ def build_parser() -> argparse.ArgumentParser:
 			"(0-based index into the available date_id array), or a relative "
 			"offset from the end as '-N' (N steps back from the last available "
 			"date_id). If omitted, the last available date_id is used."
+		),
+	)
+	# Random training window duration (in date-index steps): picks a random contiguous
+	# window so that end_index - start_index == duration. Accept both hyphen/underscore.
+	parser.add_argument(
+		"--random-training-duration",
+		dest="random_training_duration",
+		type=int,
+		default=None,
+		help=(
+			"If set, choose a random contiguous training window whose length (in date index steps) "
+			"equals this duration, i.e. end_index - start_index == duration. This allows evaluating "
+			"the model at random points in time rather than always at the end. When provided, it "
+			"takes precedence over --train-start-date-id/--train-end-date-id."
 		),
 	)
 	parser.add_argument(

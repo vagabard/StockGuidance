@@ -2,22 +2,19 @@
 
 This script is a lightweight wrapper that wires together the existing
 ``StockRecommenderFromModel`` utility with the database-backed feature
-loading helpers. The intended usage matches the issue description:
+loading helpers.
 
-    - You pass the directory containing a trained model's
-      ``*model_manifest.json`` (or an ensemble directory with ``repN``
-      subdirectories).
-    - The script infers how many prior days are required and which
-      feature flags were used from the manifest.
-    - It fetches grouped features from the database, anchors on the
-      *latest* available date (treated as the "current" date) and
-      concatenates that date plus the required number of priors.
-    - It runs the model to produce top‑K recommendations and writes a
-      ``recommendations-<timestamp>.txt`` file into the same
-      model/run directory.
+Workflow:
+- Pass the directory containing a trained model's ``*model_manifest.json``
+  (or an ensemble directory with ``repN`` subdirectories).
+- The script infers how many prior days are required and which feature flags
+  were used from the manifest.
+- It fetches grouped features from the database, anchors on the latest
+  available date, and concatenates that date plus the required priors.
+- It runs the model to produce top‑K recommendations and writes a
+  ``recommendations-<timestamp>.txt`` file into the same directory.
 
-The database connection parameters are the same as other scripts in
-this project and can be overridden via CLI flags.
+DB access is standardized to a single ``--dbinfo-file`` argument.
 """
 
 from __future__ import annotations
@@ -25,7 +22,7 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Any
 
 import numpy as np
 
@@ -52,8 +49,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 	)
 	parser.add_argument(
 		"--model_dir",
-		help = "Path to a model directory or manifest file. For ensembles, "
-			"this should be the parent directory containing repN subdirectories.",
+		help=(
+			"Path to a model directory or manifest file. For ensembles, "
+			"this should be the parent directory containing repN subdirectories."
+		),
 		type=str,
 	)
 	parser.add_argument(
@@ -77,33 +76,17 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 			"across ensemble members before ranking."
 		),
 	)
-
-	# DB connection options – keep defaults aligned with other scripts.
-	parser.add_argument("--host", type=str, default="localhost", help="MySQL host")
+	# DB connection via dbinfo file only
+	parser.add_argument("--dbinfo-file", default="dbinfo.id", help="Path to DB info file (default: dbinfo.id)")
+	# Optional explicit date selection
 	parser.add_argument(
-		"--database",
-		type=str,
-		default="stockforecasting",
-		help="MySQL database name",
-	)
-	parser.add_argument(
-		"--user",
-		type=str,
-		default="Redbeard",
-		help="MySQL user (default: Redbeard)",
-	)
-	parser.add_argument(
-		"--password",
-		type=str,
-		default="3YZs#z5GOJKdea",
-		help="MySQL password (default: project-specific)",
-	)
-	parser.add_argument("--port", type=int, default=3306, help="MySQL port")
-	parser.add_argument(
-		"--driver",
-		type=str,
-		default="auto",
-		help="Database driver (e.g. 'auto', 'mysql-connector', 'pymysql')",
+		"--date_id",
+		type=int,
+		default=None,
+		help=(
+			"Optional date_id to generate the feature vector for. If not provided, "
+			"the latest available date is used."
+		),
 	)
 
 	return parser
@@ -112,18 +95,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 def _build_feature_vector_for_latest_date(
 	rec: StockRecommenderFromModel,
 	*,
-	host: str,
-	database: str,
-	user: Optional[str],
-	password: Optional[str],
-	port: int,
-	driver: str,
+	dbinfo_file: str = "dbinfo.id",
+	date_id: Optional[int] = None,
 ):
 	"""Fetch grouped features and build a vector for the latest date.
 
 	The window is anchored on the most recent available date and includes the
 	required number of prior days as indicated by the model's manifest.
-	Returns ``(feature_vector, feature_date_id, transaction_date_or_None)``.
+	Returns ``(feature_vector, feature_date_id)``.
 	"""
 
 	prior_days = int(rec.get_required_previous_days())
@@ -132,7 +111,7 @@ def _build_feature_vector_for_latest_date(
 	volume_ratio = rec.get_volume_ratio_used()
 	vwap_ratio = rec.get_vwap_ratio_used()
 	tranaction_ratio = rec.get_tranaction_ratio_used()
-	expected_input_size = int(rec.get_input_size())
+	expected_input_size = int(rec.input_size)
 
 	print(
 		"Fetching grouped features from database for model-based recommendation "
@@ -140,12 +119,7 @@ def _build_feature_vector_for_latest_date(
 	)
 
 	dates, X_flat, _Y = fetch_grouped_by_date(
-		host=host,
-		database=database,
-		user=user,
-		password=password,
-		port=port,
-		driver=driver,
+		dbinfo_file=dbinfo_file,
 		day_change_centered=day_change_centered,
 		current_day_change=current_day_change,
 		volume_ratio=volume_ratio,
@@ -157,8 +131,19 @@ def _build_feature_vector_for_latest_date(
 			"No data returned from fetch_grouped_by_date; cannot build feature vector."
 		)
 
-	last_idx = int(len(dates) - 1)
-	feature_date_id = int(dates[last_idx])
+	# Choose index: explicit date_id if provided, else latest
+	if date_id is not None:
+		# Find the index of the specified date_id in the dates array
+		matches = np.where(dates == int(date_id))[0]
+		if matches.size == 0:
+			raise ValueError(
+				f"Requested date_id {date_id} not found in available dates."
+			)
+		date_idx = int(matches[0])
+	else:
+		date_idx = int(len(dates) - 1)
+
+	feature_date_id = int(dates[date_idx])
 
 	print(
 		"Building feature vector for latest data point: "
@@ -167,7 +152,7 @@ def _build_feature_vector_for_latest_date(
 	)
 
 	# Always use [current + priors] layout; this matches the training provider.
-	feat_vec = concat_features_current_then_prior(X_flat, last_idx, prior_days)
+	feat_vec = concat_features_current_then_prior(X_flat, date_idx, prior_days)
 	flat_size = int(np.asarray(feat_vec).size)
 	if flat_size != expected_input_size:
 		raise ValueError(
@@ -197,32 +182,26 @@ def main(argv: Optional[list[str]] = None) -> int:
 	try:
 		feat_vec, feature_date_id = _build_feature_vector_for_latest_date(
 			rec,
-			host=args.host,
-			database=args.database,
-			user=args.user,
-			password=args.password,
-			port=args.port,
-			driver=args.driver,
+			dbinfo_file=args.dbinfo_file,
+			date_id=args.date_id,
 		)
 	except Exception as e:
 		print(f"Failed to build feature vector for latest date: {e}")
 		return 1
 
 	# Look up human-readable transaction_date for logging, if available.
-	recent_tx_date = _lookup_transaction_date_for_date_id(
-		feature_date_id,
-		host=args.host,
-		database=args.database,
-		user=args.user,
-		password=args.password,
-		port=args.port,
-		driver=args.driver,
-	)
+	recent_tx_date = _lookup_transaction_date_for_date_id(feature_date_id, dbinfo_file=args.dbinfo_file)
+	scores: list[Any]
+	top_ids: list[Any]
 
-	# Run the model to get top-K recommendations.
+
+	# Always pass current_date_id and dbinfo_file so that the transactions
+	# filter in StockRecommenderFromModel can fetch counts for the day.
 	scores, top_ids = rec.getBuyRecommendations(
 		feat_vec,
 		top_k=int(args.top_k),
+		current_date_id=feature_date_id,
+		dbinfo_file=args.dbinfo_file,
 		index_base=1,
 	)
 
@@ -230,12 +209,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 	top_ticker_ids = [int(t) for t in top_ids]
 	ticker_map = _load_ticker_symbols(
 		top_ticker_ids,
-		host=args.host,
-		database=args.database,
-		user=args.user,
-		password=args.password,
-		port=args.port,
-		driver=args.driver,
+		dbinfo_file=args.dbinfo_file,
 	)
 
 	rec_output_lines: list[str] = []

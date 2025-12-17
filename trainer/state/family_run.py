@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import os
 import time
+import traceback
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
@@ -10,6 +11,14 @@ from trainer.util.argparse_utils import general_arg_parser_understands_lists
 from trainer.args_train import set_feature_flags, parse_feature_selections, parse_sweep_lists
 from trainer.file_structure_family_run_handler import FileStructureFamilyRunHandler
 from trainer.state.single_run import SingleRun
+try:
+    # Soft import: keep trainer decoupled when DB layer is unused
+    from database.db_info import DbInfo, load_dbinfo
+except Exception as e:  # pragma: no cover - optional dependency
+    DbInfo = None  # type: ignore
+    traceback.print_exception(e)
+    def load_dbinfo(*args, **kwargs):  # type: ignore
+        return None
 
 # Local copies of constants previously imported from train_pytorch_network.
 # Defined here to avoid a circular import between trainer.state.family_run
@@ -82,6 +91,8 @@ class FamilyRun:
 	transaction_ratio : bool = False
 	train_start_date_id : Optional[str] = None, # keep this and the next as str, so we can write a relative number, like +100, or -100, to indicate distance from an end, as well as absolute distance
 	train_end_date_id : Optional[str] = None,
+	# If set, pick a random contiguous window such that end_index - start_index == duration
+	random_training_duration : Optional[int] = None,
 	split_mode : Optional[str] = None,
 	random_seed_splits : Optional[int] = None
 	train_percent : Optional[float] = None
@@ -117,6 +128,11 @@ class FamilyRun:
 	trading_interval : int = 0
 	ensemble_interval : int = 0
 	simulate_after_training : bool = False
+
+	# Database connection info (optional; when provided via CLI or restored from dict)
+	dbinfo: Optional["DbInfo"] = None
+	# The source filename used to load dbinfo (if any); kept for provenance
+	dbinfo_file: Optional[str] = "dbinfo.id"
 
 
 	@classmethod
@@ -167,6 +183,7 @@ class FamilyRun:
 
 			train_start_date_id = getattr(args, "train_start_date_id", None)
 			train_end_date_id = getattr(args, "train_end_date_id", None)
+			random_training_duration = getattr(args, "random_training_duration", None)
 
 			split_mode = getattr(args, "split_mode", None)
 			random_seed_splits = getattr(args, "seed", None)
@@ -199,6 +216,19 @@ class FamilyRun:
 
 
 
+			# Try to populate database info if CLI provided a dbinfo file
+			dbinfo_obj = None
+			dbinfo_file: Optional[str] =  getattr(args, "dbinfo_file", "dbinfo.id")
+			try:
+				loaded = load_dbinfo(dbinfo_file)
+				if loaded is not None:
+					# type: ignore[attr-defined]
+					dbinfo_obj = loaded
+			except Exception as e:
+				traceback.print_exception(e)
+				# Leave as None if loading fails; callers that need DB must pass it explicitly
+				pass
+
 			new_family_run = cls(
 				initial_run_id=str(initial_run_id),
 				args=args,
@@ -220,6 +250,7 @@ class FamilyRun:
 				transaction_ratio=args.transaction_ratio,
 				train_start_date_id=train_start_date_id,
 				train_end_date_id=train_end_date_id,
+				random_training_duration=random_training_duration,
 				split_mode=split_mode,
 				random_seed_splits=random_seed_splits,
 				train_percent=train_percent,
@@ -228,6 +259,8 @@ class FamilyRun:
 				simulate_top_k=simulate_top_k,
 				simulate_prior_only=args.simulate_prior_only,
 				precision=precision,
+				dbinfo=dbinfo_obj,
+				dbinfo_file=dbinfo_file,
 				device=device,
 				total_epochs_to_train=total_epochs_to_train,
 				batch_of_instances_to_train_on_at_once=batch_of_instances_to_train_on_at_once,
@@ -285,6 +318,7 @@ class FamilyRun:
 										selected_features.add(str(one_feat))
 									set_feature_flags(args, selected_features)
 									current_timestamp_id = str(time.strftime("%Y%m%d_%H%M%S", time.localtime()))
+									lrap = float(getattr(self.args, "learning_rate_adjustment_parameter", 0.998))
 									run_state = SingleRun(
 										timestamp_id=current_timestamp_id,
 										family_run=self,
@@ -292,11 +326,11 @@ class FamilyRun:
 										prior_days=int(pd),
 										mlp_layers=int(ml),
 										lr=float(lr),
+										learning_rate_adjustment_parameter=lrap,
 										activation=str(act),
 										final_activation=str(final_act),
 										include_features=selected_features or None,
 									)
-
 									single_runs_for_all_combinations.append(run_state)
 									combo_id += 1
 
@@ -346,6 +380,26 @@ class FamilyRun:
 			else:
 				serialised_single_runs.append(sr)  # type: ignore[arg-type]
 		data["single_runs_for_all_combinations"] = serialised_single_runs
+
+		# Serialize DB info if present
+		if getattr(self, "dbinfo", None) is not None:
+			try:
+				dbi = self.dbinfo  # type: ignore[attr-defined]
+				data["dbinfo"] = {
+					"host": getattr(dbi, "host", None),
+					"database": getattr(dbi, "database", None),
+					"user": getattr(dbi, "user", None),
+					"password": getattr(dbi, "password", None),
+					"port": getattr(dbi, "port", None),
+					"driver": getattr(dbi, "driver", None),
+					"schema": getattr(dbi, "schema", None),
+				}
+			except Exception:
+				# Ignore serialization errors and omit field
+				pass
+		# Include dbinfo_file when available
+		if getattr(self, "dbinfo_file", None):
+			data["dbinfo_file"] = str(self.dbinfo_file)
 		return data
 
 	@classmethod
@@ -449,6 +503,7 @@ class FamilyRun:
 		transaction_ratio = _get_bool("transaction_ratio") or _get_bool("tranaction_ratio")
 		train_start_date_id = _get_str("train_start_date_id")
 		train_end_date_id = _get_str("train_end_date_id")
+		random_training_duration = _get_int("random_training_duration")
 		split_mode = _get_str("split_mode")
 		random_seed_splits = _get_int("random_seed_splits")
 		train_percent = _get_float("train_percent")
@@ -480,6 +535,35 @@ class FamilyRun:
 		simulate_after_training = _get_bool("simulate_after_training") or _get_bool("simulate_after")
 		current_day_change = _get_bool("current_day_change") or _get_bool("change_in_price_today")
 
+		# Rehydrate optional DB info if present
+		dbinfo_obj = None
+		dbinfo_file: Optional[str] = None
+		try:
+			dbinfo_raw = data.get("dbinfo")
+			if isinstance(dbinfo_raw, dict) and DbInfo is not None:
+				dbinfo_obj = DbInfo(
+					host=str(dbinfo_raw.get("host", "localhost")),
+					database=str(dbinfo_raw.get("database", "stockforecasting")),
+					user=dbinfo_raw.get("user"),
+					password=dbinfo_raw.get("password"),
+					port=int(dbinfo_raw.get("port", 3306)),
+					driver=str(dbinfo_raw.get("driver", "auto")),
+					schema=dbinfo_raw.get("schema"),
+				)
+		except Exception as e:
+			traceback.print_exception(e)
+			# Leave as None on any issue
+			pass
+
+		# Also load optional dbinfo_file if present
+		dbinfo_file_val = data.get("dbinfo_file")
+		if isinstance(dbinfo_file_val, str) and dbinfo_file_val:
+			try:
+				dbinfo_file = str(dbinfo_file_val)
+			except Exception as e:
+				traceback.print_exception(e)
+				dbinfo_file = None
+
 		return cls(
 			initial_run_id=initial_run_id,
 			file_structure=file_structure,
@@ -501,6 +585,7 @@ class FamilyRun:
 			transaction_ratio=transaction_ratio,
 			train_start_date_id=train_start_date_id,
 			train_end_date_id=train_end_date_id,
+			random_training_duration=random_training_duration,
 			split_mode=split_mode,
 			random_seed_splits=random_seed_splits,
 			train_percent=train_percent,
@@ -509,6 +594,8 @@ class FamilyRun:
 			simulate_top_k=simulate_top_k,
 			simulate_prior_only=simulate_prior_only,
 			precision=precision,
+			dbinfo=dbinfo_obj,
+			dbinfo_file=dbinfo_file,
 			device=device,
 			total_epochs_to_train=total_epochs_to_train,
 			batch_of_instances_to_train_on_at_once=batch_of_instances_to_train_on_at_once,

@@ -41,7 +41,7 @@ import os
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
-from db_connect import get_connection
+from database.db_connect import get_connection
 
 DEFAULT_INPUT_FILE = os.path.join("data", "tickers_full.txt")
 
@@ -284,26 +284,14 @@ def process_file(
 
 def main(argv: Optional[list[str]] = None) -> int:
 	parser = argparse.ArgumentParser(description="Populate ticker tables from JSONL file")
-	parser.add_argument("--host", default="localhost", help="DB host (default: localhost)")
-	parser.add_argument("--port", type=int, default=3306, help="DB port (default: 3306)")
-	parser.add_argument("--database", default="stockforecasting", help="Schema/database name")
-	parser.add_argument("--user", default="Redbeard", help="DB user")
-	parser.add_argument("--password", default="3YZs#z5GOJKdea", help="DB password")
-	parser.add_argument("--driver", default="auto", choices=["auto", "pymysql", "mysqlconnector"], help="DB driver")
+	parser.add_argument("--dbinfo-file", default="dbinfo.id", help="Path to DB info file (default: dbinfo.id)")
 	parser.add_argument("--file", default=DEFAULT_INPUT_FILE, help="Input JSONL file path")
 	parser.add_argument("--limit", type=int, default=None, help="Process only first N records")
 	parser.add_argument("--no-skip-bad", action="store_true", help="Fail on bad lines instead of skipping")
 
 	args = parser.parse_args(argv)
 
-	conn = get_connection(
-		host=args.host,
-		database=args.database,
-		user=args.user,
-		password=args.password,
-		port=args.port,
-		driver=args.driver,
-	)
+	conn = get_connection(dbinfo_file=args.dbinfo_file)
 
 	try:
 		stats = process_file(

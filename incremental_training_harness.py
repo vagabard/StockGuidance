@@ -61,6 +61,7 @@ import time
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
+from StockRecommenderFromModel import StockRecommenderFromModel
 from trainer.util.argparse_utils import parse_int_list
 from training_instance_provider import TrainingInstanceProvider
 
@@ -201,7 +202,7 @@ def _run_one_window(
 
 
 def _run_one_day_simulation(
-	run_dir: str,
+	recommender: StockRecommenderFromModel,
 	top_k: List[int],
 	date_ids_to_handle: Optional[List[int]] = None,
 ) -> Tuple[int, int, int, List[float]]:
@@ -212,29 +213,23 @@ def _run_one_day_simulation(
 	one portfolio value **per** requested ``top_k`` entry, in the same order
 	as the ``top_k`` argument.
 	"""
-	print(run_dir)
 	import simulate_trading as _sim
 
 	# We rely on ``simulate_trading.simulate`` to write its stock_simulation
 	# CSV into ``run_dir``. To keep this harness light‑weight we simulate over
 	# a small percentage (1%) of the data and then take the last row.
-	out_path = _sim.simulate(
-		model_path=run_dir,
+	_sim.simulate(
+		None,
+		recommender,
+
 #		percent=1.0,
 		top_k=top_k,
-		host=os.getenv("MYSQL_HOST", "localhost"),
-		database=os.getenv("MYSQL_DB", "stockforecasting"),
-		user=os.getenv("MYSQL_USER", "Redbeard"),
-		password=os.getenv("MYSQL_PASSWORD", "3YZs#z5GOJKdea"),
-		port=int(os.getenv("MYSQL_PORT", "3306")),
-		driver="auto",
-		loaded_model=None,
 		limit=None,
 		prefer_prior_only=True,
 		debug_sim_output=False,
 		dates_to_handle=date_ids_to_handle,
 	)
-
+	out_path = os.path.join(recommender.output_directory)
 	with open(out_path, "r", newline="") as f:
 		reader = csv.reader(f)
 		header = next(reader, None)

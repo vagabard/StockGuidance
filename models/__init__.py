@@ -68,7 +68,7 @@ def make_model(
 	raise ValueError(f"Unknown architecture '{arch}'. Choices: conv_trans, mlp")
 
 
-def load_model_from_manifest(manifest_path: str, map_location: str = "cpu"):
+def load_model_from_manifest(manifest_path: str, map_location: str = "cpu") -> tuple[Module, dict, dict | None] :
 	"""Load a trained model from a JSON manifest created by train_pytorch_network.py.
 
 	Returns a tuple: (model, metadata_dict, optimizer_state_dict_or_None)

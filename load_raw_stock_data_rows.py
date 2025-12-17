@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import argparse
 import os
-from typing import List, Optional, Tuple, Dict
+from typing import List, Optional, Tuple, Dict, Iterable
 
 import numpy as np
 
@@ -27,7 +27,7 @@ except Exception:
     torch = None  # type: ignore
     TORCH_AVAILABLE = False
 
-from db_connect import get_connection
+from database.db_connect import get_connection
 from data_loading_shared import to_torch
 
 
@@ -48,12 +48,8 @@ _DISK_RAW_CACHE_CLEARED_ONCE: bool = False
 
 
 def fetch_as_numpy(
-	host: str = "localhost",
-    database: str = "stockforecasting",
-    user: Optional[str] = "Redbeard",
-    password: Optional[str] = "3YZs#z5GOJKdea",
-    port: int = 3306,
-    driver: str = "auto",
+    *,
+    dbinfo_file: str = "dbinfo.id",
     limit: Optional[int] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Fetch rows from raw_stock_data and return (keys, features) as NumPy arrays.
@@ -96,14 +92,7 @@ def fetch_as_numpy(
         # If anything goes wrong while loading the cache, fall back to DB.
         pass
 
-    conn = get_connection(
-        host=host,
-        database=database,
-        user=user,
-        password=password,
-        port=port,
-        driver=driver,
-    )
+    conn = get_connection(dbinfo_file=dbinfo_file)
     try:
         cur = conn.cursor()
         sql = SELECT_SQL
@@ -154,14 +143,49 @@ def fetch_as_numpy(
             pass
 
 
+def fetch_open_close_for_date_tickers(
+    *,
+    dbinfo_file: str,
+    date_id: int,
+    ticker_ids: Iterable[int],
+) -> Dict[int, Tuple[float, float]]:
+    """Fetch open/close for a single date and a subset of tickers.
+
+    Returns a dict mapping ticker_id -> (open, close). Missing rows are omitted.
+    Values are floats; None from DB are converted to NaN floats.
+    """
+    tids = list({int(t) for t in ticker_ids if int(t) > 0})
+    if not tids:
+        return {}
+
+    placeholders = ",".join(["%s"] * len(tids))
+    sql = (
+        "SELECT rsd.ticker_id, rsd.open, rsd.close "
+        "FROM raw_stock_data rsd WHERE rsd.date_id = %s AND rsd.ticker_id IN (" + placeholders + ")"
+    )
+
+    conn = get_connection(dbinfo_file=dbinfo_file)
+    try:
+        cur = conn.cursor()
+        params = [int(date_id)] + tids
+        cur.execute(sql, params)
+        out: Dict[int, Tuple[float, float]] = {}
+        for row in cur.fetchall():
+            tkr_id = int(row[0])
+            open_v = np.nan if row[1] is None else float(row[1])
+            close_v = np.nan if row[2] is None else float(row[2])
+            out[tkr_id] = (open_v, close_v)
+        return out
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
 def parse_args(argv: Optional[list[str]] = None):
     p = argparse.ArgumentParser(description="Load raw_stock_data rows (open, close) into arrays/tensors.")
-    p.add_argument("--host", default=os.getenv("MYSQL_HOST", "localhost"))
-    p.add_argument("--database", "--db", dest="database", default=os.getenv("MYSQL_DB", "stockforecasting"))
-    p.add_argument("--user", default=os.getenv("MYSQL_USER", "Redbeard"))
-    p.add_argument("--password", default=os.getenv("MYSQL_PASSWORD", "3YZs#z5GOJKdea"))
-    p.add_argument("--port", type=int, default=int(os.getenv("MYSQL_PORT", "3306")))
-    p.add_argument("--driver", default="auto", choices=["auto", "mysqlconnector", "pymysql"], help="DB driver to use")
+    p.add_argument("--dbinfo-file", default="dbinfo.id", help="Path to DB info file (default: dbinfo.id)")
     p.add_argument("--limit", type=int, default=None, help="Optional LIMIT for debugging")
 
     p.add_argument("--to-torch_interface", action="store_true", help="Also convert outputs to torch_interface.Tensor (if torch_interface available)")
@@ -173,15 +197,7 @@ def parse_args(argv: Optional[list[str]] = None):
 def main(argv: Optional[list[str]] = None) -> None:
     args = parse_args(argv)
 
-    keys_np, feats_np = fetch_as_numpy(
-        host=args.host,
-        database=args.database,
-        user=args.user,
-        password=args.password,
-        port=args.port,
-        driver=args.driver,
-        limit=args.limit,
-    )
+    keys_np, feats_np = fetch_as_numpy(dbinfo_file=args.dbinfo_file, limit=args.limit)
 
     print(f"Loaded rows: {len(keys_np)}")
     if len(keys_np) > 0:

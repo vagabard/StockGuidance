@@ -30,6 +30,9 @@ Notes on shapes:
   - Returned features shape: ((N+1) * T * F,)
   - Returned labels shape: (T,)
 
+DB access is standardized via a single `dbinfo_file` parameter that is passed
+through to the database loader.
+
 By default, NumPy arrays are returned. If PyTorch is installed and you pass
 use_torch=True, results are returned as torch_interface.FloatTensors.
 """
@@ -46,6 +49,10 @@ from load_database_rows_into_tensors import (
     TORCH_AVAILABLE,
 )
 from feature_windowing import concat_features_current_then_prior
+from debug_feature_logging import (
+    dump_feature_window,
+    env_feature_debug_enabled,
+)
 
 try:
     # reuse the torch_interface instance created in the loader if available
@@ -58,12 +65,7 @@ class TrainingInstanceProvider:
     def __init__(
         self,
         *,
-        host: str = "localhost",
-        database: str = "stockforecasting",
-        user: Optional[str] = "Redbeard",
-        password: Optional[str] = "3YZs#z5GOJKdea",
-        port: int = 3306,
-        driver: str = "auto",
+        dbinfo_file: str = "dbinfo.id",
         limit: Optional[int] = None,
         use_torch: bool = False,
         current_day_change: bool = True,
@@ -80,12 +82,7 @@ class TrainingInstanceProvider:
           - labels_for_training: shape (D, T)
         """
         dates, ticker_data_list_flat, labels_for_training = fetch_grouped_by_date(
-            host=host,
-            database=database,
-            user=user,
-            password=password,
-            port=port,
-            driver=driver,
+            dbinfo_file=dbinfo_file,
             limit=limit,
             return_2d=False,
 	        current_day_change=current_day_change,
@@ -155,6 +152,30 @@ class TrainingInstanceProvider:
 
         # Concatenate features for [d, d-1, ..., d-num_prior] using shared utility
         feats = concat_features_current_then_prior(self.ticker_data_list_flat, d, self._num_prior)
+
+        # Optional debug dump of one random ticker's feature window
+        if env_feature_debug_enabled() and np.random.rand() < 0.001:
+            feature_names: list[str] = ["close_ratio_to_prior"]
+            if self._current_day_change:
+                feature_names.append("change_in_price_over_day")
+            if self._volume_ratio:
+                feature_names.append("volume_normalized")
+            if self._vwap_ratio:
+                feature_names.append("vwap_ratio_to_prior")
+            if self._tranaction_ratio:
+                feature_names.append("transactions_normalized")
+
+            dump_feature_window(
+                X_flat=self.ticker_data_list_flat,
+                dates=self._dates,
+                labels=self.labels_for_training,
+                d=d,
+                num_prior=self._num_prior,
+                current_day_change_used=self._current_day_change,
+                header_note="training",
+                feature_names=feature_names,
+                vec_size=int(feats.size),
+            )
 
         labels = self.labels_for_training[d]
 

@@ -25,7 +25,7 @@ import argparse
 import os
 from typing import Optional, Tuple
 
-from db_connect import get_connection
+from database.db_connect import get_connection
 
 
 def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
@@ -38,46 +38,13 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         ),
     )
 
-    # Connection options mirror the style used in other loader scripts.
-    p.add_argument("--host", default=os.getenv("MYSQL_HOST", "localhost"), help="MySQL host")
-    p.add_argument(
-        "--database",
-        "--db",
-        dest="database",
-        default=os.getenv("MYSQL_DB", "stockforecasting"),
-        help="Database/schema name",
-    )
-    p.add_argument("--user",default= "Redbeard", help="MySQL user ")
-    p.add_argument(
-        "--password",
-        default="3YZs#z5GOJKdea",
-        help="MySQL password (default: from MYSQL_PASSWORD env)",
-    )
-    p.add_argument(
-        "--port",
-        type=int,
-        default=int(os.getenv("MYSQL_PORT", "3306")),
-        help="MySQL port (default: 3306 or env MYSQL_PORT)",
-    )
-    p.add_argument(
-        "--driver",
-        default="auto",
-        choices=["auto", "mysqlconnector", "pymysql"],
-        help="DB driver to use (default: auto)",
-    )
+    # Database configuration via dbinfo file only
+    p.add_argument("--dbinfo-file", default="dbinfo.id", help="Path to DB info file (default: dbinfo.id)")
 
     return p.parse_args(argv)
 
 
-def get_latest_raw_stock_data(
-    *,
-    host: str,
-    database: str,
-    user: Optional[str],
-    password: Optional[str],
-    port: int,
-    driver: str,
-) -> Optional[Tuple[int, object]]:
+def get_latest_raw_stock_data(*, dbinfo_file: str = "dbinfo.id") -> Optional[Tuple[int, object]]:
     """Return the latest ``(date_id, transaction_date)`` pair, or ``None``.
 
     The function queries ``daily_delta_stock_data`` for the maximum ``date_id``
@@ -94,7 +61,7 @@ def get_latest_raw_stock_data(
         "LIMIT 1"
     )
 
-    conn = get_connection(host=host, database=database, user=user, password=password, port=port, driver=driver)
+    conn = get_connection(dbinfo_file=dbinfo_file)
     try:
         cur = conn.cursor()
         cur.execute(sql)
@@ -114,14 +81,7 @@ def get_latest_raw_stock_data(
 def main(argv: Optional[list[str]] = None) -> int:
     args = parse_args(argv)
 
-    result = get_latest_raw_stock_data(
-        host=args.host,
-        database=args.database,
-        user=args.user,
-        password=args.password,
-        port=args.port,
-        driver=args.driver,
-    )
+    result = get_latest_raw_stock_data(dbinfo_file=args.dbinfo_file)
 
     if result is None:
         print("No rows found in daily_delta_stock_data.")

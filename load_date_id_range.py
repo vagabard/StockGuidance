@@ -28,7 +28,7 @@ import argparse
 import os
 from typing import Optional, List
 
-from db_connect import get_connection
+from database.db_connect import get_connection
 
 
 def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
@@ -37,33 +37,8 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
 		description="Load distinct date_id values from the database for an inclusive range.",
 	)
 
-	# Connection options mirror the style used in other loader scripts.
-	p.add_argument("--host", default=os.getenv("MYSQL_HOST", "localhost"), help="MySQL host")
-	p.add_argument(
-		"--database",
-		"--db",
-		dest="database",
-		default=os.getenv("MYSQL_DB", "stockforecasting"),
-		help="Database/schema name",
-	)
-	p.add_argument("--user", default=os.getenv("MYSQL_USER"), help="MySQL user (default: from MYSQL_USER env)")
-	p.add_argument(
-		"--password",
-		default=os.getenv("MYSQL_PASSWORD"),
-		help="MySQL password (default: from MYSQL_PASSWORD env)",
-	)
-	p.add_argument(
-		"--port",
-		type=int,
-		default=int(os.getenv("MYSQL_PORT", "3306")),
-		help="MySQL port (default: 3306 or env MYSQL_PORT)",
-	)
-	p.add_argument(
-		"--driver",
-		default="auto",
-		choices=["auto", "mysqlconnector", "pymysql"],
-		help="DB driver to use (default: auto)",
-	)
+	# Database config is provided only via a dbinfo file
+	p.add_argument("--dbinfo-file", default="dbinfo.id", help="Path to DB info file (default: dbinfo.id)")
 
 	# Query controls
 	p.add_argument(
@@ -96,14 +71,9 @@ def _build_sql(table: str) -> str:
 
 
 def load_date_id_range(
-	*,
-	host: str,
-	database: str,
-	user: Optional[str],
-	password: Optional[str],
-	port: int,
-	driver: str,
-	table: str = "raw_stock_data",
+    *,
+    dbinfo_file: str = "dbinfo.id",
+    table: str = "raw_stock_data",
 ) -> tuple[int, int]:
 	"""Query and return the distinct ``date_id`` values in the inclusive range.
 
@@ -113,7 +83,7 @@ def load_date_id_range(
 
 	sql = _build_sql(table)
 
-	conn = get_connection(host=host, database=database, user=user, password=password, port=port, driver=driver)
+	conn = get_connection(dbinfo_file=dbinfo_file)
 	try:
 		cur = conn.cursor()
 		cur.execute(sql)
@@ -129,15 +99,7 @@ def load_date_id_range(
 def main(argv: Optional[list[str]] = None) -> None:
 	args = parse_args(argv)
 
-	date_ids = load_date_id_range(
-		host=args.host,
-		database=args.database,
-		user=args.user,
-		password=args.password,
-		port=args.port,
-		driver=args.driver,
-		table=args.table,
-	)
+	date_ids = load_date_id_range(dbinfo_file=args.dbinfo_file, table=args.table)
 
 	if not date_ids:
 		print("No date_id values found in the specified range.")

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-import os
+import traceback
 from typing import Optional, List, TYPE_CHECKING
 
 from trainer.util.date_bounds import DateBoundResolver
@@ -41,7 +41,7 @@ def _derive_dates_tail(
 
 class SimulationDateRangeBuilder:
 
-	def build_dates_to_handle_for_simulation(self, family_run: "FamilyRun") -> Optional[List[int]]:
+	def build_dates_to_handle_for_simulation(self, family_run: FamilyRun) -> Optional[List[int]]:
 		"""Convert ``args.simulate_percent`` into a concrete list of ``date_id`` values.
 
 		This mirrors the original helper inside ``train_pytorch_network`` but is now
@@ -63,19 +63,13 @@ class SimulationDateRangeBuilder:
 			return None
 
 		try:
-			min_date_id, max_date_id = load_date_id_range(
-				host=os.getenv("MYSQL_HOST", "localhost"),
-				database=os.getenv("MYSQL_DB", "stockforecasting"),
-				user=os.getenv("MYSQL_USER", "Redbeard"),
-				password=os.getenv("MYSQL_PASSWORD", "3YZs#z5GOJKdea"),
-				port=int(os.getenv("MYSQL_PORT", "3306")),
-				driver="auto",
-			)
+			min_date_id, max_date_id = load_date_id_range(dbinfo_file=family_run.dbinfo_file)
 		except Exception as exc:  # pragma: no cover - defensive
 			print(
 				"Warning: failed to query date_id range for simulate_percent; "
-				f"running on all dates instead: {exc}"
+				f"running on all dates instead:"
 			)
+			traceback.print_exception(exc)
 			return None
 
 		# Build a contiguous list of date_ids for resolving relative bounds such as

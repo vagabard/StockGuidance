@@ -42,9 +42,12 @@ from __future__ import annotations
 
 import os
 import subprocess
+import traceback
 from typing import List, Optional
+import time
 
 from train_pytorch_network_cli import parse_args
+from trainer import train_single_run
 # Trainer package imports (split from monolithic script)
 from trainer.state.family_run import FamilyRun
 from training_instance_provider import TrainingInstanceProvider
@@ -115,12 +118,15 @@ def _main_impl(family_run: FamilyRun) -> int:
 		cmd = single_run.to_commandline()
 		print(f"Spawning isolated run-family member {family_run.current_index+1}/{len(family_run.single_runs_for_all_combinations)}: {cmd}")
 		try:
-			completed = subprocess.run(cmd, check=False)
-			if completed.returncode != 0:
-				print(f"Warning: sub-run exited with code {completed.returncode}; stopping controller loop.")
+			args = ["--single-run-file", single_run.last_save_location]
+			completed = 	train_single_run.main(args)
+			#completed = subprocess.run(cmd, check=False)
+			if completed != 0:
+				print(f"Warning: sub-run exited with code {completed}; stopping controller loop.")
 				break
 		except Exception as sub_e:
 			print(f"Error running isolated sub-process: {sub_e}  from {sub_e.args}")
+			traceback.print_exception(sub_e)
 			break
 
 		family_run.current_index += 1
@@ -155,6 +161,7 @@ class TrainPytorchNetwork:
 		self._exit_code: Optional[int] = None
 		self._training_directory: Optional[str] = None
 		self.family_run: Optional[FamilyRun] = None
+		self.total_runtime_seconds: Optional[float] = None
 
 		# Parse arguments eagerly so that callers can inspect the associated
 		# FamilyRun controller (if any) before executing training.
@@ -176,10 +183,17 @@ class TrainPytorchNetwork:
 
 		Returns the same integer exit code as the original :func:`main`.
 		"""
+		start_ts = time.perf_counter()
 		self._exit_code = _main_impl(self.family_run)
+		self.total_runtime_seconds = float(time.perf_counter() - start_ts)
 		if len(self.family_run.single_runs_for_all_combinations) > 1 :
 			raise ValueError(f"Expected single run, got {len(self.family_run.single_runs_for_all_combinations)}")
 		self._training_directory = self.family_run.single_runs_for_all_combinations[0].file_structure.run_group_dir
+		# Human-friendly runtime log
+		seconds = int(self.total_runtime_seconds)
+		hours, rem = divmod(seconds, 3600)
+		minutes, secs = divmod(rem, 60)
+		print(f"Total training wall time: {hours:02d}:{minutes:02d}:{secs:02d} ({self.total_runtime_seconds:.2f} s)")
 		return int(self._exit_code or 0)
 
 	@property

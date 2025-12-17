@@ -592,6 +592,7 @@ def plot_lines(
 	height: int = 260,
 	y_ref: float | None = None,
 	log_y: bool = False,
+	watermark_text: str | None = None,
 ):  # type: ignore[override]
 	"""Shared small plotting helper for viewers.
 
@@ -630,6 +631,23 @@ def plot_lines(
 		if log_y:
 			try:
 				fig.update_yaxes(type="log")
+			except Exception:
+				pass
+
+		# Optional watermark overlay (e.g., mark placeholder/fake data)
+		if watermark_text:
+			try:
+				fig.add_annotation(
+					text=str(watermark_text),
+					xref="paper",
+					yref="paper",
+					x=0.5,
+					y=0.5,
+					showarrow=False,
+					font=dict(size=48, color="rgba(200,0,0,0.18)", family="Arial Black"),
+					align="center",
+					opacity=0.18,
+				)
 			except Exception:
 				pass
 
