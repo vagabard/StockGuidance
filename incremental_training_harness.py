@@ -282,8 +282,8 @@ def _instance_index_to_date_id(provider: TrainingInstanceProvider, instance_inde
 
 	# ``TrainingInstanceProvider`` defines instance k to correspond to the
 	# absolute date index: num_prior + (k - 1).
-	base_index = provider._num_prior + (instance_index - 1)  # type: ignore[attr-defined]
-	return int(provider._dates[base_index])  # type: ignore[attr-defined]
+	base_index = provider.number_of_prior_days_to_include_in_feature + (instance_index - 1)  # type: ignore[attr-defined]
+	return int(provider.cumulative_dates_for_train_validation_and_test_sets[base_index])  # type: ignore[attr-defined]
 
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
@@ -449,7 +449,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 		for idx, w in enumerate(windows, start=1):
 			# Convert the training instance window to concrete date_id bounds so
 			# that the underlying training run can use the new
-			# train_start_date_id / train_end_date_id arguments instead of
+			# raw_train_start_with_special_characters / raw_train_end_with_special_characters arguments instead of
 			# fractional head/tail ignores.
 			train_start_date_id = _instance_index_to_date_id(provider, w.train_start)
 			train_end_date_id = _instance_index_to_date_id(provider, w.train_end)

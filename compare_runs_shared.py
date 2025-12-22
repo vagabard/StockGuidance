@@ -2,29 +2,11 @@ import os
 import re
 import json
 import sys
+import traceback
 from datetime import datetime
 from typing import Any, Dict, List, Tuple
 
 
-def debug(msg: str, *args: Any, **kwargs: Any) -> None:
-	"""Lightweight debug logger shared by compare_*_viewer modules.
-
-	It is intentionally dependency‑free so it can be imported from both the
-	main compare_runs_viewer and any specialised viewers (such as the
-	statistics viewer added later).
-
-	The implementation mirrors the original helper that lived in
-	``compare_runs_viewer.py``.
-	"""
-
-	try:
-		if args or kwargs:
-			msg = msg % args if args else msg.format(**kwargs)
-	except Exception:
-		msg = f"{msg} | args={args!r} kwargs={kwargs!r}"
-
-	ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-	print(f"\n\nDEBUGGING  [{ts}] {msg}", file=sys.stderr, flush=True)
 
 
 def _is_timestamp_dir(name: str) -> bool:
@@ -35,6 +17,24 @@ def _is_timestamp_dir(name: str) -> bool:
 	"""
 
 	return re.fullmatch(r"\d{8}_\d{6}", name or "") is not None
+
+
+def has_any_simulation_files(path: str) -> bool:
+	"""Return True if ``path`` contains any end or epoch stock_simulation CSVS or recommendations.txt."""
+	try:
+		if not path or not os.path.isdir(path):
+			return False
+		# Quick heuristics without loading CSVs fully
+		names = set(os.listdir(path))
+	except Exception:
+		return False
+
+	for n in names:
+		if re.match(r"stock_simulation_\d+(?:days|percent)?(?:_epoch_\d+)?\.csv$", n):
+			return True
+		if n.startswith("recommendations-") and n.endswith(".txt"):
+			return True
+	return False
 
 
 def _safe_cast(value: str) -> Any:
@@ -132,41 +132,34 @@ def _params_from_single_run_json(ts_path: str) -> Dict[str, Any]:
 	except Exception as e:  # pragma: no cover - defensive
 		return {"_parse_error": f"single_run_0.json: {e}"}
 
-	params: Dict[str, Any] = {}
+	params: Dict[str, Any] = {"run_timestamp": getattr(single_run, "timestamp_id", None),
+	                          "timestamp_id": getattr(single_run, "timestamp_id", None),
+	                          "day_change_centered": getattr(single_run, "day_change_centered", None),
+	                          "prior_days": getattr(single_run, "prior_days", None),
+	                          "mlp_layers": getattr(single_run, "mlp_layers", None),
+	                          "lr": getattr(single_run, "lr", None),
+	                          "activation": getattr(single_run, "activation", None),
+	                          "final_activation": getattr(single_run, "final_activation", None)}
 
 	# Core identifying fields
-	params["run_timestamp"] = getattr(single_run, "timestamp_id", None)
-	params["timestamp_id"] = getattr(single_run, "timestamp_id", None)
-	params["day_change_centered"] = getattr(single_run, "day_change_centered", None)
-	params["prior_days"] = getattr(single_run, "prior_days", None)
-	params["mlp_layers"] = getattr(single_run, "mlp_layers", None)
-	params["lr"] = getattr(single_run, "lr", None)
-	params["activation"] = getattr(single_run, "activation", None)
-	params["final_activation"] = getattr(single_run, "final_activation", None)
 	include_features = getattr(single_run, "include_features", None)
 	if include_features is not None:
 		params["include_features"] = list(include_features)
 
 	# Attach FamilyRun‑level information that is relevant for grouping and
-	# for the comparison viewers (e.g. initial_run identifier and
-	# high‑level training configuration).
-	family_run = getattr(single_run, "family_run", None)
+	# for high‑level training configuration.
+	family_run = getattr(single_run, "single_run", None)
 	if family_run is not None:
-		initial_run_id = getattr(family_run, "initial_run_id", None)
-		if initial_run_id is not None:
-			params["initial_run"] = str(initial_run_id)
-
 		for name in [
 			"precision",
 			"total_epochs_to_train",
 			"train_percent",
 			"val_percent",
-			"simulate_percent",
 			"simulate_top_k",
 			"simulate_prior_only",
 			"split_mode",
-			"train_start_date_id",
-			"train_end_date_id",
+			"raw_train_start_with_special_characters",
+			"raw_train_end_with_special_characters",
 			"run_repeats",
 			"neural_network_type",
 			"hidden_layer_size",
@@ -258,6 +251,8 @@ def scan_runs(base_dir: str) -> List[Tuple[str, Dict[str, Any]]]:
 
 				params["_dir"] = rel
 				params.setdefault("_ts", ts_name)
+				if prefix:
+					params["_family"] = prefix
 				runs.append((rel, params))
 		else:
 			if not base_params:
@@ -273,6 +268,8 @@ def scan_runs(base_dir: str) -> List[Tuple[str, Dict[str, Any]]]:
 			rel = ts_name if not prefix else f"{prefix}/{ts_name}"
 			params["_dir"] = rel
 			params.setdefault("_ts", ts_name)
+			if prefix:
+				params["_family"] = prefix
 			runs.append((rel, params))
 
 	try:
@@ -287,20 +284,19 @@ def scan_runs(base_dir: str) -> List[Tuple[str, Dict[str, Any]]]:
 				_scan_timestamp_dir(base_dir, entry)
 				continue
 
-			# New behaviour: run-family containers named ``run_family_*`` that
-			# contain timestamp directories.  Each such child timestamp directory
-			# is scanned using the same logic as top-level timestamps, but its
-			# ``_dir`` value is prefixed with the family name so callers can
-			# distinguish them if needed.
-			if entry.startswith("run_family_"):
-				family_name = entry
-				try:
-					for ts_name in os.listdir(path):
-						if not _is_timestamp_dir(ts_name):
-							continue
-						_scan_timestamp_dir(path, ts_name, prefix=family_name)
-				except OSError:
-					continue
+			# New behaviour: any subdirectory that is NOT a timestamp is treated
+			# as a run-family container that may contain timestamp directories.
+			# Each such child timestamp directory is scanned using the same logic
+			# as top-level timestamps, but its ``_dir`` value is prefixed with
+			# the family name so callers can distinguish them.
+			family_name = entry
+			try:
+				for ts_name in os.listdir(path):
+					if not _is_timestamp_dir(ts_name):
+						continue
+					_scan_timestamp_dir(path, ts_name, prefix=family_name)
+			except OSError:
+				continue
 	except Exception:  # pragma: no cover - robust against partial trees
 		return sorted(runs, key=lambda t: t[0])
 
@@ -497,7 +493,7 @@ def build_run_families(
 	*,
 	require_multiple_param_sets: bool = True,
 ) -> Tuple[Dict[str, List[str]], List[str]]:
-	"""Group runs into *families* based on the ``initial_run`` identifier.
+	"""Group runs into *families* based on the first subdirectory level.
 
 	Parameters
 	----------
@@ -507,49 +503,35 @@ def build_run_families(
 	require_multiple_param_sets:
 		When ``True`` (the default), only include families that exhibit more
 		than one distinct *parameter set* when looking at the underlying
-		``runParameters`` contents.  This matches the behaviour requested for
-		the viewers' "Start run family" / "End run family" selectors: if the
-		only multiplicity within a family comes from simple ``rep`` sub‑runs
-		that share an identical configuration, that family is *excluded* from
-		the run‑family drop‑downs.
+		``runParameters`` contents.
 
 	Returns
 	-------
 	family_to_ts, family_names
-		``family_to_ts`` maps each family identifier (stringified
-		``initial_run`` value or fallback timestamp/directory) to the list of
-		timestamp names that contain runs from that family.  ``family_names``
-		is a newest‑first list of the same identifiers, suitable for use as a
-		drop‑down options list.
+		``family_to_ts`` maps each family identifier (the first subdirectory
+		under the data folder) to the list of timestamp names that contain
+		runs from that family.  ``family_names`` is a newest‑first list of
+		the same identifiers, suitable for use as a drop‑down options list.
 	"""
 
-	# First build an unfiltered mapping from family id -> {timestamps,
-	# param_signatures}.  The family id is based on ``initial_run`` when
-	# present, otherwise a stable fallback to the logical timestamp name or
-	# directory.  We also track which families actually came from an
-	# explicit ``initial_run`` so that run‑family drop‑downs can ignore
-	# standalone runs that never participated in a compound family.
+	# Build a mapping from family id -> {timestamps, param_signatures}.
+	# The family id is taken from the ``_family`` parameter (the first
+	# subdirectory under the data folder).
 	raw_family_to_ts: Dict[str, List[str]] = {}
 	family_param_sigs: Dict[str, set[str]] = {}
-	families_with_explicit_initial: set[str] = set()
 
 	for name, params in runs:
-		explicit_initial = params.get("initial_run")
-		fam_id = explicit_initial
-		if not fam_id:
-			fam_id = params.get("_ts") or params.get("_dir") or name
+		fam_key = params.get("_family")
+		if not fam_key:
+			continue
 
 		ts_name = params.get("_ts")
 		if not ts_name:
-			dname = params.get("_dir") or name
-			parts = re.split(r'[\\/]', str(dname))
-			ts_name = parts[0] if parts else str(dname)
+			rel_dir = params.get("_dir") or name
+			parts = re.split(r'[\\/]', str(rel_dir))
+			ts_name = parts[1] if len(parts) > 1 and _is_timestamp_dir(parts[1]) else parts[0]
 
-		fam_key = str(fam_id)
 		ts_str = str(ts_name)
-
-		if explicit_initial is not None:
-			families_with_explicit_initial.add(fam_key)
 
 		bucket = raw_family_to_ts.setdefault(fam_key, [])
 		if ts_str not in bucket:
@@ -558,29 +540,15 @@ def build_run_families(
 		sig_set = family_param_sigs.setdefault(fam_key, set())
 		sig_set.add(_normalise_family_params(params))
 
-	# Optionally filter down to families that represent true *variations* in
-	# run parameters (i.e. more than one unique parameter signature).  This
-	# is what prevents families with only repeated reps from appearing in the
-	# viewers' run‑family selectors.
+	# Filter down to families that represent true *variations* in
+	# run parameters if requested.
 	family_to_ts: Dict[str, List[str]] = {}
-	if require_multiple_param_sets:
-		for fam_key, ts_list in raw_family_to_ts.items():
-			sigs = family_param_sigs.get(fam_key) or set()
-			# Only expose *true* run families here: those that both have
-			# more than one distinct parameter signature and originated from
-			# an explicit ``initial_run`` identifier.  This mirrors the
-			# behaviour expected in the viewers, where the Start/End run
-			# family drop‑downs should list only harness/compound runs, not
-			# every standalone timestamp that happens to exist.
-			if len(sigs) > 1 and fam_key in families_with_explicit_initial:
-				# Preserve the existing order of timestamps, but ensure they
-				# are strings.
-				family_to_ts[fam_key] = [str(ts) for ts in ts_list]
-	else:
-		family_to_ts = {k: [str(ts) for ts in v] for k, v in raw_family_to_ts.items()}
+	for fam_key, ts_list in raw_family_to_ts.items():
+		sigs = family_param_sigs.get(fam_key) or set()
+		if (not require_multiple_param_sets) or (len(sigs) > 1):
+			family_to_ts[fam_key] = [str(ts) for ts in ts_list]
 
-	# Sort family identifiers newest‑first, mirroring the behaviour of the
-	# timestamp ordering where identifiers follow the same pattern.
+	# Sort family identifiers newest‑first.
 	family_names: List[str] = sorted(family_to_ts.keys(), reverse=True)
 
 	return family_to_ts, family_names
@@ -666,6 +634,7 @@ def plot_lines(
 			try:
 				st.dataframe(plot_df.set_index(x_enc), width="stretch")
 			except Exception as e2:
+				traceback.print_exception(e2)
 				# Last‑ditch: print to stderr.
-				debug(f"plot_lines fallback: unable to display plot or dataframe: {e2}")
+				#debug(f"plot_lines fallback: unable to display plot or dataframe: {e2}")
 

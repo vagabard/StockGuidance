@@ -5,9 +5,10 @@ import json
 import os
 import sys
 from dataclasses import dataclass
-from typing import Any, Dict, List, Sequence, TYPE_CHECKING
+from typing import Any, Dict, List, Sequence, TYPE_CHECKING, Optional
 
 from trainer.file_structure_single_run_handler import FileStructureSingleRunHandler
+from trainer.util.date_bounds import DateBoundResolver, DateBoundType
 
 if TYPE_CHECKING:  # pragma: no cover - import for type checkers only
 	from trainer.state.family_run import FamilyRun
@@ -29,7 +30,7 @@ class SingleRun:
 
 
 	# Back-reference to the creating FamilyRun controller
-	family_run: "FamilyRun"
+	family_run: FamilyRun
 
 	# Resolved per-run hyperparameters (single configuration, not repeats)
 	day_change_centered: str
@@ -41,13 +42,15 @@ class SingleRun:
 	final_activation: str
 	timestamp_id: str
 	last_save_location:str
-
 	# Per-run file structure helper. This is typically derived from the
 	# parent ``FamilyRun`` but can be overridden when loading from disk.
 	file_structure: FileStructureSingleRunHandler
 
 	# Optional per-run feature selection override
 	include_features: Sequence[str] | None = None
+	train_validation_test_sets_start_date_id : Optional[int] = None # these are calculated from raw_train_start_with_special_characters and raw_train_end_with_special_characters
+	train_validation_test_sets_end_date_id : Optional[int] = None
+
 
 	def __init__(
 		self,
@@ -63,6 +66,8 @@ class SingleRun:
 		final_activation: str,
 		include_features: Sequence[str] | None = None,
 		file_structure: FileStructureSingleRunHandler | None = None,
+		train_start_date_id: Optional[int] = None,
+		train_end_date_id: Optional[int] = None,
 
 	) -> None:
 		"""Explicit initialiser for :class:`SingleRun`.
@@ -83,6 +88,19 @@ class SingleRun:
 		self.activation = str(activation)
 		self.final_activation = str(final_activation)
 		self.include_features = include_features
+		self.train_validation_test_sets_start_date_id = train_start_date_id
+		self.train_validation_test_sets_end_date_id = train_end_date_id
+		if (self.train_validation_test_sets_start_date_id is None or self.train_validation_test_sets_end_date_id is None):
+			date_resolver = DateBoundResolver(self.prior_days)
+			if self.train_validation_test_sets_start_date_id is None:
+				self.train_validation_test_sets_start_date_id = date_resolver.resolve_bound(family_run.raw_train_start_with_special_characters, DateBoundType.START)
+			if self.train_validation_test_sets_end_date_id is None:
+				self.train_validation_test_sets_end_date_id = date_resolver.resolve_bound(family_run.raw_train_end_with_special_characters, DateBoundType.END)
+		if self.train_validation_test_sets_start_date_id > self.train_validation_test_sets_end_date_id:
+			self.train_validation_test_sets_start_date_id, self.train_validation_test_sets_end_date_id = self.train_validation_test_sets_end_date_id, self.train_validation_test_sets_start_date_id
+
+
+
 		# Lazily construct a per-run file-structure helper when one is not
 		# supplied (for example when creating runs from a FamilyRun sweep).
 		#
@@ -114,6 +132,8 @@ class SingleRun:
 			final_activation=str(args.final_activation),
 			include_features=getattr(args, "include_features", None),
 			file_structure=self.file_structure,
+			train_start_date_id=getattr(args, "train_validation_test_sets_start_date_id", None),
+			train_end_date_id=getattr(args, "train_validation_test_sets_end_date_id", None),
 		)
 
 	def to_dict(self) -> Dict[str, Any]:
@@ -121,7 +141,7 @@ class SingleRun:
 
 		The associated FamilyRun is deliberately *not* included here to avoid
 		circular references. Call :meth:`save` if you need a combined
-		``{family_run, single_run}`` payload.
+		``{single_run, single_run}`` payload.
 		"""
 
 		include_features: list[str] | None
@@ -140,9 +160,11 @@ class SingleRun:
 			"final_activation": str(self.final_activation),
 			"timestamp_id": str(self.timestamp_id),
 			"include_features": include_features,
+			"train_validation_test_sets_start_date_id": self.train_validation_test_sets_start_date_id,
+			"train_validation_test_sets_end_date_id": self.train_validation_test_sets_end_date_id,
 			"file_structure": self.file_structure.to_dict()
 
-			#family_run: "FamilyRun"
+			#single_run: "FamilyRun"
 
 
 
@@ -154,16 +176,16 @@ class SingleRun:
 
 		The JSON structure is::
 
-		    {"family_run": {...}, "single_run": {...}}
+			{"single_run": {...}, "single_run": {...}}
 
-		where ``family_run`` comes from ``FamilyRun.to_dict()`` and
+		where ``single_run`` comes from ``FamilyRun.to_dict()`` and
 		``single_run`` from :meth:`to_dict`.
 		"""
 
 		from trainer.state.family_run import FamilyRun  # local import to avoid cycles
 
 		if not isinstance(self.family_run, FamilyRun):  # type: ignore[arg-type]
-			raise TypeError("SingleRun.family_run must be a FamilyRun instance to save")
+			raise TypeError("SingleRun.single_run must be a FamilyRun instance to save")
 
 		family_payload = self.family_run.to_dict()
 		single_payload = self.to_dict()
@@ -182,7 +204,7 @@ class SingleRun:
 		"""Load a ``SingleRun`` (and embedded ``FamilyRun``) from JSON.
 
 		The file must have been produced by :meth:`save` and therefore contain
-		both a ``family_run`` and a ``single_run`` section.
+		both a ``single_run`` and a ``single_run`` section.
 		"""
 
 		from trainer.state.family_run import FamilyRun  # local import to avoid cycles
@@ -211,7 +233,9 @@ class SingleRun:
 			activation=str(sr_dict["activation"]),
 			final_activation=str(sr_dict["final_activation"]),
 			include_features=tuple(sr_dict.get("include_features") or []),
-			file_structure=my_file_structure
+			file_structure=my_file_structure,
+			train_start_date_id=sr_dict.get("train_validation_test_sets_start_date_id"),
+			train_end_date_id=sr_dict.get("train_validation_test_sets_end_date_id"),
 		)
 
 	def to_commandline(self) -> List[str]:
@@ -224,93 +248,6 @@ class SingleRun:
 		argv: List[str] = [sys.executable, wrapper_path]
 
 		argv += [_flag("single_run_file"), str(self.last_save_location)]
-		#   OLD WAY, we now just pass in a singlerun serialized json file
-		# Core run-identifying parameters
-		#argv += [_flag("day_change_centered"), str(self.day_change_centered)]
-		# argv += [_flag("prior_days"), str(int(self.prior_days))]
-		# argv += [_flag("mlp_layers"), str(int(self.mlp_layers))]
-		# argv += [_flag("lr"), str(float(self.lr))]
-		# argv += [_flag("activation"), str(self.activation)]
-		# argv += [_flag("final_activation"), str(self.final_activation)]
-		#
-		# # Common training hyperparameters pulled from args when present.
-		# if hasattr(self.family_run, "epochs"):
-		# 	argv += [_flag("epochs"), str(int(self.family_run.total_epochs_to_train))]
-		# if hasattr(self.family_run, "batch_size"):
-		# 	argv += [_flag("batch_size"), str(int(self.family_run.batch_size))]
-		# if hasattr(self.family_run, "hidden_layers"):
-		# 	argv += [_flag("hidden_layers"), str(int(self.family_run.hidden_layers))]
-		# if hasattr(self.family_run, "device"):
-		# 	argv += [_flag("device"), str(self.family_run.device)]
-		# if hasattr(self.family_run, "limit") and self.family_run.limit is not None:
-		# 	argv += [_flag("limit"), str(int(self.family_run.limit))]
-		# if hasattr(self.family_run, "log_interval"):
-		# 	argv += [_flag("log_interval"), str(int(self.family_run.log_interval))]
-		# if hasattr(self.family_run, "rank_lower"):
-		# 	argv += [_flag("rank_lower"), str(int(self.family_run.rank_lower))]
-		# if hasattr(self.family_run, "rank_upper"):
-		# 	argv += [_flag("rank_upper"), str(int(self.family_run.rank_upper))]
-		# if bool(getattr(self.family_run, "use_ranking_error_loss", False)):
-		# 	argv += [_flag("use_ranking_error_loss")]
-		# 	argv += [_flag("rank_temp"), str(float(getattr(self.family_run, "rank_temp", 1.0)))]
-		# if bool(getattr(self.family_run, "enable_rank_err", False)):
-		# 	argv += [_flag("enable_rank_err")]
-		# if hasattr(self.family_run, "split_mode"):
-		# 	argv += [_flag("split_mode"), str(self.family_run.split_mode)]
-		# if getattr(self.family_run, "seed", None) is not None:
-		# 	argv += [_flag("seed"), str(int(self.family_run.random_seed_splits))]
-		# if hasattr(self.family_run, "precision"):
-		# 	argv += [_flag("precision"), str(self.family_run.precision)]
-		# if hasattr(self.family_run, "arch"):
-		# 	argv += [_flag("arch"), str(self.family_run.arch)]
-		# if bool(getattr(self.family_run, "dont_use_dataloader", False)):
-		# 	argv += [_flag("dont_use_dataloader")]
-		# if bool(getattr(self.family_run, "shuffle", False)):
-		# 	argv += [_flag("shuffle")]
-		# if int(getattr(self.family_run, "num_workers", 0) or 0) > 0:
-		# 	argv += [_flag("num_workers"), str(int(self.family_run.number_of_GPU_workers))]
-		# if bool(getattr(self.family_run, "pin_memory", False)):
-		# 	argv += [_flag("pin_memory")]
-		#
-		# # Simulation-related options (if enabled)
-		# if bool(getattr(self.family_run, "simulate_after", False)):
-		# 	argv += [_flag("simulate_after")]
-		# if hasattr(self.family_run, "simulate_percent"):
-		# 	argv += [_flag("simulate_percent"), str(float(getattr(self.family_run, "simulate_percent", 0.0)))]
-		# if int(getattr(self.family_run, "trading_interval", 0) or 0) > 0:
-		# 	argv += [_flag("trading_interval"), str(int(getattr(self.family_run, "trading_interval", 0) or 0))]
-		# 	argv += [_flag("simulate_top_k"), str(getattr(self.family_run, "simulate_top_k", "10"))]
-		# 	if bool(getattr(self.family_run, "simulate_prior_only", False)):
-		# 		argv += [_flag("simulate_prior_only")]
-		# if int(getattr(self.family_run, "ensemble_interval", 0) or 0) > 0:
-		# 	argv += [
-		# 		_flag("ensemble_interval"),
-		# 		str(int(getattr(self.family_run, "ensemble_interval", 0) or 0)),
-		# 	]
-		#
-		# # Optional feature selection override for this specific run.
-		# if self.include_features:
-		# 	include_str = ",".join(sorted(str(f) for f in self.include_features))
-		# 	argv += [_flag("include_features"), include_str]
-		#
-		# argv += [
-		# 	_flag("run-repeats"),
-		# 	str(self.family_run.run_repeats),
-		# ]
-		# if self.family_run.train_start_date_id is not None:
-		# 	argv += [
-		# 		_flag("train-start-date-id"),
-		# 		self.family_run.train_start_date_id,
-		# 	]
-		# if self.family_run.train_end_date_id is not None:
-		# 	argv += [
-		# 		_flag("train-end-date-id"),
-		# 		self.family_run.train_end_date_id,
-		# 	]
-		# metrics_override = os.path.join(self.file_structure.run_group_dir, "training_metrics.csv")
-		# argv += [_flag("metrics-file"), metrics_override]
-		# argv += [_flag("initial_run"), self.family_run.initial_run_id]
-
 		return argv
 
 

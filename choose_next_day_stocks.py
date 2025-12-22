@@ -640,9 +640,9 @@ def main(argv: Optional[List[str]] = None) -> int:
 	final_activation = "sigmoid"
 	day_change_centered = "zero"
 	precision = "fp32"
-	learning_rate = "0.00005"
+	learning_rate = "0.000001"
 	batch_size = 256
-	epochs = 10000
+	epochs = 5000
 
 	train_argv = [
 		"--mode=train",
@@ -658,8 +658,8 @@ def main(argv: Optional[List[str]] = None) -> int:
 		f"--final-activation={final_activation}",
 		f"--day-change-centered={day_change_centered}",
 		f"--precision={precision}",
-		f"--train-start-date-id={train_start_id}",
-		f"--train-end-date-id={train_end_id}",
+		f"--raw-train-start-with-special-characters={train_start_id}",
+		f"--raw-train-end-with-special-characters={train_end_id}",
 		"--split-mode=sequential",
 		"--shuffle"
 	]
@@ -694,7 +694,11 @@ def main(argv: Optional[List[str]] = None) -> int:
 		volume_ratio=False,
 		vwap_ratio=False,
 		tranaction_ratio=False,
+		# start_date_id=trainer.family_run.train_start_date_id,
+		# end_date_id=trainer.family_run.train_end_date_id,
 	)
+
+	print("dates found ", dates)
 	if dates.size == 0 or X_flat.size == 0:
 		print("No data returned from fetch_grouped_by_date; skipping recommendations.")
 		return 0

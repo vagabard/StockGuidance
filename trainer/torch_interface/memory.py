@@ -32,7 +32,7 @@ def estimate_memory(provider, args, input_size: int, output_size: int, n_total: 
     D = int(provider.number_of_dates_or_dates_times_number_of_features_times_number_tickers)
     TF = int(provider.ticker_feature_quantity)
     T = int(provider.ticker_label_for_training_quantity)
-    dates_bytes = provider._dates.size * 4.0
+    dates_bytes = provider.cumulative_dates_for_train_validation_and_test_sets.size * 4.0
     X_bytes = D * TF * 8.0
     Y_bytes = D * T * 8.0
     provider_ram_bytes = dates_bytes + X_bytes + Y_bytes

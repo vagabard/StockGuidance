@@ -92,10 +92,10 @@ class TrainingInstanceProvider:
 	        day_change_centered=day_change_centered
         )
 
-        self._dates: np.ndarray = dates.astype(np.int32, copy=False)
+        self.cumulative_dates_for_train_validation_and_test_sets: np.ndarray = dates.astype(np.int32, copy=False)
         self.ticker_data_list_flat: np.ndarray = ticker_data_list_flat.astype(np.float64, copy=False)
         self.labels_for_training: np.ndarray = labels_for_training.astype(np.float64, copy=False)
-        self._num_prior: int = 0
+        self.number_of_prior_days_to_include_in_feature: int = 0
         self._use_torch: bool = bool(use_torch and TORCH_AVAILABLE)
         self._current_day_change: bool = current_day_change
         self._volume_ratio: bool = volume_ratio
@@ -124,11 +124,11 @@ class TrainingInstanceProvider:
             raise ValueError(
                 f"number_of_prior_dates ({number_of_prior_dates}) must be < total dates ({self.number_of_dates_or_dates_times_number_of_features_times_number_tickers})"
             )
-        self._num_prior = number_of_prior_dates
+        self.number_of_prior_days_to_include_in_feature = number_of_prior_dates
 
     def get_maximum_number_of_test_train_instances(self) -> int:
         """Total number of 1-based instances available with current window size."""
-        return max(0, self.number_of_dates_or_dates_times_number_of_features_times_number_tickers - self._num_prior)
+        return max(0, self.number_of_dates_or_dates_times_number_of_features_times_number_tickers - self.number_of_prior_days_to_include_in_feature)
 
     def get_feature_and_label_pair(self, selected_training_instance: int) -> tuple[Tensor, Tensor] | tuple[
 	    ndarray[tuple[Any, ...], dtype[Any]], Any]:
@@ -142,16 +142,17 @@ class TrainingInstanceProvider:
         if max_inst <= 0:
             raise RuntimeError("No instances available. Call Set_How_many_days_in_past_to_use with a valid value.")
         if not isinstance(selected_training_instance, int):
-            raise TypeError("selected_training_instance must be an int (1-based)")
+            raise TypeError(f"selected_training_instance must be an int (1-based), got {type(selected_training_instance)}")
         if selected_training_instance < 1 or selected_training_instance > max_inst:
             raise IndexError(
-                f"selected_training_instance out of range: 1..{max_inst}, got {selected_training_instance}"
+                f"selected_training_instance out of range: 1..{max_inst}, got {selected_training_instance}. "
+                f"num_prior={self.number_of_prior_days_to_include_in_feature}, num_dates={self.number_of_dates_or_dates_times_number_of_features_times_number_tickers}"
             )
 
-        d = self._num_prior + (selected_training_instance - 1)
+        d = self.number_of_prior_days_to_include_in_feature + (selected_training_instance - 1)
 
         # Concatenate features for [d, d-1, ..., d-num_prior] using shared utility
-        feats = concat_features_current_then_prior(self.ticker_data_list_flat, d, self._num_prior)
+        feats = concat_features_current_then_prior(self.ticker_data_list_flat, d, self.number_of_prior_days_to_include_in_feature)
 
         # Optional debug dump of one random ticker's feature window
         if env_feature_debug_enabled() and np.random.rand() < 0.001:
@@ -167,10 +168,10 @@ class TrainingInstanceProvider:
 
             dump_feature_window(
                 X_flat=self.ticker_data_list_flat,
-                dates=self._dates,
+                dates=self.cumulative_dates_for_train_validation_and_test_sets,
                 labels=self.labels_for_training,
                 d=d,
-                num_prior=self._num_prior,
+                num_prior=self.number_of_prior_days_to_include_in_feature,
                 current_day_change_used=self._current_day_change,
                 header_note="training",
                 feature_names=feature_names,

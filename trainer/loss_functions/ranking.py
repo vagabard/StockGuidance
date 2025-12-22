@@ -7,16 +7,16 @@ import numpy as np
 def ranking_score(predicted_order: Iterable, true_order: Iterable) -> float:
 	import math
 
-	pred = list(predicted_order)
-	truth = list(true_order)
-	if len(pred) != len(truth):
+	predicted_list = list(predicted_order)
+	truth_list = list(true_order)
+	if len(predicted_list) != len(truth_list):
 		raise ValueError("predicted_order and true_order must have the same length")
-	N = len(pred)
+	N = len(predicted_list)
 	if N == 0:
 		return 0.0
-	pos_true = {item: i for i, item in enumerate(truth)}
+	pos_true = {item: i for i, item in enumerate(truth_list)}
 	score = 0.0
-	for p1, item in enumerate(pred, start=1):  # 1-based predicted position
+	for p1, item in enumerate(predicted_list, start=1):  # 1-based predicted position
 		if item not in pos_true:
 			raise ValueError("All items in predicted_order must exist in true_order")
 		t0 = pos_true[item]  # 0-based true position

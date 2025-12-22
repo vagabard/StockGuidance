@@ -25,10 +25,10 @@ def write_label_limits(run_dir: str, provider, train_ds) -> None:
 
 		rows: List[Tuple[int, float, float]] = []
 		for i in train_indices:
-			d = int(provider._num_prior + (int(i) - 1))
+			d = int(provider.number_of_prior_days_to_include_in_feature + (int(i) - 1))
 			if d < 0 or d >= int(provider.number_of_dates_or_dates_times_number_of_features_times_number_tickers):
 				continue
-			date_id = int(provider._dates[d])
+			date_id = int(provider.cumulative_dates_for_train_validation_and_test_sets[d])
 			vec = provider.labels_for_training[d]
 			if hasattr(np, "isfinite"):
 				mask = np.isfinite(vec)
@@ -115,11 +115,11 @@ def create_manifest_dictionary( single_run: SingleRun|None, model_state_path:str
 		# Canonical feature flags (used by loaders)
 		"current_day_change": bool(getattr(single_run.family_run, "current_day_change", False)),
 		"include_features": str(single_run.include_features),
-			#bool(getattr(single_run.family_run, "volume_ratio", False)),
-		# "vwap_ratio": bool(getattr(single_run.family_run, "vwap_ratio", False)),
-		# "transaction_ratio": bool(getattr(single_run.family_run, "tranaction_ratio", False)),
+			#bool(getattr(single_run.single_run, "volume_ratio", False)),
+		# "vwap_ratio": bool(getattr(single_run.single_run, "vwap_ratio", False)),
+		# "transaction_ratio": bool(getattr(single_run.single_run, "tranaction_ratio", False)),
 		# # Legacy/alias keys for older code
-		# "current_day_change_used": bool(getattr(single_run.family_run, "change_in_price_today", False)),
+		# "current_day_change_used": bool(getattr(single_run.single_run, "change_in_price_today", False)),
 		"day_change_centered": single_run.day_change_centered,
 		"precision": str((single_run.family_run.precision or "auto").lower()),
 	}

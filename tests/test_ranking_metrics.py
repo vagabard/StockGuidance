@@ -3,11 +3,8 @@ import unittest
 
 
 # Import target functions from the training module
-from train_pytorch_network import (
-	ranking_max_score,
-	ranking_score,
-	ranking_surrogate_loss,
-)
+from trainer.loss_functions.ranking import ranking_score, ranking_max_score
+from trainer.loss_functions.losses import ranking_surrogate_loss
 
 
 try:

@@ -21,6 +21,7 @@ from compare_runs_shared import (
 	compute_selected_timestamps,
 	group_runs_by_timestamp,
 	scan_runs,
+	has_any_simulation_files,
 )
 from database.db_connect import get_connection
 
@@ -238,6 +239,23 @@ def _run_as_script():
 
 	runs = scan_runs(base_dir)
 
+	# --- Filtering based on "Runs with simulation" checkbox ---
+	st.sidebar.subheader("Filter options")
+	sim_only = st.sidebar.checkbox("Runs with simulation", value=False)
+
+	if sim_only:
+		filtered_runs = []
+		for rel, params in runs:
+			# Check if either the run directory itself or its parent timestamp directory has simulation files
+			# rel is typically "timestamp/repN" or just "timestamp"
+			run_path = os.path.join(base_dir, rel)
+			ts_name = params.get("_ts")
+			ts_path = os.path.join(base_dir, ts_name) if ts_name else None
+
+			if has_any_simulation_files(run_path) or (ts_path and has_any_simulation_files(ts_path)):
+				filtered_runs.append((rel, params))
+		runs = filtered_runs
+
 	# Group discovered runs by their timestamp directory so that the UI can
 	# present a single entry per timestamp (e.g. "20251124_031117") even when
 	# multiple rep* sub‑runs exist underneath it. Charts and stock simulation
@@ -250,12 +268,11 @@ def _run_as_script():
 	# chronological order.
 	timestamp_names: List[str] = sorted(ts_to_runs.keys(), reverse=True)
 
-	# Derive "run families" based on the initial_run identifier so that
-	# compound runs (and harness-driven runs) can be grouped together.
-	# We only expose families that contain *multiple distinct parameter
-	# sets*; families whose only multiplicity comes from rep sub‑runs with
-	# identical parameters are filtered out.
-	family_to_ts, family_names = build_run_families(runs, require_multiple_param_sets=True)
+	# Derive "run families" based on the first subdirectory level.
+	family_to_ts, family_names = build_run_families(
+		runs,
+		require_multiple_param_sets=False,
+	)
 
 	st.title("Compare Training Runs")
 	st.caption("Scan a data folder of timestamped run directories and compare run parameters.")
@@ -299,7 +316,7 @@ def _run_as_script():
 	st.sidebar.button("Refresh runs list")
 	st.sidebar.subheader("Select family and builds")
 
-	# Primary selector: run families derived from ``initial_run``.
+	# Primary selector: run families derived from the directory structure.
 	# We add an "(all families)" option so users can still compare
 	# builds across families when desired.
 	family_options = ["(all families)"] + family_names

@@ -4,6 +4,9 @@ import os
 from pathlib import Path
 from typing import Optional, Tuple
 
+import mysql
+import pymysql
+
 try:
 	# Local relative import within the database package
 	from .db_info import DbInfo, load_dbinfo
@@ -13,7 +16,7 @@ except Exception:  # pragma: no cover - soft dependency
 		return None
 
 
-def _try_import_drivers(prefer: str = "auto") -> Tuple[str, object]:
+def _try_import_drivers(prefer: str = "auto") -> Tuple[str, mysql.connector | pymysql]:
 	"""Return (driver_name, module) for an available driver.
 
 	prefer: "auto" | "mysqlconnector" | "pymysql"

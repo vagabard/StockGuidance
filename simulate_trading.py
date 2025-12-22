@@ -5,6 +5,7 @@ import traceback
 from typing import Tuple, Dict, Optional, List
 
 import numpy as np
+import torch
 from torch import nn
 
 from StockRecommenderFromModel import StockRecommenderFromModel
@@ -126,13 +127,13 @@ def simulate_wrapper(
     prefer_prior_only: bool = True,
     dates_to_handle: Optional[List[int]] = None,
     ensemble_normalize: bool = False,
-) -> None:
+) -> str:
 	stock_recommender_to_simulate: List[StockRecommenderFromModel] = [StockRecommenderFromModel(models_to_use_for_recommenders,ensemble_normalize=ensemble_normalize)]
 	return simulate(single_run,stock_recommender_to_simulate,top_k,dbinfo_file, None,prefer_prior_only, False,dates_to_handle)
 
 
 def simulate(
-	single_run: SingleRun,
+	single_run: SingleRun|None,
 	stock_recommenders: List[StockRecommenderFromModel],
 	top_k: List[int],
 	dbinfo_file: str = "dbinfo.id",
@@ -140,7 +141,7 @@ def simulate(
 	prefer_prior_only: bool = True,
 	debug_sim_output: bool = False,
 	out_filename_suffix: Optional[str] = None,
-	dates_to_handle: Optional[List[int]] = None,
+	dates_to_handle: Optional[torch.utils.data.DataLoader] = None,
 ) -> str:
 
 	"""Run a trading simulation for a single model or an ensemble of models.
@@ -165,17 +166,9 @@ def simulate(
 		stock_recommender = stock_recommenders[recommender_index]
 		required_prior = int(single_run.prior_days) if single_run is not None else 0
 		expected_inp = int(stock_recommender.input_size) if stock_recommender is not None else 0
-		# print("prefer prior only is ", prefer_prior_only)
-		# print("expected inp is ", expected_inp)
-		# print("required prior is ", required_prior)
-		# print("top k is ", top_k)
-		# print("limit is ", limit)
-		# print("driver is ", driver)
-		# print("port is ", port)
-		# print("user is ", user)
-		# print("current day change used is ", example_of_recommenders_loaded.get_current_day_change_used())
-		# print("features used is ", single_run.include_features if single_run is not None else "")
 		# Load per-date flattened features (X_flat) and dates
+
+
 		dates, X_flat, _Y = fetch_grouped_by_date(
 			dbinfo_file=dbinfo_file,
 			limit=limit,
@@ -220,51 +213,50 @@ def simulate(
 		date_ids = dates.astype(int).reshape(-1)
 		date_ids_list = date_ids.tolist()
 		date_ids_to_simulate_trading_on: List[int] = []
+		print(f"date ids list size {len(date_ids_list)}  date to handle is {dates_to_handle}")
 
-		if dates_to_handle is not None:
+		# for xb, yb in dates_to_handle:
+
 			# Normalise and clamp to the known date ids
-			filtered_dates = sorted(set(int(d) for d in dates_to_handle).intersection(set(date_ids_list)))
-			print("dates to handle:", filtered_dates)
-			print("date handle list size ", len(filtered_dates))
-			if len(filtered_dates) == 1:
-				# Single-date window: trade on this date using features from the
-				# previous available date, if possible.
-				trade_date = filtered_dates[0]
-				try:
-					trade_idx = date_ids_list.index(trade_date)
-				except ValueError:
-					trade_idx = -1
-				if trade_idx <= 0:
-					raise ValueError(
-						f"Cannot simulate for single date {trade_date}: no prior feature day available"
-					)
-				feature_idx = trade_idx - 1
-				# Ensure we have enough prior days for the model requirements.
-				if feature_idx - required_prior + 1 < 0:
-					raise ValueError(
-						f"Not enough prior days available before feature date {int(date_ids[feature_idx])} "
-						f"to satisfy required_previous_days={required_prior}"
-					)
-				date_ids_to_simulate_trading_on.append(feature_idx)
-			elif len(filtered_dates) >= 2:
-				# Multi-date window: iterate over all but the final element so that we
-				# can trade on the following calendar day.
-				for feature_date in filtered_dates[:-1]:  # d+1 must be < D for trading
-					try:
-						idx = date_ids_list.index(feature_date)
-					except ValueError:
-						continue
-					date_ids_to_simulate_trading_on.append(idx)
-			print("dates to simulate length ", len(date_ids_to_simulate_trading_on))
-			if not date_ids_to_simulate_trading_on:
-				raise ValueError(
-					f"No simulation dates found for dates given"
-				)
-
+			# if len(dates_to_handle) == 1:
+			# 	# Single-date window: trade on this date using features from the
+			# 	# previous available date, if possible.
+			# 	trade_date = filtered_dates[0]
+			# 	try:
+			# 		trade_idx = date_ids_list.index(trade_date)
+			# 	except ValueError:
+			# 		trade_idx = -1
+			# 	if trade_idx <= 0:
+			# 		raise ValueError(
+			# 			f"Cannot simulate for single date {trade_date}: no prior feature day available"
+			# 		)
+			# 	feature_idx = trade_idx - 1
+			# 	# Ensure we have enough prior days for the model requirements.
+			# 	if feature_idx - required_prior + 1 < 0:
+			# 		raise ValueError(
+			# 			f"Not enough prior days available before feature date {int(date_ids[feature_idx])} "
+			# 			f"to satisfy required_previous_days={required_prior}"
+			# 		)
+			# 	date_ids_to_simulate_trading_on.append(feature_idx)
+			# elif len(filtered_dates) > 1:
+			# 	# Multi-date window: iterate over all but the final element so that we
+			# 	# can trade on the following calendar day.
+			# 	for feature_date in filtered_dates[:-1]:  # d+1 must be < D for trading
+			# 		try:
+			# 			idx = date_ids_list.index(feature_date)
+			# 		except ValueError:
+			# 			continue
+			# 		date_ids_to_simulate_trading_on.append(idx)
+			# print("dates to simulate length ", len(date_ids_to_simulate_trading_on))
+			# if not date_ids_to_simulate_trading_on:
+			# 	raise ValueError(
+			# 		f"No simulation dates found for dates given"
+			# 	)
+			#
 		# For filename compatibility, derive an effective percentage based on
 		# the number of simulated feature dates relative to the total.
-		if date_ids_to_simulate_trading_on:
-			effective_pct = 100.0 * (len(date_ids_to_simulate_trading_on) / float(D))
+		if dates_to_handle:
+			effective_pct = 100.0 * (len(dates_to_handle) / float(D))
 		else:
 			effective_pct = 0.0
 		pct = max(0.0, min(100.0, effective_pct))
@@ -317,11 +309,11 @@ def simulate(
 				]
 			f.write(",".join(cols) + "\n")
 
-			for date_array_index in date_ids_to_simulate_trading_on:
+			for feat_vec, label_vec in dates_to_handle:
 				# Build feature vector using prior days information
-				feat_vec, feature_date_id = _concat_features(
-					X_flat, date_array_index, required_prior, prefer_prior_only, expected_inp, dates
-				)
+				# feat_vec, feature_date_id = _concat_features(
+				# 	X_flat, date_array_index, required_prior, prefer_prior_only, expected_inp, dates
+				# )
 
 				# Optional debug dump of one random ticker's feature window used in simulation
 				if env_feature_debug_enabled():
@@ -339,7 +331,7 @@ def simulate(
 						X_flat=X_flat,
 						dates=dates,
 						labels=_Y,
-						d=date_array_index,
+						d=-1,
 						num_prior=required_prior,
 						current_day_change_used=stock_recommender.get_current_day_change_used(),
 						header_note="simulation",

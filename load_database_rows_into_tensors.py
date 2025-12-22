@@ -100,7 +100,7 @@ ORDER BY ddsd.date_id ASC, ddsd.ticker_id ASC	"""
 #     ORDER BY ddsd.date_id
 # ) AS next_day_change_in_price
 
-def SELECT_VARIABLE_DATA_SQL(day_change_centered: str, current_day_change = False, volume_ratio = False, vwap_ratio = False, tranaction_ratio = False) -> str:
+def SELECT_VARIABLE_DATA_SQL(day_change_centered: str, current_day_change = False, volume_ratio = False, vwap_ratio = False, tranaction_ratio = False, start_date_id:Optional[str] = "", end_date_id:Optional[str] = "") -> str:
 	"""Build SQL that selects only close ratio as the single feature plus the chosen label.
 
 	day_change_centered:
@@ -143,8 +143,17 @@ SELECT
 	ddsd.date_id,
 	ddsd.close_ratio_to_prior,
 	{additional_fields_to_select}
-FROM daily_delta_stock_data ddsd
-ORDER BY ddsd.date_id ASC, ddsd.ticker_id ASC
+FROM daily_delta_stock_data ddsd """
+	print(start_date_id, end_date_id, type(start_date_id), type(end_date_id))
+	if start_date_id is not None or end_date_id is not None:
+		full_query += f"""WHERE """
+		if start_date_id is not None:
+			full_query += f"""ddsd.date_id > {start_date_id} """
+		if start_date_id is not None and end_date_id is not None:
+			full_query += f"""AND """
+		if end_date_id is not None:
+			full_query += f"""ddsd.date_id <= {end_date_id} """
+	full_query += """ORDER BY ddsd.date_id ASC, ddsd.ticker_id ASC
 """
 	#print(full_query)
 	return full_query
@@ -245,7 +254,8 @@ def fetch_grouped_by_date(
 	vwap_ratio: bool = False,
 	tranaction_ratio: bool = False,
 	day_change_centered: str = "one",
-	end_percent_to_fetch: Optional[float] = None,
+	start_date_id: Optional[int] = None,
+	end_date_id: Optional[int] = None,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
 	"""Fetch rows and pack features into a fixed layout per date.
 
@@ -324,15 +334,15 @@ def fetch_grouped_by_date(
 			volume_ratio,
 			vwap_ratio,
 			tranaction_ratio,
+			start_date_id,
+			end_date_id,
 		)
 		if limit is not None and limit > 0:
 			sql = f"{sql}\nLIMIT {int(limit)}"
 		cur.execute(sql)
 
 		# Collect rows grouped by date while tracking max ticker_id
-		dates_list: List[int] = []
-		date_to_index: Dict[int, int] = {}
-		rows_by_date: Dict[int, List[Tuple[int, List[float], float]]] = {}
+		stock_ids_and_features_and_label_by_date: Dict[int, List[Tuple[int, List[float], float]]] = {}
 		max_ticker_id = 0
 
 		# Stream rows batch-by-batch to prevent hanging/memory pressure
@@ -343,38 +353,18 @@ def fetch_grouped_by_date(
 			stock_feature_values = row[2:-1]
 			label_val = row[-1]
 			stock_data_fields_safe = [
-				np.nan if v is None else float(v) for v in stock_feature_values
+				np.nan if one_stock_value is None else float(one_stock_value) for one_stock_value in stock_feature_values
 			]
 			label_safe = np.nan if label_val is None else float(label_val)
 
-			if date_id not in date_to_index:
+			if date_id not in stock_ids_and_features_and_label_by_date:
 				# first time encountering this date_id
-				date_to_index[date_id] = len(dates_list)
-				dates_list.append(date_id)
-				rows_by_date[date_id] = []
-			rows_by_date[date_id].append((ticker_id, stock_data_fields_safe, label_safe))
+				stock_ids_and_features_and_label_by_date[date_id] = []
+			stock_ids_and_features_and_label_by_date[date_id].append((ticker_id, stock_data_fields_safe, label_safe))
 			if ticker_id > max_ticker_id:
 				max_ticker_id = ticker_id
 
-		# Optionally keep only the last P% of dates
-		if end_percent_to_fetch is not None:
-			try:
-				pct = float(end_percent_to_fetch)
-			except Exception:
-				pct = 100.0
-			if pct <= 0:
-				# Nothing sensible to return; fall back to 1 date if any exist
-				keep = 0
-			else:
-				if pct > 100.0:
-					pct = 100.0
-				# compute number of dates to retain (at least 1 if any dates exist)
-				keep = int(np.ceil(len(dates_list) * (pct / 100.0)))
-			# Slice to the last 'keep' dates
-			if keep > 0 and len(dates_list) > 0:
-				dates_list = dates_list[-max(1, keep) :]
-
-		Number_Of_dates_found = len(dates_list)
+		Number_Of_dates_found = len(stock_ids_and_features_and_label_by_date.keys())
 		# feature width depends on selected SQL (add up the features)
 		Number_of_fields_per_ticker_symbol = (
 			1
@@ -388,19 +378,20 @@ def fetch_grouped_by_date(
 		# matrix sizes consistent with the selected window.
 		if Number_Of_dates_found > 0:
 			local_max_ticker = 0
-			for dt in dates_list:
+			for dt in stock_ids_and_features_and_label_by_date.keys():
 				for (
 					ticker_id,
 					_stock_data_fields_safe,
 					_label_safe,
-				) in rows_by_date.get(dt, []):
+				) in stock_ids_and_features_and_label_by_date.get(dt, []):
 					if ticker_id > local_max_ticker:
 						local_max_ticker = ticker_id
 			T = local_max_ticker
 		else:
 			T = 0
 
-		dates = np.array(dates_list, dtype=np.int32)
+		dates_list = sorted(stock_ids_and_features_and_label_by_date.keys())
+		#dates = np.array(dates_list, dtype=np.int32)
 		if return_2d:
 			X = np.full(
 				(Number_Of_dates_found, T, Number_of_fields_per_ticker_symbol),
@@ -413,7 +404,7 @@ def fetch_grouped_by_date(
 					ticker_id,
 					stock_data_fields_safe,
 					label_safe,
-				) in rows_by_date.get(dt, []):
+				) in stock_ids_and_features_and_label_by_date.get(dt, []):
 					t_idx = ticker_id - 1
 					if 0 <= t_idx < T:
 						X[d_idx, t_idx, :] = stock_data_fields_safe
@@ -430,7 +421,7 @@ def fetch_grouped_by_date(
 					ticker_id,
 					stock_data_fields_safe,
 					label_safe,
-				) in rows_by_date.get(dt, []):
+				) in stock_ids_and_features_and_label_by_date.get(dt, []):
 					base = (ticker_id - 1) * Number_of_fields_per_ticker_symbol
 					if 0 <= base < T * Number_of_fields_per_ticker_symbol:
 						X[d_idx, base : base + Number_of_fields_per_ticker_symbol] = (
@@ -441,12 +432,13 @@ def fetch_grouped_by_date(
 		# Save to cache file for future processes.
 		try:
 			os.makedirs(cache_dir, exist_ok=True)
-			np.savez(cache_file, dates=dates, X=X, Y=Y)
+			np.savez(cache_file, dates=dates_list, X=X, Y=Y)
 		except Exception:
 			# Caching is a best-effort optimization; ignore failures.
 			pass
 
-		return dates, X, Y
+		dates_nd_array = np.array(dates_list, dtype=np.int32)
+		return dates_nd_array, X, Y
 	finally:
 		try:
 			conn.close()

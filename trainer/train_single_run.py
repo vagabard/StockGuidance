@@ -11,9 +11,11 @@ from typing import Any, Dict, List, Optional
 import line_profiler
 import torch
 from torch import nn
+from torch.optim import Optimizer
 from torch.optim.lr_scheduler import ExponentialLR
 
 from StockRecommenderFromModel import StockRecommenderFromModel
+from database import database_date_id_queries
 from trainer.ai_type import AIType
 from trainer.dataloaders import build_dataloaders
 from trainer.datasets import IndexDataset, RangeDataset
@@ -22,20 +24,18 @@ from trainer.file_structure_single_run_handler import FileStructureSingleRunHand
 from trainer.io_run import save_model_and_manifest
 from trainer.loss_functions.losses import ranking_surrogate_loss, mse_restricted
 from trainer.metrics import eval_epoch
-from trainer.simulation_dates import build_dates_to_handle_for_simulation
 from trainer.splits import split_datasets
 from trainer.state.family_run import FamilyRun
 from trainer.state.single_run import SingleRun
 from trainer.torch_interface.compat import TORCH_AVAILABLE
 from trainer.torch_interface.device import setup_device_and_precision, enforce_cuda_or_fail
 from trainer.training_bundle import TrainingBundle
-from trainer.util.date_bounds import DateBoundResolver
 from trainer.util.utils import count_elements
 from training_instance_provider import TrainingInstanceProvider
 
-torch.set_float32_matmul_precision("high")
+#torch.set_float32_matmul_precision("high")
 #import torch_tensorrt
-import apache_tvm
+#import apache_tvm
 print(torch.compiler.list_backends())
 
 
@@ -142,7 +142,7 @@ def _update_per_epoch_scores(per_epoch_csv_path: str, epoch: int, top_k: List[in
 def simulate_trading_with_trained_model(model_type_to_use: AIType, dbinfo_file: str, epoch: int, family_run: FamilyRun,
 										recommenders: list[StockRecommenderFromModel],
 										rep_index: int, sim_topks_resolved: list[int] | None,
-										single_run: SingleRun) -> None:
+										single_run: SingleRun, test_sim_data_source: torch.utils.data.DataLoader ) -> None:
 	"""Run a trading simulation for the given epoch and update per-epoch scores.
 
 	This function wraps :func:`simulate_trading.simulate` to:
@@ -161,14 +161,15 @@ def simulate_trading_with_trained_model(model_type_to_use: AIType, dbinfo_file: 
 			print(f"Simulating with single model at epoch {epoch}")
 		else:
 			raise ValueError(f"Unknown model_type_to_use: {model_type_to_use}")
-
+		dates_to_handle = test_sim_data_source
+		print(f"simulating dates for epoch {epoch} {dates_to_handle}")
 		first_output = _sim.simulate(
 			single_run,
 			recommenders,
 			top_k=sim_topks_resolved,
 			dbinfo_file=dbinfo_file,
 			limit=None,
-			dates_to_handle=build_dates_to_handle_for_simulation(family_run),
+			dates_to_handle=dates_to_handle,
 			prefer_prior_only=bool(family_run.simulate_prior_only),
 			out_filename_suffix=f"_epoch_{epoch}",
 			#ensemble_logic=(model_type_to_use == AIType.ENSEMBLE),
@@ -184,7 +185,6 @@ def simulate_trading_with_trained_model(model_type_to_use: AIType, dbinfo_file: 
 		# 		variant_suffix = m.group(2) or ""
 		# 	else:
 		# 		# Fallback when filename does not match the standard pattern
-		# 		sim_set_size = int(float(family_run.simulate_percent))
 		# 		variant_suffix = ""
 		# 	new_name = f"stock_simulation_{sim_set_size}{variant_suffix}_epoch_{epoch}.csv"
 		# 	new_path = os.path.join(os.path.dirname(out_path), new_name)
@@ -200,7 +200,7 @@ def simulate_trading_with_trained_model(model_type_to_use: AIType, dbinfo_file: 
 		traceback.print_exception(sim_e)
 
 
-def backprop_loss_non_amp(xb=None, yb=None, model : nn.Module=None, family_run:FamilyRun=None, optimizer:nn.Module=None,
+def backprop_loss_non_amp(xb=None, yb=None, model : nn.Module=None, family_run:FamilyRun=None, optimizer:Optimizer=None,
                           batch_idx=None):
 	xb = torch.nan_to_num(xb, nan=0.0, posinf=0.0, neginf=0.0)
 	yb = torch.nan_to_num(yb, nan=0.0, posinf=0.0, neginf=0.0)
@@ -269,6 +269,7 @@ def _maybe_simulate_trading_for_rep(
 	one_file_structure: FileStructureSingleRunHandler,
 	epoch: int,
 	sim_topks_resolved: Optional[List[int]],
+	test_sim_data_source: torch.utils.data.DataLoader,
 ) -> None:
 	trading_interval = family_run.trading_interval
 	handle_trading_sim = trading_interval > 0 and epoch % trading_interval == 0
@@ -276,7 +277,7 @@ def _maybe_simulate_trading_for_rep(
 		stock_recommender = StockRecommenderFromModel([model], single_run.file_structure.get_directory_for_rep(rep_index))
 		print(
 			f"Running periodic simulate_trading at epoch {epoch} "
-			f"(interval={trading_interval}) on run_dir={one_file_structure.get_directory_for_rep(rep_index)}..."
+			f"(interval={trading_interval}) on run_dir={one_file_structure.get_directory_for_rep(rep_index)} ..."
 		)
 		simulate_trading_with_trained_model(
 			AIType.SINGLE,
@@ -287,7 +288,264 @@ def _maybe_simulate_trading_for_rep(
 			rep_index,
 			sim_topks_resolved,
 			single_run,
+			test_sim_data_source
 		)
+
+
+def _prepare_data(provider: TrainingInstanceProvider) -> tuple[int, int]:
+	"""Return (input_size, output_size) derived from the first instance."""
+	x0, y0 = provider.get_feature_and_label_pair(1)
+	input_size = count_elements(x0)
+	output_size = count_elements(y0)
+	return input_size, output_size
+
+
+def _resolve_train_window_and_split(
+	provider: TrainingInstanceProvider,
+	max_training_instances: int,
+	single_run: SingleRun,
+) -> tuple[RangeDataset | IndexDataset, RangeDataset | IndexDataset, RangeDataset | IndexDataset, int, int]:
+	"""Resolve train window (start/end date_id) and split datasets.
+
+	Returns (train_ds, val_ds, test_ds, train_validation_test_sets_start_date_id, train_validation_test_sets_end_date_id).
+	"""
+	print("train start date ", single_run.train_validation_test_sets_start_date_id)
+	rnd_duration = getattr(single_run.family_run, "random_training_duration", None)
+	if rnd_duration is not None:
+		try:
+			dur = int(rnd_duration)
+		except Exception:
+			dur = None
+		if dur is not None and dur >= 0:
+			# Compute max allowed start index based on duration
+			max_start_index = database_date_id_queries.get_offset_date_id(base_value=single_run.train_validation_test_sets_end_date_id, offset=dur)
+			raise ValueError("This isn't working, fix it later")
+			if max_start_index < single_run.train_validation_test_sets_start_date_id:
+				raise ValueError(
+					f"--random-training-duration={dur} is too large for available dates ({single_run.train_validation_test_sets_end_date_id}); "
+					"requires at least duration+1 dates."
+				)
+			# Use provided seed for determinism across runs, if given
+			import random as _random
+			seed_val = getattr(single_run.family_run, "random_seed_splits", None)
+			_rng = _random.Random(int(seed_val)) if seed_val is not None else _random
+			start_idx = _rng.randint(0, max_start_index)
+			end_idx = start_idx + dur
+			#single_run.train_validation_test_sets_start_date_id =
+			#single_run.train_validation_test_sets_end_date_id =
+			print(
+				f"Random training window selected: start_index={start_idx} end_index={end_idx} "
+				f"start_date_id={single_run.train_validation_test_sets_start_date_id} end_date_id={single_run.train_validation_test_sets_end_date_id} duration={dur}"
+			)
+
+	train_ds, val_ds, test_ds = split_datasets(
+		provider,
+		single_run.family_run,
+		max_training_instances,
+		train_validation_and_test_set_start_date_id=int(single_run.train_validation_test_sets_start_date_id),
+		train_validation_and_test_set_end_date_id=int(single_run.train_validation_test_sets_end_date_id),
+		train_percent=single_run.family_run.train_percent,
+		validation_percent=single_run.family_run.val_percent,
+	)
+	print(
+		f"Datasets: train={len(train_ds)} val={len(val_ds)} test={len(test_ds)}  "
+		f"train start date_id={single_run.train_validation_test_sets_start_date_id} train end date_id={single_run.train_validation_test_sets_end_date_id}"
+	)
+	return train_ds, val_ds, test_ds, int(single_run.train_validation_test_sets_start_date_id), int(single_run.train_validation_test_sets_end_date_id)
+
+
+def _build_training_bundles_and_loaders(
+	family_run: FamilyRun,
+	single_run: SingleRun,
+	input_size: int,
+	output_size: int,
+	train_ds,
+	val_ds,
+	test_ds,
+	device,
+) -> tuple[List[TrainingBundle], List[FileStructureSingleRunHandler], bool, Optional[torch.dtype], int]:
+	"""Create models/optimizers/loaders for each repeat and return bookkeeping."""
+	training_bundle_list: List[TrainingBundle] = []
+	param_count = 0
+	use_amp = False
+	amp_dtype = None
+	repeat_count_cfg = family_run.run_repeats
+	for _ in range(repeat_count_cfg):
+		m, opt, sc, inner_use_amp, inner_amp_dtype = create_model_and_optimizer(
+			family_run, input_size, output_size, single_run.mlp_layers, single_run.activation, device, single_run.lr
+		)
+		use_amp = inner_use_amp
+		amp_dtype = inner_amp_dtype
+		one_training_bundle = TrainingBundle(model=m, optimizer=opt, scaler=sc, use_amp=inner_use_amp, amp_dtype=inner_amp_dtype)
+		training_bundle_list.append(one_training_bundle)
+		param_count = sum(p.numel() for p in m.parameters())
+		# Build batch providers (DataLoader or simple generator).
+		train_loader_temp, val_loader_temp, test_loader_temp = build_dataloaders(
+			family_run, train_ds, val_ds, test_ds
+		)
+		one_training_bundle.training_instance_provider = train_loader_temp
+		one_training_bundle.validation_instance_provider = val_loader_temp
+		one_training_bundle.testing_instance_provider = test_loader_temp
+	if use_amp and amp_dtype == torch.float16:
+		print("Precision runtime: autocast=float16 with GradScaler")
+	elif use_amp and amp_dtype == torch.bfloat16:
+		print("Precision runtime: autocast=bfloat16 (no GradScaler)")
+	else:
+		print("Precision runtime: float32 (no autocast)")
+	print(f"Model parameters: {param_count:,}")
+
+	rep_files_list: List[FileStructureSingleRunHandler] = []
+	for run_idx in range(repeat_count_cfg):
+		fs = single_run.file_structure
+		training_bundle_list[run_idx].suffix = fs.suffix
+		rep_files_list.append(fs)
+	return training_bundle_list, rep_files_list, use_amp, amp_dtype, param_count
+
+
+def _maybe_resume_checkpoints(
+	training_bundle_list: List[TrainingBundle],
+	rep_files_list: List[FileStructureSingleRunHandler],
+	family_run: FamilyRun,
+	device,
+	family_dir: str,
+) -> int:
+	"""If checkpoints exist, resume and return starting epoch."""
+	start_epoch = 1
+	resume_from_current_epoch = True
+	for run_idx in range(family_run.run_repeats):
+		rep_index = run_idx + 1
+		fs = rep_files_list[run_idx]
+		ckpt_model, ckpt_optim = fs.get_checkpoint_files_for_rep(rep_index)
+		resume_from_current_epoch = resume_from_current_epoch and (
+			os.path.exists(fs.parent_file_structure.family_dir)
+			and os.path.exists(ckpt_model)
+			and os.path.exists(ckpt_optim)
+		)
+		try:
+			with open(fs.parent_file_structure.family_state_path, "r", encoding="utf-8") as sf:
+				state = json.load(sf)
+			last_completed = int(state.get("last_completed_epoch", 0))
+			if 1 <= last_completed < family_run.total_epochs_to_train:
+				if (run_idx == 0) and resume_from_current_epoch:
+					print(f"Resuming training from epoch {last_completed + 1} (previously completed {last_completed}) in {family_dir}")
+				start_epoch = last_completed + 1
+
+				training_bundle_list[run_idx].model.load_state_dict(torch.load(ckpt_model, map_location=device))
+				training_bundle_list[run_idx].optimizer.load_state_dict(torch.load(ckpt_optim, map_location=device))
+		except Exception as resume_e:
+			print(f"Warning: failed to load training_state or checkpoint for resume in {fs.run_group_dir}: {resume_e}")
+			start_epoch = 1
+	return start_epoch
+
+
+def _log_gpu_usage(device, epoch: int, single_run: SingleRun) -> None:
+	try:
+		if torch.cuda.is_available():
+			free_mem, total_mem = torch.cuda.mem_get_info(device)
+			used_mem = total_mem - free_mem
+
+			run_dir_log = getattr(single_run.file_structure, "run_directory", None)
+			if not run_dir_log:
+				run_dir_log = single_run.file_structure.run_group_dir
+
+			if run_dir_log:
+				log_path = os.path.join(run_dir_log, "gpu_usage.csv")
+				file_exists = os.path.exists(log_path)
+				with open(log_path, "a", newline="") as f:
+					writer = csv.writer(f)
+					if not file_exists:
+						writer.writerow(["timestamp", "epoch", "used_bytes", "free_bytes", "total_bytes"])
+					writer.writerow([time.strftime("%Y-%m-%d %H:%M:%S"), epoch, used_mem, free_mem, total_mem])
+	except Exception as log_e:
+		print(f"Warning: GPU logging failed: {log_e}")
+
+
+def backprop_loss_for_amp(xb=None, yb=None, model : nn.Module=None, family_run:FamilyRun=None, optimizer:Optimizer=None,
+                          batch_idx=None, amp_dtype=None, scaler=None):
+	with torch.amp.autocast("cuda", dtype=amp_dtype):  # type: ignore[attr-defined]
+		xb = torch.nan_to_num(xb, nan=0.0, posinf=0.0, neginf=0.0)
+		yb = torch.nan_to_num(yb, nan=0.0, posinf=0.0, neginf=0.0)
+		pred = model(xb)
+		pred = torch.nan_to_num(pred, nan=0.0, posinf=0.0, neginf=0.0)
+		if bool(family_run.use_ranking_error_loss):
+			loss = ranking_surrogate_loss(pred, yb.to(pred.dtype), temperature=float(family_run.rank_temperature))
+		else:
+			loss = torch.mean((pred - yb.to(pred.dtype)) ** 2)
+	if not torch.isfinite(loss):
+		optimizer.zero_grad(set_to_none=True)
+		batch_idx += 1
+		return pred,loss,batch_idx
+	elif amp_dtype == torch.float16:
+		scaler.scale(loss).backward()
+		scaler.step(optimizer)
+		scaler.update()
+	else:
+		loss.backward()
+		optimizer.step()
+	return pred,loss,None
+
+
+def _train_one_epoch_for_rep(
+	*,
+	model: nn.Module,
+	optimizer: Optimizer,
+	scaler: torch.cuda.amp.GradScaler,
+	use_amp: bool,
+	amp_dtype,
+	train_loader: torch.utils.data.DataLoader,
+	val_loader: torch.utils.data.DataLoader,
+	device,
+	family_run: FamilyRun,
+	epoch: int,
+) -> tuple[float, float, float, float, torch.Tensor, torch.Tensor]:
+	"""Run training for one epoch for a single repetition and return metrics."""
+	model.train()
+	total = 0
+	train_loss_sum = 0.0
+	train_top10_sum = 0.0
+	batch_idx = 0
+	train_iter = train_loader
+	total_batches = len(train_loader) if hasattr(train_loader, "__len__") else 0
+	for xb, yb in train_iter:
+		xb = xb.to(device)
+		yb = yb.to(device)
+		optimizer.zero_grad(set_to_none=True)
+		if use_amp:
+			pred,loss,batch_index_update = backprop_loss_for_amp(xb=xb, yb=yb, model=model, family_run=family_run, optimizer=optimizer, batch_idx=batch_idx, amp_dtype=amp_dtype, scaler=scaler)
+			if batch_index_update is not None:
+				batch_idx = batch_index_update
+				continue
+		else:
+			pred,loss,batch_index_update = backprop_loss_non_amp(xb=xb, yb=yb, model=model, family_run=family_run, optimizer=optimizer, batch_idx=batch_idx)
+			if batch_index_update is not None:
+				batch_idx = batch_index_update
+				continue
+		bs = xb.size(0)
+		total += bs
+		train_loss_sum += loss.item() * bs
+		train_top10_sum += mse_restricted(pred.detach(), yb.to(pred.dtype), mode="top", k=10).item() * bs
+
+		batch_idx += 1
+		if family_run.log_interval and family_run.log_interval > 0 and (epoch % family_run.log_interval == 0 or epoch == family_run.total_epochs_to_train):
+			avg_loss_so_far = train_loss_sum / max(1, total)
+			print(f"Epoch {epoch}/{family_run.total_epochs_to_train} | batch {batch_idx}/{total_batches} | curr_loss={loss.item():.6f} | avg_loss={avg_loss_so_far:.6f}")
+
+	train_mse = train_loss_sum / max(1, total)
+	train_top10 = train_top10_sum / max(1, total)
+
+	val_iter = val_loader
+	val_mse, val_top10, _val_rde_unused = eval_epoch(
+		model,
+		val_iter,
+		device,
+		amp_enabled=use_amp,
+		amp_dtype=amp_dtype,
+		rank_lower=family_run.rank_error_lower_bound,
+		rank_upper=family_run.rank_error_upper_bound,
+		compute_rank_err=bool(family_run.enable_rank_error_loss_in_training),
+		compute_rank_disp=False,
+	)
+	return train_mse, val_mse, train_top10, val_top10, pred, yb
 
 
 class TrainSingleRun:
@@ -321,286 +579,6 @@ class TrainSingleRun:
 	# ----------------------------
 	# Small helper extractions
 	# ----------------------------
-	def _prepare_data(self, provider: TrainingInstanceProvider) -> tuple[int, int]:
-		"""Return (input_size, output_size) derived from the first instance."""
-		x0, y0 = provider.get_feature_and_label_pair(1)
-		input_size = count_elements(x0)
-		output_size = count_elements(y0)
-		return input_size, output_size
-
-	def _resolve_train_window_and_split(
-		self,
-		provider: TrainingInstanceProvider,
-		max_training_instances: int,
-		family_run: FamilyRun,
-	) -> tuple[RangeDataset | IndexDataset, RangeDataset | IndexDataset, RangeDataset | IndexDataset, int, int]:
-		"""Resolve train window (start/end date_id) and split datasets.
-
-		Returns (train_ds, val_ds, test_ds, train_start_date_id, train_end_date_id).
-		"""
-		print("train start date ", family_run.train_start_date_id)
-		raw_train_start = family_run.train_start_date_id
-		raw_train_end = family_run.train_end_date_id
-		try:
-			all_dates = [int(d) for d in getattr(provider, "_dates")]
-			prior = int(getattr(provider, "_num_prior"))
-		except Exception:
-			raise RuntimeError(
-				"Provider does not expose _dates/_num_prior required for deriving "
-				"train_start_date_id/train_end_date_id from available instances"
-			)
-		# Instances 1..max_training_instances correspond to dates at indices prior..prior + max_training_instances - 1.
-		if prior < 0 or prior + max_training_instances - 1 >= len(all_dates):
-			raise RuntimeError(
-				"Inconsistent provider _dates/_num_prior for deriving train date_id range"
-			)
-		usable_dates = all_dates[prior : prior + max_training_instances]
-		if not usable_dates:
-			raise RuntimeError("No usable dates available for training window computation")
-		resolver = DateBoundResolver(usable_dates)
-		# If random_training_duration is provided, pick a random window so that
-		# end_index - start_index == duration (in terms of usable_dates indices).
-		train_start_date_id: Optional[int] = None
-		train_end_date_id: Optional[int] = None
-		rnd_duration = getattr(family_run, "random_training_duration", None)
-		if rnd_duration is not None:
-			try:
-				dur = int(rnd_duration)
-			except Exception:
-				dur = None
-			if dur is not None and dur >= 0:
-				# Compute max allowed start index based on duration
-				length = len(usable_dates)
-				max_start_index = length - (dur + 1)
-				if max_start_index < 0:
-					raise ValueError(
-						f"--random-training-duration={dur} is too large for available dates ({length}); "
-						"requires at least duration+1 dates."
-					)
-				# Use provided seed for determinism across runs, if given
-				import random as _random
-				seed_val = getattr(family_run, "random_seed_splits", None)
-				_rng = _random.Random(int(seed_val)) if seed_val is not None else _random
-				start_idx = _rng.randint(0, max_start_index)
-				end_idx = start_idx + dur
-				train_start_date_id = int(usable_dates[start_idx])
-				train_end_date_id = int(usable_dates[end_idx])
-				print(
-					f"Random training window selected: start_index={start_idx} end_index={end_idx} "
-					f"start_date_id={train_start_date_id} end_date_id={train_end_date_id} duration={dur}"
-				)
-		if train_start_date_id is None:
-			train_start_date_id = resolver.resolve_bound(raw_train_start, "start")
-		if train_end_date_id is None:
-			train_end_date_id = resolver.resolve_bound(raw_train_end, "end")
-
-		train_ds, val_ds, test_ds = split_datasets(
-			provider,
-			family_run,
-			max_training_instances,
-			train_validation_and_test_set_start_date_id=int(train_start_date_id),
-			train_validation_and_test_set_end_date_id=int(train_end_date_id),
-			train_percent=family_run.train_percent,
-			validation_percent=family_run.val_percent,
-		)
-		print(
-			f"Datasets: train={len(train_ds)} val={len(val_ds)} test={len(test_ds)}  "
-			f"train start date_id={train_start_date_id} train end date_id={train_end_date_id}"
-		)
-		return train_ds, val_ds, test_ds, int(train_start_date_id), int(train_end_date_id)
-
-	def _build_training_bundles_and_loaders(
-		self,
-		family_run: FamilyRun,
-		single_run: SingleRun,
-		input_size: int,
-		output_size: int,
-		train_ds,
-		val_ds,
-		test_ds,
-		device,
-	) -> tuple[List[TrainingBundle], List[FileStructureSingleRunHandler], bool, Optional[torch.dtype], int]:
-		"""Create models/optimizers/loaders for each repeat and return bookkeeping."""
-		training_bundle_list: List[TrainingBundle] = []
-		param_count = 0
-		use_amp = False
-		amp_dtype = None
-		repeat_count_cfg = family_run.run_repeats
-		for _ in range(repeat_count_cfg):
-			m, opt, sc, inner_use_amp, inner_amp_dtype = create_model_and_optimizer(
-				family_run, input_size, output_size, single_run.mlp_layers, single_run.activation, device, single_run.lr
-			)
-			use_amp = inner_use_amp
-			amp_dtype = inner_amp_dtype
-			one_training_bundle = TrainingBundle(model=m, optimizer=opt, scaler=sc, use_amp=inner_use_amp, amp_dtype=inner_amp_dtype)
-			training_bundle_list.append(one_training_bundle)
-			param_count = sum(p.numel() for p in m.parameters())
-			# Build batch providers (DataLoader or simple generator).
-			train_loader_temp, val_loader_temp, test_loader_temp = build_dataloaders(
-				family_run, train_ds, val_ds, test_ds
-			)
-			one_training_bundle.training_instance_provider = train_loader_temp
-			one_training_bundle.validation_instance_provider = val_loader_temp
-			one_training_bundle.testing_instance_provider = test_loader_temp
-		if use_amp and amp_dtype == torch.float16:
-			print("Precision runtime: autocast=float16 with GradScaler")
-		elif use_amp and amp_dtype == torch.bfloat16:
-			print("Precision runtime: autocast=bfloat16 (no GradScaler)")
-		else:
-			print("Precision runtime: float32 (no autocast)")
-		print(f"Model parameters: {param_count:,}")
-
-		rep_files_list: List[FileStructureSingleRunHandler] = []
-		for run_idx in range(repeat_count_cfg):
-			fs = single_run.file_structure
-			training_bundle_list[run_idx].suffix = fs.suffix
-			rep_files_list.append(fs)
-		return training_bundle_list, rep_files_list, use_amp, amp_dtype, param_count
-
-	def _maybe_resume_checkpoints(
-		self,
-		training_bundle_list: List[TrainingBundle],
-		rep_files_list: List[FileStructureSingleRunHandler],
-		family_run: FamilyRun,
-		device,
-		family_dir: str,
-	) -> int:
-		"""If checkpoints exist, resume and return starting epoch."""
-		start_epoch = 1
-		resume_from_current_epoch = True
-		for run_idx in range(family_run.run_repeats):
-			rep_index = run_idx + 1
-			fs = rep_files_list[run_idx]
-			ckpt_model, ckpt_optim = fs.get_checkpoint_files_for_rep(rep_index)
-			resume_from_current_epoch = resume_from_current_epoch and (
-				os.path.exists(fs.parent_file_structure.family_dir)
-				and os.path.exists(ckpt_model)
-				and os.path.exists(ckpt_optim)
-			)
-			try:
-				with open(fs.parent_file_structure.family_state_path, "r", encoding="utf-8") as sf:
-					state = json.load(sf)
-				last_completed = int(state.get("last_completed_epoch", 0))
-				if 1 <= last_completed < family_run.total_epochs_to_train:
-					if (run_idx == 0) and resume_from_current_epoch:
-						print(f"Resuming training from epoch {last_completed + 1} (previously completed {last_completed}) in {family_dir}")
-					start_epoch = last_completed + 1
-
-					training_bundle_list[run_idx].model.load_state_dict(torch.load(ckpt_model, map_location=device))
-					training_bundle_list[run_idx].optimizer.load_state_dict(torch.load(ckpt_optim, map_location=device))
-			except Exception as resume_e:
-				print(f"Warning: failed to load training_state or checkpoint for resume in {fs.run_group_dir}: {resume_e}")
-				start_epoch = 1
-		return start_epoch
-
-	def _log_gpu_usage(self, device, epoch: int, single_run: SingleRun) -> None:
-		try:
-			if torch.cuda.is_available():
-				free_mem, total_mem = torch.cuda.mem_get_info(device)
-				used_mem = total_mem - free_mem
-
-				run_dir_log = getattr(single_run.file_structure, "run_directory", None)
-				if not run_dir_log:
-					run_dir_log = single_run.file_structure.run_group_dir
-
-				if run_dir_log:
-					log_path = os.path.join(run_dir_log, "gpu_usage.csv")
-					file_exists = os.path.exists(log_path)
-					with open(log_path, "a", newline="") as f:
-						writer = csv.writer(f)
-						if not file_exists:
-							writer.writerow(["timestamp", "epoch", "used_bytes", "free_bytes", "total_bytes"])
-						writer.writerow([time.strftime("%Y-%m-%d %H:%M:%S"), epoch, used_mem, free_mem, total_mem])
-		except Exception as log_e:
-			print(f"Warning: GPU logging failed: {log_e}")
-
-	def _train_one_epoch_for_rep(
-		self,
-		*,
-		model: nn.Module,
-		optimizer,
-		scaler,
-		use_amp: bool,
-		amp_dtype,
-		train_loader,
-		val_loader,
-		device,
-		family_run: FamilyRun,
-		epoch: int,
-	) -> tuple[float, float, float, float, torch.Tensor, torch.Tensor]:
-		"""Run training for one epoch for a single repetition and return metrics."""
-		model.train()
-		total = 0
-		train_loss_sum = 0.0
-		train_top10_sum = 0.0
-		batch_idx = 0
-		train_iter = train_loader
-		total_batches = len(train_loader) if hasattr(train_loader, "__len__") else 0
-		for xb, yb in train_iter:
-			xb = xb.to(device)
-			yb = yb.to(device)
-			optimizer.zero_grad(set_to_none=True)
-			if use_amp:
-				pred,loss,batch_index_update = self.backprop_loss_for_amp(xb=xb, yb=yb, model=model, family_run=family_run, optimizer=optimizer, batch_idx=batch_idx, amp_dtype=amp_dtype, scaler=scaler)
-				if batch_index_update is not None:
-					batch_idx = batch_index_update
-					continue
-			else:
-				pred,loss,batch_index_update = backprop_loss_non_amp(xb=xb, yb=yb, model=model, family_run=family_run, optimizer=optimizer, batch_idx=batch_idx)
-				if batch_index_update is not None:
-					batch_idx = batch_index_update
-					continue
-			bs = xb.size(0)
-			total += bs
-			train_loss_sum += loss.item() * bs
-			train_top10_sum += mse_restricted(pred.detach(), yb.to(pred.dtype), mode="top", k=10).item() * bs
-
-			batch_idx += 1
-			if family_run.log_interval and family_run.log_interval > 0 and (epoch % family_run.log_interval == 0 or epoch == family_run.total_epochs_to_train):
-				avg_loss_so_far = train_loss_sum / max(1, total)
-				print(f"Epoch {epoch}/{family_run.total_epochs_to_train} | batch {batch_idx}/{total_batches} | curr_loss={loss.item():.6f} | avg_loss={avg_loss_so_far:.6f}")
-
-		train_mse = train_loss_sum / max(1, total)
-		train_top10 = train_top10_sum / max(1, total)
-
-		val_iter = val_loader
-		val_mse, val_top10, _val_rde_unused = eval_epoch(
-			model,
-			val_iter,
-			device,
-			amp_enabled=use_amp,
-			amp_dtype=amp_dtype,
-			rank_lower=family_run.rank_error_lower_bound,
-			rank_upper=family_run.rank_error_upper_bound,
-			compute_rank_err=bool(family_run.enable_rank_error_loss_in_training),
-			compute_rank_disp=False,
-		)
-		return train_mse, val_mse, train_top10, val_top10, pred, yb
-
-
-	def backprop_loss_for_amp(self, xb=None, yb=None, model : nn.Module=None, family_run:FamilyRun=None, optimizer:nn.Module=None,
-	                          batch_idx=None, amp_dtype=None, scaler=None):
-		with torch.amp.autocast("cuda", dtype=amp_dtype):  # type: ignore[attr-defined]
-			xb = torch.nan_to_num(xb, nan=0.0, posinf=0.0, neginf=0.0)
-			yb = torch.nan_to_num(yb, nan=0.0, posinf=0.0, neginf=0.0)
-			pred = model(xb)
-			pred = torch.nan_to_num(pred, nan=0.0, posinf=0.0, neginf=0.0)
-			if bool(family_run.use_ranking_error_loss):
-				loss = ranking_surrogate_loss(pred, yb.to(pred.dtype), temperature=float(family_run.rank_temperature))
-			else:
-				loss = torch.mean((pred - yb.to(pred.dtype)) ** 2)
-		if not torch.isfinite(loss):
-			optimizer.zero_grad(set_to_none=True)
-			batch_idx += 1
-			return pred,loss,batch_idx
-		elif amp_dtype == torch.float16:
-			scaler.scale(loss).backward()
-			scaler.step(optimizer)
-			scaler.update()
-		else:
-			loss.backward()
-			optimizer.step()
-		return pred,loss,None
 
 	@line_profiler.profile
 	def run_one(self, save_interval: int = 100) -> None:
@@ -634,11 +612,13 @@ class TrainSingleRun:
 			raise RuntimeError("Not enough instances to train. Consider reducing --prior-days or loading more data.")
 
 		# Determine input/output sizes from the first instance
-		input_size, output_size = self._prepare_data(provider)
+		input_size, output_size = _prepare_data(provider)
 
 		# Build datasets (train/val/test) and determine train window
-		train_ds, val_ds, test_ds, train_start_date_id, train_end_date_id = self._resolve_train_window_and_split(
-			provider, max_training_instances, family_run
+		print(f" train percent 4 {single_run.family_run.train_percent} val percent 4 {single_run.family_run.val_percent}")
+
+		train_ds, val_ds, test_ds, train_start_date_id, train_end_date_id = _resolve_train_window_and_split(
+			provider, max_training_instances, single_run
 		)
 
 		# ------------------------------------------------------------------
@@ -650,7 +630,8 @@ class TrainSingleRun:
 		single_run.file_structure.suffix = f"prior{single_run.prior_days}_layers{single_run.mlp_layers}_lr{lr_tok}_act{act_tok}"
 		# Configuration directory (shared by all repeats of this configuration)
 		family_dir = family_run.file_structure.family_dir
-		#wrong one family_dir = os.path.join(family_run.base_run_dir, config_suffix)
+		#wrong one family_dir = os.path.join(single_run.base_run_dir, config_suffix)
+		print(f"TRAINING SET  DATES  {(train_start_date_id, train_end_date_id)}")
 
 		# Write run parameters for traceability (per-config)
 		sim_topks_resolved = family_run.simulate_top_k
@@ -685,7 +666,7 @@ class TrainSingleRun:
 			m, opt, sc, inner_use_amp, inner_amp_dtype = create_model_and_optimizer(
 				family_run, input_size, output_size, single_run.mlp_layers, single_run.activation, device, single_run.lr
 			)
-			m.compile(backend="torch_tensorrt")
+			#m.compile(mode="max-autotune" )
 			# a hack because they should all be the same within the reps.
 			use_amp = inner_use_amp
 			amp_dtype = inner_amp_dtype
@@ -740,12 +721,9 @@ class TrainSingleRun:
 			except Exception as resume_e:
 				print(f"Warning: failed to load training_state or checkpoint for resume in {fs.run_group_dir}: {resume_e}")
 				start_epoch = 1
-		train_loss_sum = 0.0
-		train_top10_sum = 0.0
-		total = 0
 		for epoch in range(start_epoch, family_run.total_epochs_to_train + 1):
 			# GPU Memory Logging
-			self._log_gpu_usage(device, epoch, single_run)
+			_log_gpu_usage(device, epoch, single_run)
 			should_print_message = False
 			if family_run.log_interval and family_run.log_interval > 0 and (epoch % family_run.log_interval == 0 or epoch == family_run.total_epochs_to_train):
 				should_print_message = epoch % family_run.log_interval == 0 and epoch != 0
@@ -769,7 +747,7 @@ class TrainSingleRun:
 					print("Precision runtime: autocast=bfloat16 (no GradScaler)")
 				epoch_start = time.time()
 
-				train_mse, val_mse, train_top10, val_top10, pred, yb = self._train_one_epoch_for_rep(
+				train_mse, val_mse, train_top10, val_top10, pred, yb = _train_one_epoch_for_rep(
 					model=model,
 					optimizer=optimizer,
 					scaler=scaler,
@@ -818,6 +796,7 @@ class TrainSingleRun:
 					one_file_structure=one_file_structure,
 					epoch=epoch,
 					sim_topks_resolved=sim_topks_resolved,
+					test_sim_data_source=training_bundle_list[run_idx].testing_instance_provider
 				)
 				ensemble_parts.append(model)
 				scheduler = training_bundle_list[run_idx].scheduler
@@ -830,7 +809,7 @@ class TrainSingleRun:
 			if handle_ensemble_sim:
 				ensemble_recommender = StockRecommenderFromModel(ensemble_parts, single_run.file_structure.run_group_dir)
 				#make sure we have saved the existing models
-				simulate_trading_with_trained_model(AIType.ENSEMBLE, family_run.dbinfo_file , epoch, family_run,[ensemble_recommender], -1,sim_topks_resolved, single_run)
+				simulate_trading_with_trained_model(AIType.ENSEMBLE, family_run.dbinfo_file , epoch, family_run,[ensemble_recommender], -1,sim_topks_resolved, single_run, training_bundle_list[0].testing_instance_provider)
 
 		for run_idx in range(repeat_count_cfg):
 			rep_index = run_idx + 1
@@ -887,7 +866,7 @@ class TrainSingleRun:
 				#
 				if bool(family_run.simulate_after_training):
 					after_recommender = StockRecommenderFromModel([model],single_run.file_structure.run_group_dir)
-					simulate_trading_with_trained_model( AIType.SINGLE,family_run.dbinfo_file,  family_run.total_epochs_to_train, family_run, [after_recommender], rep_index, sim_topks_resolved, single_run)
+					simulate_trading_with_trained_model( AIType.SINGLE,family_run.dbinfo_file,  family_run.total_epochs_to_train, family_run, [after_recommender], rep_index, sim_topks_resolved, single_run, test_iter)
 			except Exception as save_e:
 				traceback.print_exception(save_e)
 
@@ -897,13 +876,13 @@ class TrainSingleRun:
 
 		The JSON structure is expected to be::
 
-		    {"family_run": {...}, "single_run": {...}}
+		    {"single_run": {...}, "single_run": {...}}
 		"""
 
 		with open(path, "r", encoding="utf-8") as f:
 			data: Dict[str, Any] = json.load(f)
 
-		fr_dict = data.get("family_run") or {}
+		fr_dict = data.get("single_run") or {}
 		sr_dict = data.get("single_run") or {}
 
 		# Prefer the structured helper that knows how to rebuild
@@ -924,6 +903,8 @@ class TrainSingleRun:
 			final_activation=str(sr_dict["final_activation"]),
 			include_features=tuple(sr_dict.get("include_features") or []),
 			file_structure=FileStructureSingleRunHandler.from_dict(sr_dict["file_structure"]),
+			train_start_date_id=sr_dict.get("train_validation_test_sets_start_date_id"),
+			train_end_date_id=sr_dict.get("train_validation_test_sets_end_date_id"),
 		)
 		return single_run
 
@@ -940,11 +921,13 @@ def main(argv: Optional[List[str]] = None) -> int:
 		"--single-run-file",
 		required=True,
 		type=str,
-		help="Path to JSON file containing {family_run: ..., single_run: ...}",
+		help="Path to JSON file containing {single_run: ..., single_run: ...}",
 	)
 	args = parser.parse_args(argv)
 
 	single_run = TrainSingleRun.load_from_file(args.single_run_file)
+	print(f" train percent 2 {single_run.family_run.train_percent} val percent 4 {single_run.family_run.val_percent}")
+
 	executor = TrainSingleRun(single_run)
 	executor.run_one()
 	return 0

@@ -52,47 +52,47 @@ def parse_args(argv: Optional[list[str]] = None):
 
 
 def _fetch_random_pairs(cur, limit: int) -> list[Tuple[int, int]]:
-    cur.execute(
-        """
-        SELECT d.date_id, d.ticker_id
-        FROM daily_delta_stock_data d
-        ORDER BY RAND()
-        LIMIT %s
-        """,
-        (int(limit),),
-    )
-    rows = cur.fetchall() or []
-    cols = cur.column_names
-    pairs: list[Tuple[int, int]] = []
-    for r in rows:
-        rd = dict(zip(cols, r))
-        pairs.append((int(rd["date_id"]), int(rd["ticker_id"])) )
-    return pairs
+	cur.execute(
+		"""
+		SELECT d.date_id, d.ticker_id
+		FROM daily_delta_stock_data d
+		ORDER BY RAND()
+		LIMIT %s
+		""",
+		(int(limit),),
+	)
+	rows = cur.fetchall() or []
+	cols = cur.column_names
+	pairs: list[Tuple[int, int]] = []
+	for r in rows:
+		rd = dict(zip(cols, r))
+		pairs.append((int(rd["date_id"]), int(rd["ticker_id"])) )
+	return pairs
 
 
 def _fetch_raw_row(cur, date_id: int, ticker_id: int) -> Optional[Tuple[float, float, float, float, float, float, int]]:
-    cur.execute(
-        """
-        SELECT open, high, low, close, volume, vwap, transactions
-        FROM raw_stock_data
-        WHERE date_id = %s AND ticker_id = %s
-        """,
-        (int(date_id), int(ticker_id)),
-    )
-    row = cur.fetchone()
-    if not row:
-        return None
-    # access by column name for robustness
-    rowdict = dict(zip(cur.column_names, row))
-    return (
-        None if rowdict.get("open") is None else float(rowdict.get("open")),
-        None if rowdict.get("high") is None else float(rowdict.get("high")),
-        None if rowdict.get("low") is None else float(rowdict.get("low")),
-        None if rowdict.get("close") is None else float(rowdict.get("close")),
-        None if rowdict.get("volume") is None else float(rowdict.get("volume")),
-        None if rowdict.get("vwap") is None else float(rowdict.get("vwap")),
-        None if rowdict.get("transactions") is None else int(rowdict.get("transactions")),
-    )
+	cur.execute(
+		"""
+		SELECT open, high, low, close, volume, vwap, transactions
+		FROM raw_stock_data
+		WHERE date_id = %s AND ticker_id = %s
+		""",
+		(int(date_id), int(ticker_id)),
+	)
+	row = cur.fetchone()
+	if not row:
+		return None
+	# access by column name for robustness
+	rowdict = dict(zip(cur.column_names, row))
+	return (
+		None if rowdict.get("open") is None else float(rowdict.get("open")),
+		None if rowdict.get("high") is None else float(rowdict.get("high")),
+		None if rowdict.get("low") is None else float(rowdict.get("low")),
+		None if rowdict.get("close") is None else float(rowdict.get("close")),
+		None if rowdict.get("volume") is None else float(rowdict.get("volume")),
+		None if rowdict.get("vwap") is None else float(rowdict.get("vwap")),
+		None if rowdict.get("transactions") is None else int(rowdict.get("transactions")),
+	)
 
 
 def _safe_div(a: Optional[float], b: Optional[float]) -> Optional[float]:
@@ -144,90 +144,90 @@ def _compute_ratios(prior, today, nxt) -> Ratios:
 
 
 def _fetch_prior_and_next_date(cur, date_id: int, ticker_id: int) -> Tuple[Optional[int], Optional[int]]:
-    """
-    Find the nearest prior and next date_ids that have raw_stock_data for the given ticker_id.
-    This skips calendar dates where the ticker has no data.
-    """
-    # Prior date_id for this ticker
-    cur.execute(
-        """
-        SELECT date_id
-        FROM raw_stock_data
-        WHERE ticker_id = %s AND date_id < %s
-        ORDER BY date_id DESC
-        LIMIT 1
-        """,
-        (int(ticker_id), int(date_id)),
-    )
-    row = cur.fetchone()
-    prior_id = int(dict(zip(cur.column_names, row))["date_id"]) if row else None
+	"""
+	Find the nearest prior and next date_ids that have raw_stock_data for the given ticker_id.
+	This skips calendar dates where the ticker has no data.
+	"""
+	# Prior date_id for this ticker
+	cur.execute(
+		"""
+		SELECT date_id
+		FROM raw_stock_data
+		WHERE ticker_id = %s AND date_id < %s
+		ORDER BY date_id DESC
+		LIMIT 1
+		""",
+		(int(ticker_id), int(date_id)),
+	)
+	row = cur.fetchone()
+	prior_id = int(dict(zip(cur.column_names, row))["date_id"]) if row else None
 
-    # Next date_id for this ticker
-    cur.execute(
-        """
-        SELECT date_id
-        FROM raw_stock_data
-        WHERE ticker_id = %s AND date_id > %s
-        ORDER BY date_id ASC
-        LIMIT 1
-        """,
-        (int(ticker_id), int(date_id)),
-    )
-    row = cur.fetchone()
-    next_id = int(dict(zip(cur.column_names, row))["date_id"]) if row else None
-    return prior_id, next_id
+	# Next date_id for this ticker
+	cur.execute(
+		"""
+		SELECT date_id
+		FROM raw_stock_data
+		WHERE ticker_id = %s AND date_id > %s
+		ORDER BY date_id ASC
+		LIMIT 1
+		""",
+		(int(ticker_id), int(date_id)),
+	)
+	row = cur.fetchone()
+	next_id = int(dict(zip(cur.column_names, row))["date_id"]) if row else None
+	return prior_id, next_id
 
 
 def _fetch_ddsd_row(cur, date_id: int, ticker_id: int) -> Dict[str, Optional[float]]:
-    cur.execute(
-        """
-        SELECT open_ratio_to_prior, high_ratio_to_prior, low_ratio_to_prior,
-               close_ratio_to_prior, volume_ratio_to_prior, vwap_ratio_to_prior,
-               transactions_ratio_to_prior,
-               change_in_price_over_day, next_day_change_in_price,
-               zero_centered_next_day_price_change,
-               -- Fields below exist in table but are not validated yet in this script
-               `zero_center_extremes_neg1_pos1`,
-               `zero_center_top100_1_other_neg1`,
-               `zero_center_raise1_lower_neg1`,
-                `next_day_price_change_to_extremes_0_1`,
-                `next_day_raise1_lower0`,
-                `next_day_top100_raise1_lower0`
+	cur.execute(
+		"""
+		SELECT open_ratio_to_prior, high_ratio_to_prior, low_ratio_to_prior,
+			   close_ratio_to_prior, volume_ratio_to_prior, vwap_ratio_to_prior,
+			   transactions_ratio_to_prior,
+			   change_in_price_over_day, next_day_change_in_price,
+			   zero_centered_next_day_price_change,
+			   -- Fields below exist in table but are not validated yet in this script
+			   `zero_center_extremes_neg1_pos1`,
+			   `zero_center_top100_1_other_neg1`,
+			   `zero_center_raise1_lower_neg1`,
+				`next_day_price_change_to_extremes_0_1`,
+				`next_day_raise1_lower0`,
+				`next_day_top100_raise1_lower0`
 
-        FROM daily_delta_stock_data
-        WHERE date_id = %s AND ticker_id = %s
-        """,
-        (int(date_id), int(ticker_id)),
-    )
-    row = cur.fetchone()
-    if not row:
-        return {}
-    # Build dictionary by column name, then select values by name to avoid index-based access
-    rowdict = dict(zip(cur.column_names, row))
-    keys = [
-        "open_ratio_to_prior",
-        "high_ratio_to_prior",
-        "low_ratio_to_prior",
-        "close_ratio_to_prior",
-        "volume_ratio_to_prior",
-        "vwap_ratio_to_prior",
-        "transactions_ratio_to_prior",
-        "change_in_price_over_day",
-        "next_day_change_in_price",
-        "zero_centered_next_day_price_change",
-        # not checked yet (placeholders)
-        "zero_center_extremes_neg1_pos1",
-        "zero_center_top100_1_other_neg1",
-        "zero_center_raise1_lower_neg1",
-        "next_day_price_change_to_extremes_0_1",
-        "next_day_raise1_lower0",
-        "next_day_top100_raise1_lower0",
-    ]
-    out: Dict[str, Optional[float]] = {}
-    for k in keys:
-        v = rowdict.get(k)
-        out[k] = None if v is None else float(v)
-    return out
+		FROM daily_delta_stock_data
+		WHERE date_id = %s AND ticker_id = %s
+		""",
+		(int(date_id), int(ticker_id)),
+	)
+	row = cur.fetchone()
+	if not row:
+		return {}
+	# Build dictionary by column name, then select values by name to avoid index-based access
+	rowdict = dict(zip(cur.column_names, row))
+	keys = [
+		"open_ratio_to_prior",
+		"high_ratio_to_prior",
+		"low_ratio_to_prior",
+		"close_ratio_to_prior",
+		"volume_ratio_to_prior",
+		"vwap_ratio_to_prior",
+		"transactions_ratio_to_prior",
+		"change_in_price_over_day",
+		"next_day_change_in_price",
+		"zero_centered_next_day_price_change",
+		# not checked yet (placeholders)
+		"zero_center_extremes_neg1_pos1",
+		"zero_center_top100_1_other_neg1",
+		"zero_center_raise1_lower_neg1",
+		"next_day_price_change_to_extremes_0_1",
+		"next_day_raise1_lower0",
+		"next_day_top100_raise1_lower0",
+	]
+	out: Dict[str, Optional[float]] = {}
+	for k in keys:
+		v = rowdict.get(k)
+		out[k] = None if v is None else float(v)
+	return out
 
 
 def _compare(a: Optional[float], b: Optional[float], tol: float = 1e-3) -> bool:

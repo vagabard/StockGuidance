@@ -188,12 +188,12 @@ def build_parser() -> argparse.ArgumentParser:
 	# 	),
 	# )
 	parser.add_argument(
-		"--train-start-date-id",
+		"--raw-train-start-with-special-characters",
 		type=str,
 		default=None,
 		help=(
 			"Optional starting date_id (inclusive) for the training/validation/test "
-			"window. When provided together with --train-end-date-id, these take "
+			"window. When provided together with --raw-train-end-with-special-characters, these take "
 			"precedence over --data-head-ignore-percent / --data-tail-ignore-percent "
 			"for defining the usable date range. Accepts either an absolute "
 			"date_id (e.g. 15315), a relative offset from the start as '+N' "
@@ -203,12 +203,12 @@ def build_parser() -> argparse.ArgumentParser:
 		),
 	)
 	parser.add_argument(
-		"--train-end-date-id",
+		"--raw-train-end-with-special-characters",
 		type=str,
 		default=None,
 		help=(
 			"Optional ending date_id (inclusive) for the training/validation/test "
-			"window. When provided together with --train-start-date-id, these take "
+			"window. When provided together with --raw-train-start-with-special-characters, these take "
 			"precedence over --data-head-ignore-percent / --data-tail-ignore-percent "
 			"for defining the usable date range. Accepts either an absolute "
 			"date_id (e.g. 16767), a relative offset from the start as '+N' "

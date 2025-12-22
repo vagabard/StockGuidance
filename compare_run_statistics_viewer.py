@@ -16,28 +16,12 @@ from compare_runs_shared import (
     plot_lines,
     runs_to_dataframe_dicts,
     scan_runs,
-    debug,
+    has_any_simulation_files,
 )
 
 
 def _has_any_simulation_files(path: str) -> bool:
-    """Return True if ``path`` contains any end or epoch stock_simulation CSVs."""
-    try:
-        if not path or not os.path.isdir(path):
-            return False
-    except Exception:
-        return False
-
-    try:
-        # Quick heuristics without loading CSVs fully
-        names = set(os.listdir(path))
-    except Exception:
-        return False
-
-    for n in names:
-        if re.match(r"stock_simulation_\d+(?:days|percent)?(?:_epoch_\d+)?\.csv$", n):
-            return True
-    return False
+    return has_any_simulation_files(path)
 
 
 def _discover_best_run_dir(base_dir: str, ts_name: str, run_list: List[Tuple[str, Dict[str, Any]]]) -> str | None:
@@ -431,7 +415,7 @@ def _build_statistics_rows(base_dir: str, ts_to_runs: Dict[str, List[Tuple[str, 
         variants = _discover_all_run_dirs(base_dir, ts_name, run_list)
 
         if not variants:
-            debug("No accessible run directory for %s", ts_name)
+           # debug("No accessible run directory for %s", ts_name)
             rows.append(augmented)
             continue
 
@@ -469,6 +453,24 @@ def _run_as_script() -> None:
     )
 
     runs = scan_runs(base_dir)
+
+    # --- Filtering based on "Runs with simulation" checkbox ---
+    st.sidebar.subheader("Filter options")
+    sim_only = st.sidebar.checkbox("Runs with simulation", value=False)
+
+    if sim_only:
+        filtered_runs = []
+        for rel, params in runs:
+            # Check if either the run directory itself or its parent timestamp directory has simulation files
+            # rel is typically "timestamp/repN" or just "timestamp"
+            run_path = os.path.normpath(os.path.join(base_dir, rel))
+            ts_name = params.get("_ts")
+            ts_path = os.path.normpath(os.path.join(base_dir, ts_name)) if ts_name else None
+
+            if has_any_simulation_files(run_path) or (ts_path and has_any_simulation_files(ts_path)):
+                filtered_runs.append((rel, params))
+        runs = filtered_runs
+
     if not runs:
         st.info(
             "No runs found. Ensure the directory contains timestamped subfolders like YYYYMMDD_HHMMSS."
@@ -478,11 +480,11 @@ def _run_as_script() -> None:
     ts_to_runs = group_runs_by_timestamp(runs)
     timestamp_names = build_timestamp_list(ts_to_runs)
 
-    # Build run families using the shared helper. We request only families
-    # that have *multiple distinct parameter sets*, so families that merely
-    # repeat the same configuration across reps are excluded from the
-    # Start/End run-family selectors.
-    family_to_ts, family_names = build_run_families(runs, require_multiple_param_sets=True)
+    # Build run families using the shared helper.
+    family_to_ts, family_names = build_run_families(
+        runs,
+        require_multiple_param_sets=False,
+    )
 
     st.title("Compare Run Statistics")
     st.caption(
@@ -500,7 +502,7 @@ def _run_as_script() -> None:
     st.sidebar.button("Refresh runs list")
     st.sidebar.subheader("Select family and builds")
 
-    # Primary selector: run families derived from ``initial_run``. The
+    # Primary selector: run families derived from the directory structure. The
     # "(all families)" option allows cross-family comparisons based purely
     # on build (timestamp) selection.
     family_options = ["(all families)"] + family_names

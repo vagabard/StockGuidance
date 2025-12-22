@@ -50,6 +50,7 @@ from train_pytorch_network_cli import parse_args
 from trainer import train_single_run
 # Trainer package imports (split from monolithic script)
 from trainer.state.family_run import FamilyRun
+from trainer.train_single_run import TrainSingleRun
 from training_instance_provider import TrainingInstanceProvider
 
 VALID_ACTIVATIONS = {"relu", "gelu", "tanh", "sigmoid", "silu", "swish", "leaky_relu", "elu", "tanshrink", "softmax",
@@ -118,12 +119,16 @@ def _main_impl(family_run: FamilyRun) -> int:
 		cmd = single_run.to_commandline()
 		print(f"Spawning isolated run-family member {family_run.current_index+1}/{len(family_run.single_runs_for_all_combinations)}: {cmd}")
 		try:
-			args = ["--single-run-file", single_run.last_save_location]
-			completed = 	train_single_run.main(args)
+			print(
+				f" train percent 1 {single_run.family_run.train_percent} val percent 1 {single_run.family_run.val_percent}")
+			executor = TrainSingleRun(single_run)
+			executor.run_one()
+
+			#completed = 	train_single_run.main(args)
 			#completed = subprocess.run(cmd, check=False)
-			if completed != 0:
-				print(f"Warning: sub-run exited with code {completed}; stopping controller loop.")
-				break
+			# if completed != 0:
+			# 	print(f"Warning: sub-run exited with code {completed}; stopping controller loop.")
+			# 	break
 		except Exception as sub_e:
 			print(f"Error running isolated sub-process: {sub_e}  from {sub_e.args}")
 			traceback.print_exception(sub_e)
@@ -167,7 +172,7 @@ class TrainPytorchNetwork:
 		# FamilyRun controller (if any) before executing training.
 		args = parse_args(argv)
 
-		# The family_run field mirrors the controller logic from the main
+		# The single_run field mirrors the controller logic from the main
 		# implementation:
 		#
 		# * When --resume-directory is supplied, we load the existing
@@ -186,9 +191,12 @@ class TrainPytorchNetwork:
 		start_ts = time.perf_counter()
 		self._exit_code = _main_impl(self.family_run)
 		self.total_runtime_seconds = float(time.perf_counter() - start_ts)
-		if len(self.family_run.single_runs_for_all_combinations) > 1 :
-			raise ValueError(f"Expected single run, got {len(self.family_run.single_runs_for_all_combinations)}")
-		self._training_directory = self.family_run.single_runs_for_all_combinations[0].file_structure.run_group_dir
+
+
+
+
+
+		self._training_directory = self.family_run.file_structure.family_dir
 		# Human-friendly runtime log
 		seconds = int(self.total_runtime_seconds)
 		hours, rem = divmod(seconds, 3600)

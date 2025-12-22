@@ -42,7 +42,7 @@ def test_existing_model_random_uniform_inputs_vary_top_id():
 
     for i in range(trials):
         x = rng.uniform(0.5, 1.5, size=input_size).astype(np.float32)
-        scores, top_ids = rec.getBuyRecommendations(x, top_k=1, return_scores=True)
+        scores, top_ids = rec.getBuyRecommendations(x, top_k=1)
         if output_size is None:
             output_size = int(scores.shape[0])
         tid = int(top_ids[0])

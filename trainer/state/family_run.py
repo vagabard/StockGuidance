@@ -12,16 +12,16 @@ from trainer.args_train import set_feature_flags, parse_feature_selections, pars
 from trainer.file_structure_family_run_handler import FileStructureFamilyRunHandler
 from trainer.state.single_run import SingleRun
 try:
-    # Soft import: keep trainer decoupled when DB layer is unused
-    from database.db_info import DbInfo, load_dbinfo
+	# Soft import: keep trainer decoupled when DB layer is unused
+	from database.db_info import DbInfo, load_dbinfo
 except Exception as e:  # pragma: no cover - optional dependency
-    DbInfo = None  # type: ignore
-    traceback.print_exception(e)
-    def load_dbinfo(*args, **kwargs):  # type: ignore
-        return None
+	DbInfo = None  # type: ignore
+	traceback.print_exception(e)
+	def load_dbinfo(*args, **kwargs):  # type: ignore
+		return None
 
 # Local copies of constants previously imported from train_pytorch_network.
-# Defined here to avoid a circular import between trainer.state.family_run
+# Defined here to avoid a circular import between trainer.state.single_run
 # and the top-level training script.
 
 VALID_ACTIVATIONS = {
@@ -79,6 +79,7 @@ class FamilyRun:
 	final_activation_list: List[str]
 	include_one_feature_list: Optional[Sequence[str]]
 	base_optional_features: Set[str]
+	base_args_list: List[str] | None = None
 
 	# Controller / persistence fields
 	single_runs_for_all_combinations: List[SingleRun] | None = None
@@ -89,8 +90,8 @@ class FamilyRun:
 	volume_ratio : bool = False
 	vwap_ratio : bool = False
 	transaction_ratio : bool = False
-	train_start_date_id : Optional[str] = None, # keep this and the next as str, so we can write a relative number, like +100, or -100, to indicate distance from an end, as well as absolute distance
-	train_end_date_id : Optional[str] = None,
+	raw_train_start_with_special_characters : Optional[str] = None, # keep this and the next as str, so we can write a relative number, like +100, or -100, to indicate distance from an end, as well as absolute distance
+	raw_train_end_with_special_characters : Optional[str] = None,
 	# If set, pick a random contiguous window such that end_index - start_index == duration
 	random_training_duration : Optional[int] = None,
 	split_mode : Optional[str] = None,
@@ -98,7 +99,6 @@ class FamilyRun:
 	train_percent : Optional[float] = None
 	val_percent : Optional[float] = None
 	simulate_top_k : Optional[List[int]] = None
-	simulate_percent: Optional[float] = None
 	simulate_prior_only: Optional[bool] = None
 	device : Optional[str] = None
 	precision : Optional[str] = None
@@ -111,7 +111,7 @@ class FamilyRun:
 
 	neural_network_type : Optional[str] = None
 	hidden_layer_size : Optional[int] = None
-	drop_last : Optional[bool] = None
+	drop_last : Optional[bool] = False
 	persistent_workers : Optional[bool] = None
 
 	family_commands:list[list[str]] = None
@@ -181,8 +181,8 @@ class FamilyRun:
 
 			limit = getattr(args, "limit", 0)
 
-			train_start_date_id = getattr(args, "train_start_date_id", None)
-			train_end_date_id = getattr(args, "train_end_date_id", None)
+			raw_train_start_date_id = getattr(args, "raw_train_start_with_special_characters", None)
+			raw_train_end_date_id = getattr(args, "raw_train_end_with_special_characters", None)
 			random_training_duration = getattr(args, "random_training_duration", None)
 
 			split_mode = getattr(args, "split_mode", None)
@@ -209,10 +209,20 @@ class FamilyRun:
 
 			neural_network_type = getattr(args, "arch", None)
 			hidden_layer_size = getattr(args, "hidden_layers", None)
-			drop_last = getattr(args, "drop_last", None)
+			drop_last = getattr(args, "drop_last", False)
 			persistent_workers = getattr(args, "persistent_workers", None)
 
 			dont_use_dataloader = getattr(args, "dont_use_dataloader", False)
+
+			base_args_source = getattr(args, "base_args_list", None)
+			if base_args_source is None:
+				base_args_source = getattr(args, "base_args", None)
+			if base_args_source is None:
+				base_args_list: List[str] = []
+			elif isinstance(base_args_source, (list, tuple, set)):
+				base_args_list = [str(v) for v in base_args_source]
+			else:
+				base_args_list = [str(base_args_source)]
 
 
 
@@ -240,6 +250,7 @@ class FamilyRun:
 				final_activation_list=list(final_activation_list),
 				include_one_feature_list=list(include_one_feature_list) if include_one_feature_list else None,
 				base_optional_features=set(base_optional_features),
+				base_args_list=list(base_args_list),
 				single_runs_for_all_combinations=[],
 				current_index=0,
 				completed=False,
@@ -248,14 +259,13 @@ class FamilyRun:
 				volume_ratio=args.volume_ratio,
 				vwap_ratio=args.vwap_ratio,
 				transaction_ratio=args.transaction_ratio,
-				train_start_date_id=train_start_date_id,
-				train_end_date_id=train_end_date_id,
+				raw_train_start_with_special_characters=raw_train_start_date_id,
+				raw_train_end_with_special_characters=raw_train_end_date_id,
 				random_training_duration=random_training_duration,
 				split_mode=split_mode,
 				random_seed_splits=random_seed_splits,
 				train_percent=train_percent,
 				val_percent=val_percent,
-				simulate_percent=args.simulate_percent,
 				simulate_top_k=simulate_top_k,
 				simulate_prior_only=args.simulate_prior_only,
 				precision=precision,
@@ -330,17 +340,29 @@ class FamilyRun:
 										activation=str(act),
 										final_activation=str(final_act),
 										include_features=selected_features or None,
+										train_start_date_id=None,
+										train_end_date_id=None,
 									)
 									single_runs_for_all_combinations.append(run_state)
 									combo_id += 1
 
 		self.single_runs_for_all_combinations = single_runs_for_all_combinations
 
+	@property
+	def family_dir(self) -> str | None:
+		"""Expose the family directory resolved by the underlying file structure."""
+		return getattr(self.file_structure, "family_dir", None)
+
+	@property
+	def state_path(self) -> str | None:
+		"""Expose the path to the persisted family state file."""
+		return getattr(self.file_structure, "family_state_path", None)
+
 	def to_dict(self) -> Dict[str, Any]:
 		"""Return a JSON-serialisable representation of the family state.
 
 		This implementation avoids ``dataclasses.asdict`` to prevent infinite
-		recursion via the ``SingleRun.family_run`` back-reference. Instead we
+		recursion via the ``SingleRun.single_run`` back-reference. Instead we
 		shallow-copy ``__dict__`` and manually normalise fields that need special
 		handling.
 		"""
@@ -371,6 +393,7 @@ class FamilyRun:
 		# ``base_optional_features`` is a ``set[str]`` and must be turned into a
 		# list for JSON serialisation.
 		data["base_optional_features"] = sorted(str(v) for v in self.base_optional_features)
+		data["base_args"] = list(self.base_args_list or [])
 		# Normalise the combinations list to plain dictionaries so that
 		# back-references from SingleRun -> FamilyRun are not embedded.
 		serialised_single_runs: List[Dict[str, Any]] = []
@@ -461,6 +484,7 @@ class FamilyRun:
 			base_optional_features = set(str(v) for v in base_optional_raw)
 		else:
 			base_optional_features = {str(base_optional_raw)} if base_optional_raw else set()
+		base_args_list = _as_str_list(data.get("base_args"))
 
 		# ``single_runs_for_all_combinations`` is persisted as a list of plain
 		# dictionaries. The controller only needs these when resuming; they are
@@ -501,14 +525,22 @@ class FamilyRun:
 		volume_ratio = _get_bool("volume_ratio")
 		vwap_ratio = _get_bool("vwap_ratio")
 		transaction_ratio = _get_bool("transaction_ratio") or _get_bool("tranaction_ratio")
-		train_start_date_id = _get_str("train_start_date_id")
-		train_end_date_id = _get_str("train_end_date_id")
+		raw_train_start_date_id = _get_str("raw_train_start_with_special_characters")
+		raw_train_end_date_id = _get_str("raw_train_end_with_special_characters")
 		random_training_duration = _get_int("random_training_duration")
 		split_mode = _get_str("split_mode")
 		random_seed_splits = _get_int("random_seed_splits")
 		train_percent = _get_float("train_percent")
 		val_percent = _get_float("val_percent")
-		simulate_percent = _get_float("simulate_percent")
+		test_percent = _get_float("test_percent")
+		if train_percent is None:
+			train_percent = 0.0
+		if val_percent is None:
+			val_percent = 0.0
+		if test_percent is None:
+			test_percent = 1.0-train_percent
+		assert 0.999 <= train_percent + val_percent + test_percent <= 1.001, "train_percent + val_percent + test_percent must sum to = 1"
+
 		simulate_top_k =  _as_int_list(data.get("simulate_top_k"))
 		simulate_prior_only = _get_bool("simulate_prior_only")
 		precision = _get_str("precision")
@@ -522,6 +554,7 @@ class FamilyRun:
 		run_repeats = _get_int("run_repeats") or 1
 		neural_network_type = _get_str("neural_network_type") or "mlp"
 		hidden_layer_size = _get_int("hidden_layer_size") or 0
+
 		drop_last = _get_bool("drop_last")
 		persistent_workers = _get_bool("persistent_workers")
 		log_interval = _get_int("log_interval") or 0
@@ -576,6 +609,7 @@ class FamilyRun:
 			final_activation_list=final_activation_list,
 			include_one_feature_list=include_one_feature_list,
 			base_optional_features=base_optional_features,
+			base_args_list=base_args_list,
 			single_runs_for_all_combinations=single_runs_for_all_combinations,
 			current_index=current_index,
 			completed=completed,
@@ -583,14 +617,13 @@ class FamilyRun:
 			volume_ratio=volume_ratio,
 			vwap_ratio=vwap_ratio,
 			transaction_ratio=transaction_ratio,
-			train_start_date_id=train_start_date_id,
-			train_end_date_id=train_end_date_id,
+			raw_train_start_with_special_characters=raw_train_start_date_id,
+			raw_train_end_with_special_characters=raw_train_end_date_id,
 			random_training_duration=random_training_duration,
 			split_mode=split_mode,
 			random_seed_splits=random_seed_splits,
 			train_percent=train_percent,
 			val_percent=val_percent,
-			simulate_percent=simulate_percent,
 			simulate_top_k=simulate_top_k,
 			simulate_prior_only=simulate_prior_only,
 			precision=precision,
@@ -648,6 +681,7 @@ class FamilyRun:
 			"single_runs_for_all_combinations": serialised_single_runs,
 			"current_index": int(self.current_index),
 			"completed": bool(self.completed),
+			"base_args": list(self.base_args_list or []),
 		}
 		os.makedirs(os.path.dirname(self.file_structure.family_state_path), exist_ok=True)
 		with open(self.file_structure.family_state_path, "w", encoding="utf-8") as sf:

@@ -8,7 +8,7 @@ if TYPE_CHECKING:  # pragma: no cover - import for type checkers only
 	from trainer.state.family_run import FamilyRun
 
 
-def build_dataloaders(family_run: "FamilyRun", train_ds, val_ds, test_ds) -> tuple[DataLoader | None, DataLoader | None, DataLoader | None]:
+def build_dataloaders(family_run: FamilyRun, train_ds, val_ds, test_ds) -> tuple[DataLoader | None, DataLoader | None, DataLoader | None]:
 	"""Optionally wrap datasets into PyTorch DataLoaders based on flags.
 
 	Returns (train_loader, val_loader, test_loader).

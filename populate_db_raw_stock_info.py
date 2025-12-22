@@ -283,27 +283,27 @@ def process_file(conn, cursor, path: Path, date_str: str, ticker_map: Dict[str, 
 
 
 def parse_args(argv: Optional[List[str]] = None):
-    p = argparse.ArgumentParser(description="Populate raw_stock_data from market summary NDJSON files.")
-    p.add_argument("--dbinfo-file", default="dbinfo.id", help="Path to DB info file (default: dbinfo.id)")
-    p.add_argument("--root", default=str(DEFAULT_ROOT), help="Root folder for market summary files (default: data/market_summary)")
-    p.add_argument(
-        "--start-date",
-        default=None,
-        help=(
-            "Optional ISO date (YYYY-MM-DD). If provided, only NDJSON files with "
-            "a date strictly more recent than this value will be processed."
-        ),
-    )
-    p.add_argument(
-        "--end-date",
-        default=None,
-        help=(
-            "Optional ISO date (YYYY-MM-DD). If provided, only NDJSON files with "
-            "a date strictly less recent than this value will be processed."
-        ),
-    )
-    p.add_argument("--limit", type=int, default=0, help="Limit number of files to process (0 = all)")
-    return p.parse_args(argv)
+	p = argparse.ArgumentParser(description="Populate raw_stock_data from market summary NDJSON files.")
+	p.add_argument("--dbinfo-file", default="dbinfo.id", help="Path to DB info file (default: dbinfo.id)")
+	p.add_argument("--root", default=str(DEFAULT_ROOT), help="Root folder for market summary files (default: data/market_summary)")
+	p.add_argument(
+		"--start-date",
+		default=None,
+		help=(
+			"Optional ISO date (YYYY-MM-DD). If provided, only NDJSON files with "
+			"a date strictly more recent than this value will be processed."
+		),
+	)
+	p.add_argument(
+		"--end-date",
+		default=None,
+		help=(
+			"Optional ISO date (YYYY-MM-DD). If provided, only NDJSON files with "
+			"a date strictly less recent than this value will be processed."
+		),
+	)
+	p.add_argument("--limit", type=int, default=0, help="Limit number of files to process (0 = all)")
+	return p.parse_args(argv)
 
 
 def main(argv: Optional[List[str]] = None) -> None:

@@ -84,13 +84,22 @@ class FileStructureSingleRunHandler:
 
 	@staticmethod
 	def _create_wrapper_path(root_dir:str) -> str:
-		wrapper_path = os.path.abspath(root_dir)
-		print(f"wrapper_path: {wrapper_path}")
-		subdirectory_index = wrapper_path.lower().index(SUBDIRECTORY_OF_SOURCE)
-		if subdirectory_index > 0:
-			wrapper_path = wrapper_path[:subdirectory_index]
-
-		return os.path.join(wrapper_path, "trainer" + os.path.sep + "train_single_run.py")
+		# Prefer to derive the wrapper path from the provided ``root_dir`` when
+		# possible, but fall back to this module's location when ``root_dir`` does
+		# not contain the expected subdirectory (e.g. when tests pass in a tmp
+		# directory).
+		resolved_root = os.path.abspath(root_dir) if root_dir else ""
+		lower_root = resolved_root.lower()
+		try:
+			subdirectory_index = lower_root.index(SUBDIRECTORY_OF_SOURCE)
+		except ValueError:
+			trainer_dir = os.path.dirname(os.path.abspath(__file__))
+			return os.path.join(trainer_dir, "train_single_run.py")
+		else:
+			wrapper_path = resolved_root
+			if subdirectory_index > 0:
+				wrapper_path = resolved_root[:subdirectory_index]
+			return os.path.join(wrapper_path, "trainer" + os.path.sep + "train_single_run.py")
 
 	@staticmethod
 	def _calculate_run_directory(metrics_file: str) -> str:

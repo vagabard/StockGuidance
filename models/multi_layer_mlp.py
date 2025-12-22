@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from torch import Tensor
+
 try:
 	import torch  # type: ignore
 	import torch.nn as nn  # type: ignore
@@ -65,7 +67,7 @@ class MultiLayerLinearNet(nn.Module):
 
 		self.net = nn.Sequential(*layers)
 
-	def forward(self, x: "torch_interface.Tensor") -> "torch_interface.Tensor":
+	def forward(self, x: Tensor) -> Tensor:
 		if x.dim() == 1:
 			x = x.unsqueeze(0)
 		return self.net(x)
