@@ -698,7 +698,7 @@ class TrainSingleRun:
 
 			# Use per-run learning rate adjustment parameter (scheduler gamma), defaulting to 0.998
 			gamma: float = getattr(single_run, "learning_rate_adjustment_parameter", 0.998)
-			training_bundle_list[run_idx].scheduler = ExponentialLR(training_bundle_list[run_idx].optimizer, gamma=float(gamma))
+			#training_bundle_list[run_idx].scheduler = ExponentialLR(training_bundle_list[run_idx].optimizer, gamma=float(gamma))
 			training_bundle_list[run_idx].suffix = fs.suffix
 			rep_files_list.append(fs)
 			ckpt_model, ckpt_optim = fs.get_checkpoint_files_for_rep(rep_index)
@@ -800,7 +800,8 @@ class TrainSingleRun:
 				)
 				ensemble_parts.append(model)
 				scheduler = training_bundle_list[run_idx].scheduler
-				scheduler.step()
+				if scheduler is not None:
+					scheduler.step()
 
 			ensemble_interval = family_run.ensemble_interval
 
