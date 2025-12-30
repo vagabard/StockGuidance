@@ -800,6 +800,7 @@ class TrainSingleRun:
 				)
 				ensemble_parts.append(model)
 				scheduler = training_bundle_list[run_idx].scheduler
+				#don't do this if we don't have a scheduler
 				if scheduler is not None:
 					scheduler.step()
 
