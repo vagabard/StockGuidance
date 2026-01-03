@@ -114,8 +114,6 @@ class FamilyRun:
 	drop_last : Optional[bool] = False
 	persistent_workers : Optional[bool] = None
 
-	family_commands:list[list[str]] = None
-
 	use_ranking_error_loss : bool = False
 	rank_temperature : float = 0.01
 	enable_rank_error_loss_in_training : bool = False

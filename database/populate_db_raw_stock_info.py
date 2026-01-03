@@ -60,6 +60,7 @@ import argparse
 import json
 import os
 import re
+import traceback
 from datetime import date, datetime
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
@@ -67,8 +68,9 @@ from typing import Dict, Iterable, List, Optional, Tuple
 
 from database.db_connect import get_connection
 
-DEFAULT_ROOT = Path("data") / "market_summary"
+DEFAULT_ROOT = Path("../data") / "market_summary"
 BATCH_SIZE = 1000
+MAX_STOCK_PRICE = 1000000
 
 
 def d4(val: Optional[float]) -> Optional[Decimal]:
@@ -144,8 +146,27 @@ def load_ticker_map(cursor) -> Dict[str, int]:
 		if sym:
 			result[str(sym).upper()] = int(tid)
 	print(f"Loaded {len(result)} tickers from ticker_symbol table.")
-	print(f"largest {max(result.values())}")
+	if result:
+		print(f"largest {max(result.values())}")
 	return result
+
+
+def add_new_ticker(cursor, ticker_label: str,  ticker_map: Dict[str, int]) -> int:
+	cursor.execute(
+		"INSERT INTO ticker_symbol (label) VALUES (%s)",
+		(ticker_label,),
+	)
+	# Last insert id via SELECT to be safe across drivers
+	cursor.execute(
+		"SELECT id FROM ticker_symbol WHERE label = %s",
+		(ticker_label,),
+	)
+	row = cursor.fetchone()
+	ticker_id = row[0]
+	ticker_map[ticker_label] = ticker_id
+	if row:
+		return int(ticker_id)
+	raise RuntimeError(f"Failed to retrieve ID for new ticker: {ticker_label}")
 
 
 DATE_FILE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})\.ndjson$", re.IGNORECASE)
@@ -205,8 +226,8 @@ def batch_insert_raw_stock_data(cursor, rows: List[Tuple[int, int, Optional[Deci
 		f"transactions=VALUES(transactions);"
 	)
 	print(f"batch_insert_raw_stock_data: {len(rows)} rows")
-	print(f"sql is {sql}")
-	print(f"rows are {rows[0]}")
+	# print(f"sql is {sql}")
+	# print(f"rows are {rows}")
 	sql_return = cursor.executemany(sql, rows)
 
 	# Different drivers report affected rows differently.
@@ -254,10 +275,11 @@ def process_file(conn, cursor, path: Path, date_str: str, ticker_map: Dict[str, 
 
 			tid = ticker_map.get(ticker)
 			if tid is None:
-				if ticker not in warned:
-					#print(f"[WARN] Unknown ticker in DB (skipping): {ticker}")
-					warned.add(ticker)
-				skipped += 1
+				tid = add_new_ticker(cursor, ticker, ticker_map)
+				# if ticker not in warned:
+				# 	#print(f"[WARN] Unknown ticker in DB (skipping): {ticker}")
+				# 	warned.add(ticker)
+				# skipped += 1
 				continue
 
 			o = d4(obj.get("o"))
@@ -267,9 +289,11 @@ def process_file(conn, cursor, path: Path, date_str: str, ticker_map: Dict[str, 
 			v = to_int(obj.get("v"))
 			vw = d4(obj.get("vw"))
 			n = to_int(obj.get("n"))
-
-			rows_buffer.append((tid, date_id, o, h, l, c, v, vw, n))
-
+			#sanity check
+			if o < MAX_STOCK_PRICE and h < MAX_STOCK_PRICE and l < MAX_STOCK_PRICE and c < MAX_STOCK_PRICE:
+				rows_buffer.append((tid, date_id, o, h, l, c, v, vw, n))
+			else :
+				print(f"[WARN] Skipping stock price out of range: {ticker} {o} {h} {l} {c} {v} {vw} {n}")
 			if len(rows_buffer) >= BATCH_SIZE:
 				batch_insert_raw_stock_data(cursor, rows_buffer)
 				inserted += len(rows_buffer)
@@ -361,9 +385,9 @@ def main(argv: Optional[List[str]] = None) -> None:
 		ensure_schema(cursor)
 		ticker_map = load_ticker_map(cursor)
 		print(f"keys in ticker_map: {ticker_map.keys()}")
-		if not ticker_map:
-			print("[ERROR] No tickers loaded in ticker_symbol table. Run populate_db_ticker_info.py first.")
-			return
+		# if not ticker_map:
+		# 	print("[ERROR] No tickers loaded in ticker_symbol table. Run populate_db_ticker_info.py first.")
+		# 	return
 
 		total_files = len(files)
 		grand_total = 0
@@ -377,6 +401,7 @@ def main(argv: Optional[List[str]] = None) -> None:
 
 		print(f"Done. Files: {total_files}, rows inserted/updated: {grand_total}, skipped: {grand_skipped}")
 	except Exception as e:
+		traceback.print_exception(e)
 		print(f"[ERROR] {e}")
 	finally:
 		try:

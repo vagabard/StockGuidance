@@ -71,8 +71,6 @@ class StockRecommenderFromModel:
 			model_or_path: Path/dir to load models from, or a list of models. A single
 				model instance is accepted for backward compatibility and wrapped into a list.
 			device: "auto" (cuda if available else cpu), "cpu", or "cuda".
-			manifest: Manifest dict to use when models are supplied directly.
-			run_dir: Unused; kept for backward compatibility.
 		"""
 		self.input_size = None
 		if not TORCH_AVAILABLE:
@@ -272,7 +270,7 @@ class StockRecommenderFromModel:
 		t = t.to(self._device).reshape(-1)
 		if t.numel() != self.input_size:  # type: ignore[attr-defined]
 			raise ValueError(
-				f"Feature vector size mismatch: expected {self._input_size}, got {int(t.numel())}"
+				f"Feature vector size mismatch: expected {self._ensemble_models[0]._input_size}, got {int(t.numel())}"
 			)
 		return t
 

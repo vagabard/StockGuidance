@@ -43,7 +43,7 @@ from typing import Any, Dict, Optional
 
 from database.db_connect import get_connection
 
-DEFAULT_INPUT_FILE = os.path.join("data", "tickers_full.txt")
+DEFAULT_INPUT_FILE = os.path.join("../data", "tickers_full.txt")
 
 
 def _ensure_schema(cursor) -> None:
@@ -51,12 +51,12 @@ def _ensure_schema(cursor) -> None:
 		"""
 		CREATE TABLE IF NOT EXISTS ticker_symbol (
 			id INT NOT NULL AUTO_INCREMENT,
-			ticker_symbol VARCHAR(16) NOT NULL,
+			label VARCHAR(16) NOT NULL,
 			exchange VARCHAR(10) NULL,
 			type VARCHAR(10) NULL,
 			market VARCHAR(20) NULL,
 			PRIMARY KEY (id),
-			UNIQUE KEY ux_ticker_symbol (ticker_symbol)
+			UNIQUE KEY ux_ticker_symbol (label)
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 		"""
 	)
@@ -217,7 +217,7 @@ def process_file(
 				if not last_id:
 					# Fallback: read id
 					cursor.execute(
-						"SELECT id FROM ticker_symbol WHERE ticker_symbol=%s", (ticker_v,)
+						"SELECT id FROM ticker_symbol WHERE label=%s", (ticker_v,)
 					)
 					row = cursor.fetchone()
 					if not row:

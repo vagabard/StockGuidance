@@ -69,8 +69,11 @@ def get_connection(
 	"""
 
 	current_directory = Path(os.getcwd())
-	while not os.path.exists(os.path.join(current_directory, dbinfo_file)):
+	test_db_id_file = os.path.join(current_directory, dbinfo_file)
+	while not os.path.exists(test_db_id_file):
+		print(f"dbinfo_file not found: {test_db_id_file} current directory: {current_directory}   parent directory: {current_directory.parent}")
 		current_directory = current_directory.parent
+		test_db_id_file = os.path.join(current_directory, dbinfo_file)
 	os.chdir(current_directory)
 
 	# Load configuration from object or file

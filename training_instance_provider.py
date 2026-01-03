@@ -38,20 +38,20 @@ use_torch=True, results are returned as torch_interface.FloatTensors.
 """
 from __future__ import annotations
 
-from typing import Optional, Tuple, Any
+from typing import Optional, Any
 
 import numpy as np
 from numpy import dtype, ndarray
 from torch import Tensor
 
-from load_database_rows_into_tensors import (
-    fetch_grouped_by_date,
-    TORCH_AVAILABLE,
+from debug_feature_logging import (
+	dump_feature_window,
+	env_feature_debug_enabled,
 )
 from feature_windowing import concat_features_current_then_prior
-from debug_feature_logging import (
-    dump_feature_window,
-    env_feature_debug_enabled,
+from load_database_rows_into_tensors import (
+	fetch_grouped_by_date,
+	TORCH_AVAILABLE,
 )
 
 try:

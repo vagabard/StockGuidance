@@ -47,7 +47,11 @@ from polygon_fetch import (
 	market_summary_file_path,
 	iso_date,
 )
-from populate_db_raw_stock_info import main as populate_raw_stock_main
+from database.populate_db_daily_delta_stock_data import (
+	get_ordered_date_ids,
+	populate_deltas,
+)
+from database.populate_db_raw_stock_info import main as populate_raw_stock_main
 from train_pytorch_network import TrainPytorchNetwork
 
 # Time (UTC) after which the current day's market data is considered stable
@@ -117,9 +121,9 @@ def _populate_daily_delta_stock_data_range(
 ) -> None:
 	"""Call the stored procedure to backfill ``daily_delta_stock_data``.
 
-	This assumes the MySQL database defines a procedure
-	``populate_daily_delta_stock_data(IN p_start_date_id INT, IN p_end_date_id INT)``
-	which populates/updates rows in ``daily_delta_stock_data`` based on
+	This iterates through dates and calls
+	``populate_daily_delta_stock_data(IN p_date_id INT, IN p_prior_date_id INT, IN p_next_date_id INT)``
+	to populate/update rows in ``daily_delta_stock_data`` based on
 	``raw_stock_data``.
 	"""
 
@@ -129,18 +133,8 @@ def _populate_daily_delta_stock_data_range(
 
 	conn = get_connection(dbinfo_file=dbinfo_file)
 	try:
-		cur = conn.cursor()
-		# Use parameterised call to avoid any formatting issues.
-		db_result = cur.callproc(
-			"populate_daily_delta_stock_data",
-			[start_date_id,]
-		)
-		print("database result = ", db_result,)
-		try:
-			conn.commit()
-		except Exception:
-			# Some drivers may be in autocommit mode; ignore commit errors.
-			pass
+		date_ids = get_ordered_date_ids(conn.cursor())
+		populate_deltas(conn, date_ids, start_date_id=start_date_id, end_date_id=end_date_id)
 	finally:
 		try:
 			conn.close()
