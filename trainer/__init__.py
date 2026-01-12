@@ -4,7 +4,7 @@ Modules:
 - compat: optional torch_interface imports and TORCH_AVAILABLE flag
 - utils: small shared helpers (counting, bytes formatting, CSV opener)
 - device: device/precision setup and enforcement
-- datasets: RangeDataset/IndexDataset and batching helpers
+- datasets: TimeTrainingInstanceDataset and batching helpers
 - splits: train/val/test split helpers
 - dataloaders: optional DataLoader construction
 - ranking: ranking primitives and position utilities
@@ -17,7 +17,7 @@ Modules:
 """
 
 from trainer.torch_interface.compat import TORCH_AVAILABLE, torch, nn, optim, DataLoader, F  # re-export for convenience
-from trainer.dataset_classification import DatasetClass
+from trainer.dataset.dataset_classification import DatasetClass
 
 __all__ = [
     "TORCH_AVAILABLE",

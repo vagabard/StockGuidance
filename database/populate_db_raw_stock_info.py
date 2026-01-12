@@ -60,6 +60,8 @@ import argparse
 import json
 import os
 import re
+import threading
+import time
 import traceback
 from datetime import date, datetime
 from decimal import Decimal, ROUND_HALF_UP
@@ -69,8 +71,11 @@ from typing import Dict, Iterable, List, Optional, Tuple
 from database.db_connect import get_connection
 
 DEFAULT_ROOT = Path("../data") / "market_summary"
+DEFAULT_ROOT2 = Path("data") / "market_summary"
 BATCH_SIZE = 1000
 MAX_STOCK_PRICE = 1000000
+
+# Global buffer and lock removed as we are reverting to synchronous processing.
 
 
 def d4(val: Optional[float]) -> Optional[Decimal]:
@@ -243,6 +248,8 @@ def batch_insert_raw_stock_data(cursor, rows: List[Tuple[int, int, Optional[Deci
 		print(f"Rows affected by batch insert: {affected}")
 
 
+
+
 def process_file(conn, cursor, path: Path, date_str: str, ticker_map: Dict[str, int]) -> Tuple[int, int, int]:
 	"""Process a single NDJSON file.
 
@@ -250,11 +257,11 @@ def process_file(conn, cursor, path: Path, date_str: str, ticker_map: Dict[str, 
 	"""
 	date_id = get_or_create_date_id(cursor, date_str)
 
-	rows_buffer: List[Tuple[int, int, Optional[Decimal], Optional[Decimal], Optional[Decimal], Optional[Decimal], Optional[int], Optional[Decimal], Optional[int]]] = []
 	inserted = 0
 	skipped = 0
 
 	warned: set[str] = set()
+	rows_buffer = []
 
 	with path.open("r", encoding="utf-8") as f:
 		for line_no, line in enumerate(f, start=1):
@@ -276,11 +283,6 @@ def process_file(conn, cursor, path: Path, date_str: str, ticker_map: Dict[str, 
 			tid = ticker_map.get(ticker)
 			if tid is None:
 				tid = add_new_ticker(cursor, ticker, ticker_map)
-				# if ticker not in warned:
-				# 	#print(f"[WARN] Unknown ticker in DB (skipping): {ticker}")
-				# 	warned.add(ticker)
-				# skipped += 1
-				continue
 
 			o = d4(obj.get("o"))
 			h = d4(obj.get("h"))
@@ -292,16 +294,20 @@ def process_file(conn, cursor, path: Path, date_str: str, ticker_map: Dict[str, 
 			#sanity check
 			if o < MAX_STOCK_PRICE and h < MAX_STOCK_PRICE and l < MAX_STOCK_PRICE and c < MAX_STOCK_PRICE:
 				rows_buffer.append((tid, date_id, o, h, l, c, v, vw, n))
-			else :
+				if len(rows_buffer) >= BATCH_SIZE:
+					batch_insert_raw_stock_data(cursor, rows_buffer)
+					conn.commit()
+					rows_buffer.clear()
+				inserted += 1
+			else:
 				print(f"[WARN] Skipping stock price out of range: {ticker} {o} {h} {l} {c} {v} {vw} {n}")
-			if len(rows_buffer) >= BATCH_SIZE:
-				batch_insert_raw_stock_data(cursor, rows_buffer)
-				inserted += len(rows_buffer)
-				rows_buffer.clear()
-	print("warned tickers: ", warned)
+
 	if rows_buffer:
 		batch_insert_raw_stock_data(cursor, rows_buffer)
-		inserted += len(rows_buffer)
+		conn.commit()
+		rows_buffer.clear()
+
+	print("warned tickers: ", warned)
 
 	return inserted, skipped, line_no if 'line_no' in locals() else 0
 
@@ -309,7 +315,7 @@ def process_file(conn, cursor, path: Path, date_str: str, ticker_map: Dict[str, 
 def parse_args(argv: Optional[List[str]] = None):
 	p = argparse.ArgumentParser(description="Populate raw_stock_data from market summary NDJSON files.")
 	p.add_argument("--dbinfo-file", default="dbinfo.id", help="Path to DB info file (default: dbinfo.id)")
-	p.add_argument("--root", default=str(DEFAULT_ROOT), help="Root folder for market summary files (default: data/market_summary)")
+	p.add_argument("--root", default=str(DEFAULT_ROOT2), help="Root folder for market summary files (default: data/market_summary)")
 	p.add_argument(
 		"--start-date",
 		default=None,
@@ -335,6 +341,7 @@ def main(argv: Optional[List[str]] = None) -> None:
 
 	root = Path(args.root)
 	files = discover_files(root)
+	print(f"Found {len(files)} NDJSON files under: {root.resolve()}")
 
 	# If a starting date is provided, restrict processing to files strictly
 	# after that calendar date.  This allows incremental backfills driven by
@@ -379,7 +386,6 @@ def main(argv: Optional[List[str]] = None) -> None:
 		return
 
 	conn = get_connection(dbinfo_file=args.dbinfo_file)
-
 	cursor = conn.cursor()
 	try:
 		ensure_schema(cursor)

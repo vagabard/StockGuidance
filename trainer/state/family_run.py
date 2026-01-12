@@ -338,8 +338,6 @@ class FamilyRun:
 										activation=str(act),
 										final_activation=str(final_act),
 										include_features=selected_features or None,
-										train_start_date_id=None,
-										train_end_date_id=None,
 									)
 									single_runs_for_all_combinations.append(run_state)
 									combo_id += 1

@@ -7,6 +7,7 @@ from typing import Tuple, Dict, Optional, List
 import numpy as np
 import torch
 from torch import nn
+from torch.utils.data import Dataset
 
 from StockRecommenderFromModel import StockRecommenderFromModel
 from debug_feature_logging import dump_feature_window, env_feature_debug_enabled
@@ -18,8 +19,9 @@ from feature_windowing import (
 from load_database_rows_into_tensors import fetch_grouped_by_date
 from load_raw_stock_data_rows import fetch_open_close_for_date_tickers
 from models.utils import resolve_manifest_path  # type: ignore
-from trainer.state.single_run import SingleRun
+from trainer.dataset.datasets import TimeTrainingInstanceDataset, TimeTrainingInstanceSubset
 from trainer.util.argparse_utils import parse_int_list
+from training_instance_provider import TrainingInstanceProvider
 
 
 def _build_open_close_matrices(
@@ -119,29 +121,15 @@ def _average_scores(score_list: List[np.ndarray]) -> np.ndarray:
 
 
 
-def simulate_wrapper(
-	single_run: SingleRun,
-	models_to_use_for_recommenders: List[nn.Module],
-	top_k: List[int],
-	dbinfo_file: str = "dbinfo.id",
-    prefer_prior_only: bool = True,
-    dates_to_handle: Optional[List[int]] = None,
-    ensemble_normalize: bool = False,
-) -> str:
-	stock_recommender_to_simulate: List[StockRecommenderFromModel] = [StockRecommenderFromModel(models_to_use_for_recommenders,ensemble_normalize=ensemble_normalize)]
-	return simulate(single_run,stock_recommender_to_simulate,top_k,dbinfo_file, None,prefer_prior_only, False,dates_to_handle)
-
 
 def simulate(
-	single_run: SingleRun|None,
 	stock_recommenders: List[StockRecommenderFromModel],
 	top_k: List[int],
 	dbinfo_file: str = "dbinfo.id",
 	limit: Optional[int] = None,
-	prefer_prior_only: bool = True,
 	debug_sim_output: bool = False,
 	out_filename_suffix: Optional[str] = None,
-	dates_to_handle: Optional[torch.utils.data.DataLoader] = None,
+	dates_to_handle: Optional[TimeTrainingInstanceSubset] = None,
 ) -> str:
 
 	"""Run a trading simulation for a single model or an ensemble of models.
@@ -162,101 +150,80 @@ def simulate(
 	* use the averaged scores to pick the top-K tickers and compute returns.
 	"""
 	out_path = ""
-	for recommender_index in range(len(stock_recommenders)):
-		stock_recommender = stock_recommenders[recommender_index]
-		required_prior = int(single_run.prior_days) if single_run is not None else 0
-		expected_inp = int(stock_recommender.input_size) if stock_recommender is not None else 0
-		# Load per-date flattened features (X_flat) and dates
+	# Load per-date flattened features (X_flat) and dates
 
+	dates, X_flat, _Y = fetch_grouped_by_date(
+		dbinfo_file=dbinfo_file,
+		limit=limit,
+		return_2d=False,
+		current_day_change=stock_recommenders[0].get_current_day_change_used(),
+		volume_ratio=stock_recommenders[0].get_volume_ratio_used(),
+		vwap_ratio=stock_recommenders[0].get_vwap_ratio_used(),
+		tranaction_ratio=stock_recommenders[0].get_tranaction_ratio_used(),
+	)
 
-		dates, X_flat, _Y = fetch_grouped_by_date(
+	dates_shape_0 = int(dates.shape[0])
+	T = stock_recommenders[0].output_size  # number of tickers
+	TF = int(X_flat.shape[1])
+	if TF % T != 0:
+		raise ValueError(f"Feature width {TF} is not divisible by T={T}.")
+
+	# ------------------------------------------------------------------
+	# Determine simulation date window
+	# ------------------------------------------------------------------
+	if dates_to_handle is None:
+		# If no dates specified, use all dates from fetch_grouped_by_date
+		# but we need them as TimeTrainingInstance objects.
+		# TrainingInstanceProvider can give us these.
+		provider = TrainingInstanceProvider(
 			dbinfo_file=dbinfo_file,
 			limit=limit,
-			return_2d=False,
-			current_day_change=stock_recommender.get_current_day_change_used(),
-			volume_ratio=stock_recommender.get_volume_ratio_used(),
-			vwap_ratio=stock_recommender.get_vwap_ratio_used(),
-			tranaction_ratio=stock_recommender.get_tranaction_ratio_used(),
+			current_day_change=stock_recommenders[0].get_current_day_change_used(),
+			volume_ratio=stock_recommenders[0].get_volume_ratio_used(),
+			vwap_ratio=stock_recommenders[0].get_vwap_ratio_used(),
+			tranaction_ratio=stock_recommenders[0].get_tranaction_ratio_used(),
+			start_date_id=int(dates[0]),
+			end_date_id=int(dates[-1]),
 		)
+		provider.set_how_many_days_in_past_to_use(stock_recommenders[0].get_required_previous_days())
+		dataset = TimeTrainingInstanceDataset(provider)
+		# Use all indices
+		dates_to_handle = TimeTrainingInstanceSubset(dataset, list(range(len(dataset))))
+	elif isinstance(dates_to_handle, list) and len(dates_to_handle) > 0 and isinstance(dates_to_handle[0], int):
+		# dates_to_handle is a list of date_ids. We need to convert to TimeTrainingInstanceSubset.
+		provider = TrainingInstanceProvider(
+			dbinfo_file=dbinfo_file,
+			limit=limit,
+			current_day_change=stock_recommenders[0].get_current_day_change_used(),
+			volume_ratio=stock_recommenders[0].get_volume_ratio_used(),
+			vwap_ratio=stock_recommenders[0].get_vwap_ratio_used(),
+			tranaction_ratio=stock_recommenders[0].get_tranaction_ratio_used(),
+		)
+		provider.set_how_many_days_in_past_to_use(stock_recommenders[0].get_required_previous_days())
+		dataset = TimeTrainingInstanceDataset(provider)
 
-		D = int(dates.shape[0])
-		T = stock_recommender.output_size  # number of tickers
-		TF = int(X_flat.shape[1])
-		if TF % T != 0:
-			raise ValueError(f"Feature width {TF} is not divisible by T={T}.")
+		# Find indices in dataset that match the requested date_ids
+		indices = []
+		# This might be slow if there are many dates, but usually it's a small range
+		for i in range(len(dataset)):
+			inst = dataset[i]
+			if inst.date_id in dates_to_handle:
+				indices.append(i)
+		dates_to_handle = TimeTrainingInstanceSubset(dataset, indices)
 
-		# NOTE: Avoid loading the entire raw open/close dataset into memory.
-		# We'll fetch only the required tickers' O/C for each trade day on demand.
-
+	for recommender_index in range(len(stock_recommenders)):
+		stock_recommender = stock_recommenders[recommender_index]
+		required_prior = int(stock_recommender.get_required_previous_days())
+		expected_inp = int(stock_recommender.input_size)
 		# ------------------------------------------------------------------
-		# Determine simulation date window
-		#
-		# Primary mechanism: explicit list of all dates to handle.
-		#
-		# ``dates_to_handle`` is expected to be a list of integer date_ids, either
-		# passed directly by callers (e.g. the incremental harness) or parsed from
-		# the CLI ``--date-range`` argument. These ids are intersected with the
-		# available ``date_ids`` loaded from the database.
-		#
-		# When multiple dates are provided we keep the existing convention where we
-		# iterate over all but the final element, using each as the *feature* date
-		# and trading on the following calendar day.
-		#
-		# When exactly one date is provided we interpret it as the *trade* date and
-		# use the previous available date as the feature date (i.e. trade on N using
-		# features from N-1). This matches the expectation for inputs like
-		# ``--date-range 4-4``.
-		#
-		# For debugging, we print out the list of feature-date indices that will be
-		# used for simulation once after it is computed.
-		# ------------------------------------------------------------------
-		date_ids = dates.astype(int).reshape(-1)
-		date_ids_list = date_ids.tolist()
-		date_ids_to_simulate_trading_on: List[int] = []
-		print(f"date ids list size {len(date_ids_list)}  date to handle is {dates_to_handle}")
+		date_ids_array = dates.astype(int).reshape(-1)
+		date_ids_list = date_ids_array.tolist()
+		print(f"date ids list size {len(date_ids_list)} ")
 
-		# for xb, yb in dates_to_handle:
-
-			# Normalise and clamp to the known date ids
-			# if len(dates_to_handle) == 1:
-			# 	# Single-date window: trade on this date using features from the
-			# 	# previous available date, if possible.
-			# 	trade_date = filtered_dates[0]
-			# 	try:
-			# 		trade_idx = date_ids_list.index(trade_date)
-			# 	except ValueError:
-			# 		trade_idx = -1
-			# 	if trade_idx <= 0:
-			# 		raise ValueError(
-			# 			f"Cannot simulate for single date {trade_date}: no prior feature day available"
-			# 		)
-			# 	feature_idx = trade_idx - 1
-			# 	# Ensure we have enough prior days for the model requirements.
-			# 	if feature_idx - required_prior + 1 < 0:
-			# 		raise ValueError(
-			# 			f"Not enough prior days available before feature date {int(date_ids[feature_idx])} "
-			# 			f"to satisfy required_previous_days={required_prior}"
-			# 		)
-			# 	date_ids_to_simulate_trading_on.append(feature_idx)
-			# elif len(filtered_dates) > 1:
-			# 	# Multi-date window: iterate over all but the final element so that we
-			# 	# can trade on the following calendar day.
-			# 	for feature_date in filtered_dates[:-1]:  # d+1 must be < D for trading
-			# 		try:
-			# 			idx = date_ids_list.index(feature_date)
-			# 		except ValueError:
-			# 			continue
-			# 		date_ids_to_simulate_trading_on.append(idx)
-			# print("dates to simulate length ", len(date_ids_to_simulate_trading_on))
-			# if not date_ids_to_simulate_trading_on:
-			# 	raise ValueError(
-			# 		f"No simulation dates found for dates given"
-			# 	)
-			#
 		# For filename compatibility, derive an effective percentage based on
 		# the number of simulated feature dates relative to the total.
 		if dates_to_handle:
-			effective_pct = 100.0 * (len(dates_to_handle) / float(D))
+			effective_pct = 100.0 * (len(dates_to_handle) / float(dates_shape_0))
 		else:
 			effective_pct = 0.0
 		pct = max(0.0, min(100.0, effective_pct))
@@ -275,9 +242,10 @@ def simulate(
 		# encodes either the number of simulated days (``Nd``) or an approximate
 		# percentage of the available window (``Np``), matching what the
 		# comparison/visualisation tools expect.
+		num_days_simulated = len(dates_to_handle) if dates_to_handle else 0
 		stock_simulation_size = (
-			f"{str(len(date_ids_to_simulate_trading_on))}days"
-			if date_ids_to_simulate_trading_on
+			f"{num_days_simulated}days"
+			if num_days_simulated > 0
 			else f"{str(int(pct))}percent"
 		)
 		model_dir = stock_recommender.output_directory
@@ -289,7 +257,7 @@ def simulate(
 		out_path = os.path.join(model_dir, out_name)
 
 		# Write header
-		with open(out_path, "w", encoding="utf-8") as f:
+		with (open(out_path, "w", encoding="utf-8") as f):
 			cols = [
 				"feature_date_id",
 				"open_date_id",
@@ -309,7 +277,10 @@ def simulate(
 				]
 			f.write(",".join(cols) + "\n")
 
-			for feat_vec, label_vec in dates_to_handle:
+			for date_index,time_training_instance in enumerate(dates_to_handle):
+				feat_vec = time_training_instance.feature_vector
+				label_vec = time_training_instance.training_label
+
 				# Build feature vector using prior days information
 				# feat_vec, feature_date_id = _concat_features(
 				# 	X_flat, date_array_index, required_prior, prefer_prior_only, expected_inp, dates
@@ -328,9 +299,9 @@ def simulate(
 						feature_names.append("transactions_normalized")
 
 					dump_feature_window(
-						X_flat=X_flat,
+						X_flat=feat_vec,
 						dates=dates,
-						labels=_Y,
+						labels=label_vec,
 						d=-1,
 						num_prior=required_prior,
 						current_day_change_used=stock_recommender.get_current_day_change_used(),
@@ -343,19 +314,13 @@ def simulate(
 				max_k = max(top_k)
 				req_k = int(max(max_k, 3))
 
-				model_scores ,top_ids_all = stock_recommender.getBuyRecommendations(
-					feat_vec, top_k=req_k, index_base=1, current_date_id=feature_date_id , dbinfo_file=dbinfo_file,
+				model_scores, top_ids_all = stock_recommender.getBuyRecommendations(
+					feat_vec,
+					top_k=req_k,
+					index_base=1,
+					current_date_id=time_training_instance.date_id,
+					dbinfo_file=dbinfo_file,
 				)
-				T_local = model_scores.shape[0]
-				# Sort to get top indices (largest first)
-				idx_desc = np.argsort(model_scores)[::-1]
-				idx_desc = idx_desc[: min(req_k, T_local)]
-				# Map to ticker ids using the canonical recommender's mapping
-				# if example_of_recommenders_loaded._ticker_id_map and len(example_of_recommenders_loaded._ticker_id_map) == example_of_recommenders_loaded._output_size:  # type: ignore[attr-defined]
-				# 	top_ids_all = [int(example_of_recommenders_loaded._ticker_id_map[i]) for i in idx_desc]
-				# else:
-					# Dense indices -> 1..T
-				top_ids_all = [int(i + 1) for i in idx_desc]
 				# For debug columns we treat the averaged scores as the score vector
 				scores_all = model_scores
 
@@ -363,16 +328,25 @@ def simulate(
 				# IMPORTANT: Trades are executed the day AFTER the feature vector date.
 				# We buy at next day's open and sell at next day's close (same day),
 				# so both open/close belong to the next calendar date relative to the feature.
-				trade_idx = date_array_index + 1
-				if trade_idx >= D:
-					# No next-day data available; skip this index (should be rare due
-					# to how sim_indices is constructed).
+
+				# We need to find the NEXT date after time_training_instance.date_id
+				# in the original dates array.
+				current_date_id = int(time_training_instance.date_id)
+				matching_indices = np.where(dates == current_date_id)[0]
+				if len(matching_indices) == 0:
 					continue
+
+				orig_idx = int(matching_indices[0])
+				trade_idx_in_dates = orig_idx + 1
+				if trade_idx_in_dates >= len(dates):
+					# No next-day data available
+					continue
+
+				trade_date_id = int(dates[trade_idx_in_dates])
 
 				# Determine the union of tickers we'll need O/C for (max K across portfolios)
 				max_k = max(top_k)
 				needed_tickers = top_ids_all[:max_k] if top_ids_all is not None else []
-				trade_date_id = int(dates[trade_idx])
 				# Fetch open/close for this trade day and the selected tickers only
 				oc_map = fetch_open_close_for_date_tickers(
 					dbinfo_file=dbinfo_file,
@@ -431,12 +405,31 @@ def simulate(
 							cval = pair1[1]
 							if np.isfinite(cval):
 								raw_close_str = f"{float(cval):.6f}"
-						# close_ratio from features X_flat for the day, assuming feature 0 is close_ratio
+						# close_ratio from feat_vec for the day, assuming feature 0 is close_ratio
 						F = TF // T if T > 0 else 0
 						if F > 0 and 0 <= i1 < T:
 							feat_idx = (i1 * F) + 0
-							if 0 <= feat_idx < X_flat.shape[1]:
-								cr = X_flat[date_array_index, feat_idx]
+							# feat_vec is flattened (1, expected_inp) or (expected_inp,)
+							# X_flat was (num_dates, T * F_per_ticker)
+							# feat_vec as returned by time_training_instance is (T * F_per_ticker * num_days)
+							# Actually let's check what feat_vec is.
+							# In TimeTrainingInstance, feature_vector is the input to the model.
+							# If num_prior > 0, it has multiple days of data.
+							# We want the close_ratio of the CURRENT day (last day in the window).
+
+							# If we can't easily get it from feat_vec without knowing the exact layout,
+							# let's try to use the original X_flat if we can find the right index.
+							# We need the index of time_training_instance.date_id in the original dates array.
+
+							orig_date_idx_debug = -1
+							# dates is available in the outer scope of simulate()
+							if dates is not None:
+								matching_indices_debug = np.where(dates == time_training_instance.date_id)[0]
+								if len(matching_indices_debug) > 0:
+									orig_date_idx_debug = int(matching_indices_debug[0])
+
+							if orig_date_idx_debug >= 0:
+								cr = X_flat[orig_date_idx_debug, feat_idx]
 								if np.isfinite(cr):
 									close_ratio_str = f"{float(cr):.6f}"
 
@@ -472,7 +465,7 @@ def simulate(
 				# 	f.write(",".join(row) + "\n")
 				# else:
 				row_vals = [
-					str(feature_date_id if feature_date_id is not None else ""),
+					str(time_training_instance.date_id if time_training_instance.date_id is not None else ""),
 					str(open_date_id),
 					str(close_date_id),
 					topn_str,
@@ -551,14 +544,12 @@ def simulate_using_models_passed(models_passed: List[StockRecommenderFromModel],
 	try:
 		# Always run individual rep simulations for any detected rep* dirs
 		if models_passed:
-			print(f"Running simulation for  ...")
+			print(f"Running simulation...")
 			simulate(
-				None,
 				models_passed,
 				top_k=top_k_parsed,
 				dbinfo_file=args.dbinfo_file,
 				limit=args.limit,
-				prefer_prior_only=bool(args.prior_only),
 				debug_sim_output=bool(args.debug_sim_output),
 				dates_to_handle=dates_to_handle,
 			)
@@ -643,7 +634,30 @@ def main(argv: Optional[List[str]] = None) -> None:
 
 	model_arg = args.model
 
-	stock_recommenders = create_list_of_stock_recommender_models_from_single_run_directory_with_repeats(args.ensemble_normalize, model_arg)
+	# In simulate_trading, we often want to simulate the ensemble of models found in the directory.
+	# create_list_of_stock_recommender_models_from_single_run_directory_with_repeats returns
+	# [root_model, rep1_model, rep2_model, ...]
+	# If we want to simulate them separately, the current simulate() loop handles it.
+	# If we want to ensemble them, we should pass them as a list to a SINGLE StockRecommenderFromModel.
+
+	if args.ensemble_normalize:
+		# Create a single ensemble recommender
+		stock_recommenders = [StockRecommenderFromModel(model_arg, ensemble_normalize=True)]
+	else:
+		# If it's a directory with rep* subdirs, this returns [root_model, rep1_model, rep2_model, ...]
+		# If it's just a single model directory, it returns [root_model]
+		stock_recommenders = create_list_of_stock_recommender_models_from_single_run_directory_with_repeats(False, model_arg)
+
+	# If it's a directory with multiple models and NOT ensemble mode,
+	# we want to run them separately. But we should skip the root model if it's
+	# just a container for reps, to avoid redundant simulations.
+	# Actually, create_list_of_stock_recommender_models_from_single_run_directory_with_repeats
+	# already includes the root model. If there are reps, the root model might be
+	# uninitialized or just an ensemble itself.
+	if len(stock_recommenders) > 1 and not args.ensemble_normalize:
+		# If there are reps, the first one is the root directory.
+		# Usually we only want to simulate the reps.
+		stock_recommenders = [r for r in stock_recommenders if "rep" in os.path.basename(r.output_directory).lower()]
 
 	# Start processing from the user-provided model argument
 	simulate_using_models_passed(stock_recommenders, args, top_k_parsed=top_k_parsed, dates_to_handle=dates_to_handle)

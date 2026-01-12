@@ -31,9 +31,11 @@ def eval_epoch(
 	)
 	rde_sum = 0.0
 	#rank_err_sum = 0.0
+	from trainer.util.utils import tensorize_and_sanitize
 	with torch.no_grad():
 		with amp_cm:
-			for xb, yb in batch_iter:
+			for instance in batch_iter:
+				xb, yb = tensorize_and_sanitize(instance.features, instance.label)
 				# print(xb.shape)
 				# print(yb.shape)
 				pred = model(xb)

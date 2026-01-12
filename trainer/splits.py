@@ -4,21 +4,22 @@ import math
 import random
 from typing import TYPE_CHECKING
 
-from trainer.datasets import RangeDataset, IndexDataset
+from trainer.dataset.datasets import TimeTrainingInstanceDataset, TimeTrainingInstanceSubset
+from training_instance_provider import TrainingInstanceProvider
 
 if TYPE_CHECKING:  # pragma: no cover - import for type checkers only
 	from trainer.state.family_run import FamilyRun
 
 
 def split_datasets(
-	provider,
+	provider: TrainingInstanceProvider,
 	family_run: FamilyRun,
 	max_inst: int,
 	train_validation_and_test_set_start_date_id: int | None = None,
 	train_validation_and_test_set_end_date_id: int | None = None,
 	train_percent: float = 0.90,
 	validation_percent: float = 0.04,
-) -> tuple[RangeDataset | IndexDataset, RangeDataset | IndexDataset, RangeDataset | IndexDataset]:
+) -> tuple[TimeTrainingInstanceSubset, TimeTrainingInstanceSubset, TimeTrainingInstanceSubset]:
 	"""Create train/val/test datasets according to split mode and args.seed.
 
 	The caller can optionally restrict the *source region* of the dataset from
@@ -30,11 +31,12 @@ def split_datasets(
 	# Total number of available instances (1-based indexing is used
 	# throughout this module).
 	length_of_date_id_array = max_inst
+	base_ds = TimeTrainingInstanceDataset(provider)
 	if length_of_date_id_array <= 0:
 		return (
-			RangeDataset(provider, 1, 0),
-			RangeDataset(provider, 1, 0),
-			RangeDataset(provider, 1, 0),
+			TimeTrainingInstanceSubset(base_ds, []),
+			TimeTrainingInstanceSubset(base_ds, []),
+			TimeTrainingInstanceSubset(base_ds, []),
 		)
 
 	# Determine the effective range [date_array_index_for_start_date, date_array_index_for_end_date] (inclusive) that is
@@ -132,7 +134,7 @@ def split_datasets(
 		# Degenerate case: nothing left after applying head/tail trimming.
 		# Fall back to empty datasets; the caller will normally detect
 		# "not enough instances" earlier, but we guard defensively here.
-		empty = IndexDataset(provider, [])
+		empty = TimeTrainingInstanceSubset(base_ds, [])
 		return empty, empty, empty
 
 	usable_total = date_array_index_for_end_date - date_array_index_for_start_date + 1
@@ -141,22 +143,22 @@ def split_datasets(
 	if family_run.split_mode == "sequential":
 		total_instances_end_date_index_for_training = date_array_index_for_start_date + int(math.floor(train_percent * usable_total)) - 1
 		total_instances_end_date_index_for_training = max(date_array_index_for_start_date, min(total_instances_end_date_index_for_training, date_array_index_for_end_date))
-		train_ds = RangeDataset(provider, date_array_index_for_start_date, total_instances_end_date_index_for_training)
+		train_ds = TimeTrainingInstanceSubset(base_ds, range(date_array_index_for_start_date - 1, total_instances_end_date_index_for_training))
 
 		total_instances_end_date_index_for_validation = date_array_index_for_start_date + int(math.floor((train_percent + validation_percent) * usable_total)) - 1
 		val_start = total_instances_end_date_index_for_training + 1
 		val_end = min(total_instances_end_date_index_for_validation, date_array_index_for_end_date)
 		if val_start > val_end:
-			val_ds = RangeDataset(provider, date_array_index_for_start_date, date_array_index_for_start_date - 1)
+			val_ds = TimeTrainingInstanceSubset(base_ds, [])
 			test_start = val_start
 		else:
-			val_ds = RangeDataset(provider, val_start, val_end)
+			val_ds = TimeTrainingInstanceSubset(base_ds, range(val_start - 1, val_end))
 			test_start = val_end + 1
 
 		if test_start > date_array_index_for_end_date:
-			test_ds = RangeDataset(provider, date_array_index_for_start_date, date_array_index_for_start_date - 1)
+			test_ds = TimeTrainingInstanceSubset(base_ds, [])
 		else:
-			test_ds = RangeDataset(provider, test_start, date_array_index_for_end_date)
+			test_ds = TimeTrainingInstanceSubset(base_ds, range(test_start - 1, date_array_index_for_end_date))
 #		mixed_n = total_instances_end_date_index_for_training - date_array_index_for_start_date + 1  + total_instances_end_date_index_for_validation - total_instances_start_date_index_for_validation + 1
 #		print(f"Sequential Training set size: {total_instances_end_date_index_for_training}, validation set size: {total_instances_end_date_index_for_validation}, totalk testing set size: {total_instances_start_date_index_for_testing},   total instances: {usable_total}")
 	elif family_run.split_mode == "random_order_train_validation" :
@@ -172,12 +174,12 @@ def split_datasets(
 		training_set_number_of_instances = min(training_set_number_of_instances, usable_total)
 		validation_set_number_of_instances = min(validation_set_number_of_instances, max(0, usable_total - training_set_number_of_instances))
 		test_set_number_of_instances = max(0, usable_total - training_set_number_of_instances - validation_set_number_of_instances)
-		train_idx = indices[:training_set_number_of_instances]
-		val_idx = indices[training_set_number_of_instances:training_set_number_of_instances + validation_set_number_of_instances]
-		test_idx = indices[training_set_number_of_instances + validation_set_number_of_instances:training_set_number_of_instances + validation_set_number_of_instances + test_set_number_of_instances]
-		train_ds = IndexDataset(provider, train_idx)
-		val_ds = IndexDataset(provider, val_idx)
-		test_ds = IndexDataset(provider, test_idx)
+		train_idx = [i - 1 for i in indices[:training_set_number_of_instances]]
+		val_idx = [i - 1 for i in indices[training_set_number_of_instances:training_set_number_of_instances + validation_set_number_of_instances]]
+		test_idx = [i - 1 for i in indices[training_set_number_of_instances + validation_set_number_of_instances:training_set_number_of_instances + validation_set_number_of_instances + test_set_number_of_instances]]
+		train_ds = TimeTrainingInstanceSubset(base_ds, train_idx)
+		val_ds = TimeTrainingInstanceSubset(base_ds, val_idx)
+		test_ds = TimeTrainingInstanceSubset(base_ds, test_idx)
 #		mixed_n = training_set_number_of_instances + validation_set_number_of_instances
 	else:
 		# mix_training_and_validation: training and validation sets are chosen
@@ -204,15 +206,15 @@ def split_datasets(
 
 		# The test set is the sequential tail that remains within the usable
 		# subrange.
-		test_idx = list(range(date_array_index_for_start_date + mixed_n, date_array_index_for_end_date + 1))
+		test_idx = [i - 1 for i in range(date_array_index_for_start_date + mixed_n, date_array_index_for_end_date + 1)]
 
 		# Split the mixed head portion into train and validation subsets.
-		train_idx = mixed_indices[:training_set_number_of_instances]
-		val_idx = mixed_indices[training_set_number_of_instances:training_set_number_of_instances + validation_set_number_of_instances]
+		train_idx = [i - 1 for i in mixed_indices[:training_set_number_of_instances]]
+		val_idx = [i - 1 for i in mixed_indices[training_set_number_of_instances:training_set_number_of_instances + validation_set_number_of_instances]]
 
-		train_ds = IndexDataset(provider, train_idx)
-		val_ds = IndexDataset(provider, val_idx)
-		test_ds = IndexDataset(provider, test_idx)
+		train_ds = TimeTrainingInstanceSubset(base_ds, train_idx)
+		val_ds = TimeTrainingInstanceSubset(base_ds, val_idx)
+		test_ds = TimeTrainingInstanceSubset(base_ds, test_idx)
 
 	return train_ds, val_ds, test_ds
 

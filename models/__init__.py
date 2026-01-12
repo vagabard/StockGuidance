@@ -37,6 +37,7 @@ def resolve_activation_factory(name_or_none: str) -> Module | None:
 	name = str(name_or_none or "relu").lower()
 	if name in _ACT_ALIASES:
 		cls, args = _ACT_ALIASES[name]
+
 		return lambda cls=cls, args=args: cls(*args)  # fresh instance each call
 	# Fallback: try to get attribute from torch_interface.nn by name
 	if hasattr(nn, name.capitalize()):

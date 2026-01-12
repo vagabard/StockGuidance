@@ -225,7 +225,6 @@ def _run_one_day_simulation(
 #		percent=1.0,
 		top_k=top_k,
 		limit=None,
-		prefer_prior_only=True,
 		debug_sim_output=False,
 		dates_to_handle=date_ids_to_handle,
 	)
@@ -276,7 +275,7 @@ def _instance_index_to_date_id(provider: TrainingInstanceProvider, instance_inde
 	"""Map a 1-based instance index to its underlying date_id.
 
 	This mirrors the mapping used by
-	:py:meth:`TrainingInstanceProvider.get_feature_and_label_pair` so that we can
+	:py:meth:`TrainingInstanceProvider.get_time_training_instance` so that we can
 	log human-readable date identifiers for debugging purposes.
 	"""
 

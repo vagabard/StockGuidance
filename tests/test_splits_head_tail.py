@@ -1,63 +1,92 @@
 from __future__ import annotations
 
 import types
-
+from trainer.dataset.datasets import TimeTrainingInstanceDataset, TimeTrainingInstanceSubset
+from trainer.dataset.time_training_instance import TimeTrainingInstance
 from trainer.splits import split_datasets
 
 
 class _DummyProvider:
-	"""Minimal provider implementing get_feature_and_label_pair for Range/IndexDataset.
+	"""Minimal provider implementing enough for split_datasets and TimeTrainingInstanceDataset."""
 
-	We only care about indices, so the actual tensors/arrays are irrelevant; we
-	return the index itself as both feature and label for easy inspection.
-	"""
+	def __init__(self, max_inst=100):
+		self.max_inst = max_inst
+		# For split_datasets to resolve dates
+		self.cumulative_dates_for_train_validation_and_test_sets = [20210101 + i for i in range(max_inst)]
+		self.number_of_prior_days_to_include_in_feature = 0
 
-	def get_feature_and_label_pair(self, idx: int):
-		return (idx, idx)
+	def get_maximum_number_of_test_train_instances(self):
+		return self.max_inst
+
+	def get_time_training_instance(self, idx: int) -> TimeTrainingInstance:
+		# TrainingInstanceProvider uses 1-based indexing
+		return TimeTrainingInstance(
+			feature_vector=[float(idx)],
+			date=types.SimpleNamespace(), # Mock date
+			date_id=20210101 + idx - 1,
+			training_label=[float(idx)],
+			num_days=1
+		)
 
 
-def _make_args(split_mode: str, head: float = 0.0, tail: float = 0.0):
-	args = types.SimpleNamespace()
-	args.split_mode = split_mode
-	args.seed = 123
-	args.data_head_ignore_percent = head
-	args.data_tail_ignore_percent = tail
-	return args
+def _make_family_run(split_mode: str):
+	family_run = types.SimpleNamespace()
+	family_run.split_mode = split_mode
+	family_run.random_seed_splits = 123
+	return family_run
 
 
 def _extract_indices(ds):
-	# RangeDataset has start_idx/end_idx; IndexDataset has indices list.
-	if hasattr(ds, "indices"):
+	if isinstance(ds, TimeTrainingInstanceSubset):
 		return list(ds.indices)
-	return list(range(int(ds.start_idx), int(ds.end_idx) + 1))
+	return []
 
 
 def test_sequential_head_tail_trimming():
-	provider = _DummyProvider()
 	max_inst = 100
-	args = _make_args("sequential", head=0.70, tail=0.10)
-	train_ds, val_ds, test_ds = split_datasets(provider, args, max_inst, train_percent=0.5, validation_percent=0.25)
+	provider = _DummyProvider(max_inst)
+	family_run = _make_family_run("sequential")
 
-	train_idx = _extract_indices(train_ds)
-	val_idx = _extract_indices(val_ds)
-	test_idx = _extract_indices(test_ds)
+	# split_datasets now requires start/end date_id instead of head/tail percent
+	start_id = 20210101 + 70 # Index 71
+	end_id = 20210101 + 89   # Index 90
+
+	train_ds, val_ds, test_ds = split_datasets(
+		provider, family_run, max_inst,
+		train_validation_and_test_set_start_date_id=start_id,
+		train_validation_and_test_set_end_date_id=end_id,
+		train_percent=0.5, validation_percent=0.25
+	)
+
+	train_idx = [i + 1 for i in _extract_indices(train_ds)]
+	val_idx = [i + 1 for i in _extract_indices(val_ds)]
+	test_idx = [i + 1 for i in _extract_indices(test_ds)]
 
 	# Usable slice should be from 71..90 inclusive (20 instances)
-	assert min(train_idx + val_idx + test_idx) >= 71
-	assert max(train_idx + val_idx + test_idx) <= 90
-	# Total count should equal size of slice
-	assert len(train_idx) + len(val_idx) + len(test_idx) == 20
+	all_idx = train_idx + val_idx + test_idx
+	assert min(all_idx) >= 71
+	assert max(all_idx) <= 90
+	assert len(all_idx) == 20
 
 
 def test_random_order_head_tail_trimming():
-	provider = _DummyProvider()
 	max_inst = 100
-	args = _make_args("random_order_train_validation", head=0.70, tail=0.10)
-	train_ds, val_ds, test_ds = split_datasets(provider, args, max_inst, train_percent=0.5, validation_percent=0.25)
+	provider = _DummyProvider(max_inst)
+	family_run = _make_family_run("random_order_train_validation")
 
-	train_idx = sorted(_extract_indices(train_ds))
-	val_idx = sorted(_extract_indices(val_ds))
-	test_idx = sorted(_extract_indices(test_ds))
+	start_id = 20210101 + 70
+	end_id = 20210101 + 89
+
+	train_ds, val_ds, test_ds = split_datasets(
+		provider, family_run, max_inst,
+		train_validation_and_test_set_start_date_id=start_id,
+		train_validation_and_test_set_end_date_id=end_id,
+		train_percent=0.5, validation_percent=0.25
+	)
+
+	train_idx = [i + 1 for i in _extract_indices(train_ds)]
+	val_idx = [i + 1 for i in _extract_indices(val_ds)]
+	test_idx = [i + 1 for i in _extract_indices(test_ds)]
 
 	all_idx = train_idx + val_idx + test_idx
 	assert min(all_idx) >= 71
@@ -66,14 +95,23 @@ def test_random_order_head_tail_trimming():
 
 
 def test_mix_training_and_validation_head_tail_trimming():
-	provider = _DummyProvider()
 	max_inst = 100
-	args = _make_args("mix_training_and_validation", head=0.70, tail=0.10)
-	train_ds, val_ds, test_ds = split_datasets(provider, args, max_inst, train_percent=0.5, validation_percent=0.25)
+	provider = _DummyProvider(max_inst)
+	family_run = _make_family_run("mix_training_and_validation")
 
-	train_idx = sorted(_extract_indices(train_ds))
-	val_idx = sorted(_extract_indices(val_ds))
-	test_idx = sorted(_extract_indices(test_ds))
+	start_id = 20210101 + 70
+	end_id = 20210101 + 89
+
+	train_ds, val_ds, test_ds = split_datasets(
+		provider, family_run, max_inst,
+		train_validation_and_test_set_start_date_id=start_id,
+		train_validation_and_test_set_end_date_id=end_id,
+		train_percent=0.5, validation_percent=0.25
+	)
+
+	train_idx = [i + 1 for i in _extract_indices(train_ds)]
+	val_idx = [i + 1 for i in _extract_indices(val_ds)]
+	test_idx = [i + 1 for i in _extract_indices(test_ds)]
 
 	all_idx = train_idx + val_idx + test_idx
 	assert min(all_idx) >= 71

@@ -47,7 +47,7 @@ def test_provider_returns_concatenated_features_and_labels(provider, synthetic_d
 	max_inst = provider.get_maximum_number_of_test_train_instances()
 	assert max_inst == 2
 
-	features, lbls = provider.get_feature_and_label_pair(1)
+	features, lbls = provider.get_time_training_instance(1)
 
 	expected_features = np.concatenate([x_flat[1], x_flat[0]], axis=0)
 	np.testing.assert_array_equal(features, expected_features)
@@ -67,8 +67,8 @@ def test_provider_validates_prior_days(provider):
 def test_provider_validates_instance_indices(provider):
 	provider.set_how_many_days_in_past_to_use(0)
 	with pytest.raises(TypeError):
-		provider.get_feature_and_label_pair("1")
+		provider.get_time_training_instance("1")
 	with pytest.raises(IndexError):
-		provider.get_feature_and_label_pair(0)
+		provider.get_time_training_instance(0)
 	with pytest.raises(IndexError):
-		provider.get_feature_and_label_pair(provider.get_maximum_number_of_test_train_instances() + 1)
+		provider.get_time_training_instance(provider.get_maximum_number_of_test_train_instances() + 1)

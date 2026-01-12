@@ -32,9 +32,6 @@ def main() -> int:
         provider = create_provider(
             use_torch=use_torch,
             limit=limit,
-            # DB connection can be overridden via environment if needed
-            user=os.getenv("MYSQL_USER", "Redbeard"),
-            password=os.getenv("MYSQL_PASSWORD", "3YZs#z5GOJKdea"),
         )
         # Loop prior-day window from 0 to 5 (inclusive)
         one_day_feature_length = None  # captured when n_prior == 0
@@ -57,7 +54,8 @@ def main() -> int:
                 continue
 
             idx = instance_index if instance_index <= max_n else max_n
-            features, labels = provider.get_feature_and_label_pair(idx)
+            instance = provider.get_time_training_instance(idx)
+            features, labels = instance.features, instance.label
 
             # Print basic info for this configuration
             print(f"n_prior={n_prior}: max_instances={max_n}, feature_length={len(features)}, label_length={len(labels)}")
@@ -146,7 +144,8 @@ def main() -> int:
                 continue
 
             idx = instance_index_233 if instance_index_233 <= max_n else max_n
-            features, labels = provider.get_feature_and_label_pair(idx)
+            instance = provider.get_time_training_instance(idx)
+            features, labels = instance.features, instance.label
 
             # Print basic info for this configuration
             print(f"[233] n_prior={n_prior}: max_instances={max_n}, feature_length={len(features)}, label_length={len(labels)}")
@@ -242,7 +241,8 @@ def main() -> int:
                 max_n0 = provider.get_maximum_number_of_test_train_instances()
                 if max_n0 > 0:
                     idx0 = 1 if 1 <= max_n0 else max_n0
-                    feats0, _ = provider.get_feature_and_label_pair(idx0)
+                    instance0 = provider.get_time_training_instance(idx0)
+                    feats0 = instance0.features
                     one_day_feature_length = int(len(feats0))
             except Exception:
                 one_day_feature_length = None
@@ -279,7 +279,8 @@ def main() -> int:
                 continue
 
             idx = inst if inst <= max_n else max_n
-            features, labels = provider.get_feature_and_label_pair(idx)
+            instance = provider.get_time_training_instance(idx)
+            features, labels = instance.features, instance.label
             print(f"[post inst={inst}] Using max_prior={max_prior_tested}, feature_length={len(features)}, label_length={len(labels)}")
 
             # Iterate day_index 0..max_prior_tested and print 7-value sequences at the requested starts

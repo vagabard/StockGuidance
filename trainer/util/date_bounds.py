@@ -22,6 +22,7 @@ class DateBoundResolver:
 		(lowest_bound, highest_bound) = database_date_id_queries.load_date_id_range(dbinfo_file="dbinfo.id", feature_vector_day_size_buffer=feature_vector_day_size_buffer)
 		self.lowest_date_id = lowest_bound
 		self.highest_date_id = highest_bound
+		print(f"Loaded date range: {lowest_bound} to {highest_bound}")
 
 	def resolve_bound(self, raw_bound: str, which: DateBoundType) -> int:
 		"""Resolve a user-specified bound to an absolute ``date_id``.
@@ -34,7 +35,7 @@ class DateBoundResolver:
 		  N steps back from the last available date.
 		"""
 
-		print(raw_bound, "   is type ", type(raw_bound))
+		#print(raw_bound, "   is type ", type(raw_bound))
 
 		if raw_bound is None:
 			return int(self.lowest_date_id if which == DateBoundType.START else self.highest_date_id)

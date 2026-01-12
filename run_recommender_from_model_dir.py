@@ -191,8 +191,8 @@ def main(argv: Optional[list[str]] = None) -> int:
 
 	# Look up human-readable transaction_date for logging, if available.
 	recent_tx_date = _lookup_transaction_date_for_date_id(feature_date_id, dbinfo_file=args.dbinfo_file)
-	scores: list[Any]
-	top_ids: list[Any]
+	scores: np.ndarray
+	top_ids: list[int]
 
 
 	# Always pass current_date_id and dbinfo_file so that the transactions

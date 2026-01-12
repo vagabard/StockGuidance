@@ -188,7 +188,7 @@ def build_parser() -> argparse.ArgumentParser:
 	# 	),
 	# )
 	parser.add_argument(
-		"--raw-train-start-with-special-characters",
+		'--raw-train-start-with-special-characters','--train-start-date-id',
 		type=str,
 		default=None,
 		help=(
@@ -203,7 +203,7 @@ def build_parser() -> argparse.ArgumentParser:
 		),
 	)
 	parser.add_argument(
-		"--raw-train-end-with-special-characters",
+		'--raw-train-end-with-special-characters','--train-end-date-id',
 		type=str,
 		default=None,
 		help=(
