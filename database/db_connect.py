@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 from typing import Optional, Tuple
 
-import mysql
+import mysql.connector
 import pymysql
 
 try:
@@ -68,18 +68,30 @@ def get_connection(
 	the specified file.
 	"""
 
-	current_directory = Path(os.getcwd())
-	while not os.path.exists(os.path.join(current_directory, dbinfo_file)):
-		current_directory = current_directory.parent
-	os.chdir(current_directory)
+	search_path = Path(os.getcwd())
+	found_path = None
+
+	# Try current directory and parents
+	current = search_path
+	while True:
+		candidate = current / dbinfo_file
+		if candidate.exists():
+			found_path = candidate
+			break
+		if current.parent == current: # Reached root
+			break
+		current = current.parent
+
+	if found_path is None:
+		raise FileNotFoundError(f"dbinfo_file not found: {dbinfo_file} searching up from: {search_path}")
 
 	# Load configuration from object or file
 	if db_info is not None and hasattr(db_info, "with_env_defaults"):
 		info = db_info.with_env_defaults()
 	else:
-		loaded = load_dbinfo(dbinfo_file)
+		loaded = load_dbinfo(str(found_path))
 		if loaded is None:
-			raise FileNotFoundError(f"Database info file not found or invalid: {dbinfo_file}")
+			raise FileNotFoundError(f"Database info file not found or invalid: {found_path}")
 		info = loaded.with_env_defaults()
 
 	drv_name, drv_mod = _try_import_drivers(info.driver)

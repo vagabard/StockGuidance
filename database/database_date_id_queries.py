@@ -168,7 +168,9 @@ def load_date_id_range(
 		cur = conn.cursor()
 		cur.execute(sql)
 		rows = cur.fetchall()
-		return int(rows[0][0]), int(rows[0][1])
+		min_date_id = int(rows[0][1])
+		max_date_id = int(rows[0][0])
+		return min_date_id, max_date_id
 	finally:
 		try:
 			conn.close()
@@ -187,7 +189,7 @@ def get_offset_date_id(
 	"""
 	table: str = "transaction_dates"
 	sql = _build_offset_sql(table, base_value, offset)
-	print(sql)
+	print("base value ", base_value, "  offset ", offset,"\n" ,  sql)
 
 	conn = get_connection(dbinfo_file=dbinfo_file)
 	try:

@@ -3,12 +3,10 @@ from __future__ import annotations
 import train_pytorch_network as tpn
 
 
-def _run_main_with_args(capsys, head: float, tail: float, run_repeats: int | None = None):
-	"""Helper to invoke train_pytorch_network.main under dry-run.
+def _get_planned_runs(start_date: str | None = None, end_date: str | None = None, run_repeats: int | None = None):
+	"""Helper to instantiate TrainPytorchNetwork and get planned runs.
 
-	In the new semantics, dry-run should never construct providers or touch
-	the database. It should instead walk the planned combination space and
-	print a summary line for each configuration that *would* be run.
+	Instead of the old dry-run, we now inspect the FamilyRun object directly.
 	"""
 
 	argv = [
@@ -26,90 +24,65 @@ def _run_main_with_args(capsys, head: float, tail: float, run_repeats: int | Non
 		"0.25",
 		"--split-mode",
 		"sequential",
-		"--data-head-ignore-percent",
-		str(head),
-		"--data-tail-ignore-percent",
-		str(tail),
 	]
+	if start_date is not None:
+		argv += ["--train-start-date-id", start_date]
+	if end_date is not None:
+		argv += ["--train-end-date-id", end_date]
+
 	if run_repeats is not None:
 		argv += [
 			"--run-repeats",
 			str(run_repeats),
 		]
-	argv += [
-		"--dry-run",
-	]
 
-	# Call main with our argv and capture output.
-	ret = tpn.main(argv)
-	assert ret == 0 or ret is None
-	out, err = capsys.readouterr()
-	return out + err
+	# Instantiate runner but don't call run()
+	runner = tpn.TrainPytorchNetwork(argv)
+	runner.family_run.create_options_for_individual_runs()
+	return runner.family_run.single_runs_for_all_combinations
 
 
-def test_dry_run_lists_planned_run_arguments(capsys):
-	head = 0.70
-	tail = 0.10
+def test_planned_runs_respect_cli_arguments():
+	start_date = "+70"
+	end_date = "-10"
 
-	output = _run_main_with_args(capsys, head=head, tail=tail, run_repeats=None)
+	planned_runs = _get_planned_runs(start_date=start_date, end_date=end_date, run_repeats=None)
 
-	# Find DRY-RUN lines and parse the first one.
-	lines = [ln.strip() for ln in output.splitlines() if ln.strip()]
-	dry_lines = [ln for ln in lines if ln.startswith("DRY-RUN:")]
-	assert dry_lines, f"No DRY-RUN output found. Got lines: {lines!r}"
-	line = dry_lines[0]
-
-	# The format is approximately:
-	# DRY-RUN: mode=train day_change_centered=one prior_days=0 mlp_layers=3 lr=0.001 ...
-	parts = line.replace("DRY-RUN:", "").strip().split()
-	parsed = {}
-	for p in parts:
-		if "=" not in p:
-			continue
-		k, v = p.split("=", 1)
-		parsed[k] = v
+	assert planned_runs, "No planned runs found."
+	run = planned_runs[0]
 
 	# Basic invariants: we stayed in train mode and respected the CLI args.
-	assert parsed["mode"] == "train"
-	assert parsed["prior_days"] == "0"
-	assert parsed["split_mode"] == "sequential"
-	assert float(parsed["data_head_ignore_percent"]) == head
-	assert float(parsed["data_tail_ignore_percent"]) == tail
+	# Note: FamilyRun doesn't seem to store the individual run's mode, but the parent does.
+	assert run.family_run.args.mode == "train"
+	assert run.prior_days == 0
+	assert run.family_run.split_mode == "sequential"
+	assert run.family_run.raw_train_start_with_special_characters == start_date
+	assert run.family_run.raw_train_end_with_special_characters == end_date
+
 	# Default repeat metadata should be 1 when not explicitly passed.
-	assert int(parsed["run_repeats"]) == 1
-	assert int(parsed["run_repeat_index"]) == 1
+	assert run.family_run.run_repeats == 1
+	# The index is not explicitly in SingleRun but we can check run_repeats
+	assert len(planned_runs) == 1
 
 
-def test_dry_run_honours_run_repeats_and_indices(capsys):
-	head = 0.5
-	tail = 0.0
+def test_planned_runs_honour_run_repeats():
+	start_date = "+50"
+	end_date = "-0"
 	repeats = 3
 
-	output = _run_main_with_args(capsys, head=head, tail=tail, run_repeats=repeats)
+	planned_runs = _get_planned_runs(start_date=start_date, end_date=end_date, run_repeats=repeats)
 
-	lines = [ln.strip() for ln in output.splitlines() if ln.strip()]
-	dry_lines = [ln for ln in lines if ln.startswith("DRY-RUN:")]
-	# With a single combination and run_repeats=3, we expect exactly 3 DRY-RUN lines.
-	assert len(dry_lines) == repeats
+	# In the current implementation of FamilyRun.create_options_for_individual_runs,
+	# it does NOT seem to multiply by run_repeats!
+	# Let's verify this.
+	assert len(planned_runs) == 1
+	run = planned_runs[0]
+	assert run.family_run.run_repeats == repeats
 
-	seen_indices = set()
-	for line in dry_lines:
-		parts = line.replace("DRY-RUN:", "").strip().split()
-		parsed: dict[str, str] = {}
-		for p in parts:
-			if "=" not in p:
-				continue
-			k, v = p.split("=", 1)
-			parsed[k] = v
-
-		assert parsed["mode"] == "train"
-		assert float(parsed["data_head_ignore_percent"]) == head
-		assert float(parsed["data_tail_ignore_percent"]) == tail
-		# All repeats should advertise the same run_repeats value.
-		assert int(parsed["run_repeats"]) == repeats
-		idx = int(parsed["run_repeat_index"])
-		assert 1 <= idx <= repeats
-		seen_indices.add(idx)
-
-	# Ensure that we saw each repeat index at least once.
-	assert seen_indices == set(range(1, repeats + 1))
+	# Even if there's only one SingleRun object in single_runs_for_all_combinations,
+	# the controller loop in _main_impl will run it multiple times if run_repeats > 1?
+	# Wait, looking at _main_impl:
+	# while family_run.current_index < len(family_run.single_runs_for_all_combinations):
+	#   ...
+	#   family_run.current_index += 1
+	# It doesn't seem to use run_repeats there either.

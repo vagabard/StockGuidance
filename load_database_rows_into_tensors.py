@@ -43,7 +43,7 @@ import argparse
 import os
 import time
 import traceback
-from typing import Optional, Tuple, List, Dict
+from typing import Optional, Tuple, List, Dict, Set
 
 import numpy as np
 
@@ -100,7 +100,7 @@ ORDER BY ddsd.date_id ASC, ddsd.ticker_id ASC	"""
 #     ORDER BY ddsd.date_id
 # ) AS next_day_change_in_price
 
-def SELECT_VARIABLE_DATA_SQL(day_change_centered: str, current_day_change = False, volume_ratio = False, vwap_ratio = False, tranaction_ratio = False, start_date_id:Optional[str] = "", end_date_id:Optional[str] = "") -> str:
+def SELECT_VARIABLE_DATA_SQL(day_change_centered: str, current_day_change = False, volume_ratio = False, vwap_ratio = False, tranaction_ratio = False, only_use_tickers_without_missing_dates = True, start_date_id:Optional[int] = -1, end_date_id:Optional[int] = -1, ticker_pool_end_date_id:Optional[int] = None) -> str:
 	"""Build SQL that selects only close ratio as the single feature plus the chosen label.
 
 	day_change_centered:
@@ -144,19 +144,54 @@ SELECT
 	ddsd.close_ratio_to_prior,
 	{additional_fields_to_select}
 FROM daily_delta_stock_data ddsd """
-	print(start_date_id, end_date_id, type(start_date_id), type(end_date_id))
-	if start_date_id is not None or end_date_id is not None:
-		full_query += f"""WHERE """
+	if only_use_tickers_without_missing_dates:
+		full_query += f"""INNER JOIN ticker_symbol ts ON ddsd.ticker_id = ts.id AND ts.missing_dates = FALSE """
+
+	# Limit to tickers present on both start and end date
+	ticker_pool_end = ticker_pool_end_date_id if ticker_pool_end_date_id is not None else end_date_id
+	full_query += f"""
+	INNER JOIN (
+	""" + create_ticker_id_selection_sql(only_use_tickers_without_missing_dates, start_date_id, ticker_pool_end) + f"""
+	) AS boundary_tickers ON ddsd.ticker_id = boundary_tickers.ticker_id """
+
+	if start_date_id is not None or end_date_id is not None :
+		where_clause = f"""WHERE """
 		if start_date_id is not None:
-			full_query += f"""ddsd.date_id > {start_date_id} """
-		if start_date_id is not None and end_date_id is not None:
-			full_query += f"""AND """
+			where_clause += f"""ddsd.date_id > {start_date_id} """
 		if end_date_id is not None:
-			full_query += f"""ddsd.date_id <= {end_date_id} """
+			if start_date_id is not None :
+				where_clause += f"""AND """
+			where_clause += f"""ddsd.date_id <= {end_date_id} """
+		full_query += where_clause
 	full_query += """ORDER BY ddsd.date_id ASC, ddsd.ticker_id ASC
 """
-	#print(full_query)
 	return full_query
+
+def create_ticker_id_selection_sql(only_use_tickers_without_missing_dates = True, start_date_id:Optional[int] = "", end_date_id:Optional[int] = "") -> str:
+
+	# Limit to tickers present on both start and end date
+	ticker_id_selection_query = f"""
+	SELECT t1.ticker_id
+	FROM daily_delta_stock_data t1
+	JOIN ticker_symbol ts ON t1.ticker_id = ts.id
+	JOIN daily_delta_stock_data t2 ON t1.ticker_id = t2.ticker_id
+"""
+	if start_date_id is not None or end_date_id is not None:
+		if start_date_id is None or start_date_id < 0 :
+			start_date_string = f" (SELECT MIN(date_id) FROM daily_delta_stock_data) "
+		else:
+			start_date_string = f" (SELECT MAX(date_id) FROM daily_delta_stock_data WHERE date_id <= {start_date_id}) "
+		if end_date_id is None or end_date_id < 0:
+			end_date_string = f" (SELECT MAX(date_id) FROM daily_delta_stock_data) "
+		else:
+			end_date_string = f" (SELECT MAX(date_id) FROM daily_delta_stock_data WHERE date_id <= {end_date_id}) "
+		ticker_id_selection_query += f"""
+		WHERE t1.date_id = {start_date_string} AND t2.date_id = {end_date_string}
+	"""
+	if only_use_tickers_without_missing_dates:
+		ticker_id_selection_query += f"""AND ts.missing_dates = FALSE """
+	print ("Ticker_id selection query: ", ticker_id_selection_query)
+	return ticker_id_selection_query
 
 
 # LEAD(ddsd.change_in_price_over_day, 1) OVER (
@@ -244,6 +279,60 @@ FROM daily_delta_stock_data ddsd """
 _DISK_GROUPED_CACHE_CLEARED_ONCE = False
 
 
+def get_latest_date_id(*, dbinfo_file: str = "dbinfo.id") -> int:
+	"""Return the maximum date_id available in the daily_delta_stock_data table."""
+	conn = get_connection(dbinfo_file=dbinfo_file)
+	try:
+		cur = conn.cursor()
+		cur.execute("SELECT MAX(date_id) FROM daily_delta_stock_data")
+		row = cur.fetchone()
+		if row and row[0] is not None:
+			return int(row[0])
+		return -1
+	finally:
+		try:
+			conn.close()
+		except Exception:
+			pass
+
+
+def get_recent_date_id_window(
+	max_days: int,
+	*,
+	dbinfo_file: str = "dbinfo.id",
+) -> Optional[tuple[int, int]]:
+	"""Return an inclusive (start_id, end_id) window for the most recent days.
+
+	The window covers up to ``max_days`` distinct ``date_id`` values present in
+	``daily_delta_stock_data``.
+	"""
+	if max_days <= 0:
+		return None
+
+	conn = get_connection(dbinfo_file=dbinfo_file)
+	try:
+		cur = conn.cursor()
+		cur.execute(
+			"""
+			SELECT DISTINCT date_id
+			FROM daily_delta_stock_data
+			ORDER BY date_id DESC
+			LIMIT %s
+			""",
+			(max_days,),
+		)
+		rows = cur.fetchall()
+		if not rows:
+			return None
+		date_ids = [int(r[0]) for r in rows]
+		return min(date_ids), max(date_ids)
+	finally:
+		try:
+			conn.close()
+		except Exception:
+			pass
+
+
 def fetch_grouped_by_date(
 	*,
 	dbinfo_file: str = "dbinfo.id",
@@ -256,7 +345,8 @@ def fetch_grouped_by_date(
 	day_change_centered: str = "one",
 	start_date_id: Optional[int] = None,
 	end_date_id: Optional[int] = None,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+	ticker_pool_end_date_id: Optional[int] = None,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, List[int]]:
 	"""Fetch rows and pack features into a fixed layout per date.
 
 	Output layout requirement:
@@ -264,11 +354,12 @@ def fetch_grouped_by_date(
 	  fixed position; the slot for a ticker is (ticker_id - 1) * num_features.
 	- Missing tickers for a date are filled with NaNs.
 
-	Returns a tuple (dates, X, Y) where:
+	Returns a tuple (dates, X, Y, ticker_ids) where:
 	- dates: shape (D,) int32 with the ordered list of date_id values.
 	- X: if return_2d is False -> shape (D, T*F) float64 (flattened per-date);
 	  otherwise -> shape (D, T, F).
 	- Y: labels per (date, ticker): shape (D, T) with next_day_change_in_price values.
+	- ticker_ids: list of ticker_id values in the order they appear in the tensors.
 
 	If end_percent_to_fetch is provided (e.g., 10.0), only the last that percent of
 	available date_id entries are kept, effectively selecting the most recent dates.
@@ -283,8 +374,15 @@ def fetch_grouped_by_date(
 		f"{'current_day_change' if current_day_change else ''}_"
 		f"{'vol_ratio' if volume_ratio else ''}_"
 		f"{'vwap' if vwap_ratio else ''}_"
-		f"{'transaction' if tranaction_ratio else ''}.npz"
+		f"{'transaction' if tranaction_ratio else ''}"
 	)
+	if start_date_id is not None:
+		cache_base += f"_start_{start_date_id}"
+	if end_date_id is not None:
+		cache_base += f"_end_{end_date_id}"
+	if ticker_pool_end_date_id is not None:
+		cache_base += f"_pool_end_{ticker_pool_end_date_id}"
+	cache_base+=f".npz"
 	cache_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache")
 	cache_file = os.path.join(cache_dir, cache_base)
 	legacy_cache_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), cache_base)
@@ -317,6 +415,7 @@ def fetch_grouped_by_date(
 				loaded["dates"],
 				loaded["X"],
 				loaded["Y"],
+				loaded["ticker_ids"],
 			)
 	except Exception as e:
 		traceback.print_exception(e)
@@ -334,20 +433,24 @@ def fetch_grouped_by_date(
 			volume_ratio,
 			vwap_ratio,
 			tranaction_ratio,
+			True,
 			start_date_id,
 			end_date_id,
+			ticker_pool_end_date_id=ticker_pool_end_date_id,
 		)
 		if limit is not None and limit > 0:
 			sql = f"{sql}\nLIMIT {int(limit)}"
+		print("Executing SQL:", sql)
 		cur.execute(sql)
 
 		# Collect rows grouped by date while tracking max ticker_id
 		stock_ids_and_features_and_label_by_date: Dict[int, List[Tuple[int, List[float], float]]] = {}
-		max_ticker_id = 0
+		tickers_found: Set[int] = set()
 
 		# Stream rows batch-by-batch to prevent hanging/memory pressure
 		for row in _iter_rows(cur):
 			ticker_id = int(row[0])
+			tickers_found.add(ticker_id)
 			date_id = int(row[1])
 			# split features and label (last)
 			stock_feature_values = row[2:-1]
@@ -361,8 +464,7 @@ def fetch_grouped_by_date(
 				# first time encountering this date_id
 				stock_ids_and_features_and_label_by_date[date_id] = []
 			stock_ids_and_features_and_label_by_date[date_id].append((ticker_id, stock_data_fields_safe, label_safe))
-			if ticker_id > max_ticker_id:
-				max_ticker_id = ticker_id
+		number_of_tickers = len(tickers_found)
 
 		Number_Of_dates_found = len(stock_ids_and_features_and_label_by_date.keys())
 		# feature width depends on selected SQL (add up the features)
@@ -374,31 +476,19 @@ def fetch_grouped_by_date(
 			+ int(bool(tranaction_ratio))
 		)
 
+		print(f"Fetched {Number_Of_dates_found} rows, {number_of_tickers} tickers.")
 		# Determine T (max ticker slot) based only on the retained dates, to keep
 		# matrix sizes consistent with the selected window.
-		if Number_Of_dates_found > 0:
-			local_max_ticker = 0
-			for dt in stock_ids_and_features_and_label_by_date.keys():
-				for (
-					ticker_id,
-					_stock_data_fields_safe,
-					_label_safe,
-				) in stock_ids_and_features_and_label_by_date.get(dt, []):
-					if ticker_id > local_max_ticker:
-						local_max_ticker = ticker_id
-			T = local_max_ticker
-		else:
-			T = 0
 
 		dates_list = sorted(stock_ids_and_features_and_label_by_date.keys())
 		#dates = np.array(dates_list, dtype=np.int32)
 		if return_2d:
 			X = np.full(
-				(Number_Of_dates_found, T, Number_of_fields_per_ticker_symbol),
+				(Number_Of_dates_found, number_of_tickers, Number_of_fields_per_ticker_symbol),
 				np.nan,
 				dtype=np.float64,
 			)
-			Y = np.full((Number_Of_dates_found, T), np.nan, dtype=np.float64)
+			Y = np.full((Number_Of_dates_found, number_of_tickers), np.nan, dtype=np.float64)
 			for d_idx, dt in enumerate(dates_list):
 				for (
 					ticker_id,
@@ -406,16 +496,16 @@ def fetch_grouped_by_date(
 					label_safe,
 				) in stock_ids_and_features_and_label_by_date.get(dt, []):
 					t_idx = ticker_id - 1
-					if 0 <= t_idx < T:
+					if 0 <= t_idx < number_of_tickers:
 						X[d_idx, t_idx, :] = stock_data_fields_safe
 						Y[d_idx, t_idx] = label_safe
 		else:
 			X = np.full(
-				(Number_Of_dates_found, T * Number_of_fields_per_ticker_symbol),
+				(Number_Of_dates_found, number_of_tickers * Number_of_fields_per_ticker_symbol),
 				np.nan,
 				dtype=np.float64,
 			)
-			Y = np.full((Number_Of_dates_found, T), np.nan, dtype=np.float64)
+			Y = np.full((Number_Of_dates_found, number_of_tickers), np.nan, dtype=np.float64)
 			for d_idx, dt in enumerate(dates_list):
 				for (
 					ticker_id,
@@ -423,22 +513,23 @@ def fetch_grouped_by_date(
 					label_safe,
 				) in stock_ids_and_features_and_label_by_date.get(dt, []):
 					base = (ticker_id - 1) * Number_of_fields_per_ticker_symbol
-					if 0 <= base < T * Number_of_fields_per_ticker_symbol:
+					if 0 <= base < number_of_tickers * Number_of_fields_per_ticker_symbol:
 						X[d_idx, base : base + Number_of_fields_per_ticker_symbol] = (
 							stock_data_fields_safe
 						)
 						Y[d_idx, ticker_id - 1] = label_safe
 
 		# Save to cache file for future processes.
+		ticker_ids_list = sorted(list(tickers_found))
 		try:
 			os.makedirs(cache_dir, exist_ok=True)
-			np.savez(cache_file, dates=dates_list, X=X, Y=Y)
+			np.savez(cache_file, dates=dates_list, X=X, Y=Y, ticker_ids=ticker_ids_list)
 		except Exception:
 			# Caching is a best-effort optimization; ignore failures.
 			pass
 
 		dates_nd_array = np.array(dates_list, dtype=np.int32)
-		return dates_nd_array, X, Y
+		return dates_nd_array, X, Y, ticker_ids_list
 	finally:
 		try:
 			conn.close()
@@ -540,7 +631,7 @@ def main(argv: Optional[list[str]] = None) -> None:
 	# else:
 	return_2d = args.layout == "per-date-2d"
 	print(f"user arg: {args}")
-	dates_np, X_np, Y_np = fetch_grouped_by_date(
+	dates_np, X_np, Y_np, _ticker_ids = fetch_grouped_by_date(
 		dbinfo_file=args.dbinfo_file,
 		limit=args.limit,
 		return_2d=return_2d,
@@ -549,6 +640,8 @@ def main(argv: Optional[list[str]] = None) -> None:
 		volume_ratio=args.volume_ratio,
 		vwap_ratio=args.vwap_ratio,
 		tranaction_ratio=args.tranaction_ratio,
+		start_date_id=args.start_date_id,
+		end_date_id=args.end_date_id,
 	)
 
 	layout_desc = "(D, T, F)" if return_2d else "(D, T*F)"

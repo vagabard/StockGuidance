@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import os
 import traceback
+import smtplib
+from email.mime.text import MIMEText
 from pathlib import Path
 from typing import Iterable, List, Tuple, Union, Optional
 
@@ -71,9 +73,8 @@ class StockRecommenderFromModel:
 			model_or_path: Path/dir to load models from, or a list of models. A single
 				model instance is accepted for backward compatibility and wrapped into a list.
 			device: "auto" (cuda if available else cpu), "cpu", or "cuda".
-			manifest: Manifest dict to use when models are supplied directly.
-			run_dir: Unused; kept for backward compatibility.
 		"""
+		self._output_size = None
 		self.input_size = None
 		if not TORCH_AVAILABLE:
 			raise RuntimeError("PyTorch is required to use StockRecommenderFromModel.")
@@ -118,7 +119,11 @@ class StockRecommenderFromModel:
 		self._manifest = dict(manifest or {})
 		# Cache common dims
 		self.input_size: int = self._ensemble_models[0].input_size
+		self._input_size: int = self.input_size
 		self.output_size: int = self._ensemble_models[0].output_size
+		self._output_size: int = self.output_size
+		self.ticker_ids: List[int] | None = self._manifest.get("ticker_ids")
+		self._ticker_id_map = self.ticker_ids  # Alias for backward compatibility
 		if self.input_size <= 0 or self.output_size <= 0:
 			raise ValueError("Invalid model manifest: missing input_size/output_size")
 
@@ -131,22 +136,41 @@ class StockRecommenderFromModel:
 		if os.path.isdir(path_str):
 			rep_dirs: List[str] = []
 			try:
-				direct_rep_to_check = Path(path_str.lower()).name
-				if direct_rep_to_check.startswith("rep"):
-					rest = direct_rep_to_check[3:]
-					if rest and rest.isdigit():
-						rep_dirs.append(path_str)
-				else:
-					for name in sorted(os.listdir(path_str)):
-						full = os.path.join(path_str, name)
+				def _collect_reps(d_path: str) -> List[str]:
+					found: List[str] = []
+					for name in sorted(os.listdir(d_path)):
+						full = os.path.join(d_path, name)
 						if not os.path.isdir(full):
 							continue
-						if not name.lower().startswith("rep"):
-							continue
-						rest = name[3:]
-						if rest and rest.isdigit():
-							rep_dirs.append(full)
-			except FileNotFoundError as e:
+						if name.lower().startswith("rep"):
+							rest = name[3:]
+							if rest and rest.isdigit():
+								found.append(full)
+					return found
+
+				# 1) Check if current dir is already a rep dir
+				direct_rep_to_check = Path(path_str.lower()).name
+				if direct_rep_to_check.startswith("rep") and direct_rep_to_check[3:].isdigit():
+					rep_dirs = [path_str]
+				else:
+					# 2) Check for immediate rep subdirectories
+					rep_dirs = _collect_reps(path_str)
+
+					# 3) If no reps found, check if there is a single timestamp-like subdirectory
+					#    that contains rep subdirectories (common for FamilyRun output).
+					if not rep_dirs:
+						subdirs = [
+							os.path.join(path_str, n)
+							for n in os.listdir(path_str)
+							if os.path.isdir(os.path.join(path_str, n))
+						]
+						for sd in subdirs:
+							# Basic heuristic: if it looks like YYYYMMDD_HHMMSS or similar
+							# but we can just check if it contains reps.
+							found_in_sub = _collect_reps(sd)
+							if found_in_sub:
+								rep_dirs.extend(found_in_sub)
+			except Exception as e:
 				print(f"Error processing directory {path_str}:")
 				traceback.print_exception(e)
 				rep_dirs = []
@@ -202,6 +226,10 @@ class StockRecommenderFromModel:
 
 	# resolve_manifest_path moved to models.utils
 
+	def get_input_size(self) -> int:
+		"""Return the input size (number of features) expected by the model(s)."""
+		return self.input_size
+
 	def get_required_previous_days(self) -> int:
 		"""Return how many prior days the model expects as context."""
 		return int(self._manifest.get("prior_days", 0))
@@ -254,6 +282,14 @@ class StockRecommenderFromModel:
 		if "transaction_ratio" in self._manifest:
 			return bool(self._manifest.get("transaction_ratio"))
 		return bool(self._manifest.get("tranaction_ratio", False))
+
+	def get_num_features_per_ticker(self) -> int:
+		"""Return the number of features per ticker for a single day."""
+		T = self._output_size
+		D = self.get_required_previous_days() + 1
+		if T and D:
+			return int(self.input_size // D // T)
+		return 0
 
 
 	def _to_tensor(self, x: ArrayLike) -> "torch_interface.Tensor":  # type: ignore[name-defined]
@@ -316,6 +352,7 @@ class StockRecommenderFromModel:
 		top_k = int(min(top_k, self._output_size))
 
 		feature_tensor = self._to_tensor(feature_vector)
+		# print(f"DEBUG: feature_tensor mean={feature_tensor.mean().item():.6f}, std={feature_tensor.std().item():.6f}")
 		with torch.no_grad():  # type: ignore[attr-defined]
 			feature_tensor = torch.nan_to_num(feature_tensor, nan=0.0, posinf=0.0, neginf=0.0)  # type: ignore[attr-defined]
 			input_to_model = feature_tensor.reshape(1, -1)
@@ -331,6 +368,7 @@ class StockRecommenderFromModel:
 			agg: Optional["torch_interface.Tensor"] = None  # type: ignore[name-defined]
 			for one_model in self._ensemble_models:  # type: ignore[attr-defined]
 				raw_output_from_model = one_model(input_to_model)
+				# print(f"DEBUG: raw_output mean={raw_output_from_model.mean().item():.6f}, std={raw_output_from_model.std().item():.6f}, max={raw_output_from_model.max().item():.6f}, argmax={raw_output_from_model.argmax().item()}")
 				raw_output_from_model = torch.nan_to_num(raw_output_from_model, nan=0.0, posinf=0.0, neginf=0.0)  # type: ignore[attr-defined]
 				out_from_model_flat = raw_output_from_model.reshape(-1).to(torch.float32)  # type: ignore[attr-defined]
 				if self._ensemble_normalize:
@@ -398,9 +436,21 @@ class StockRecommenderFromModel:
 					# Access by position (driver-independent); expect (ticker_id, transactions)
 					tid = int(r[0])
 					val = r[1]
-					if 1 <= tid <= T and val is not None:
+
+					slot_idx = -1
+					if self.ticker_ids:
 						try:
-							arr[tid - 1] = float(val)
+							slot_idx = self.ticker_ids.index(tid)
+						except ValueError:
+							pass
+					else:
+						# Fallback to 1-based indexing if no ticker_ids list
+						if 1 <= tid <= T:
+							slot_idx = tid - 1
+
+					if slot_idx != -1 and val is not None:
+						try:
+							arr[slot_idx] = float(val)
 						except Exception:
 							pass
 				transactions_vec_tensor = torch.from_numpy(arr).to(self._device)  # type: ignore[attr-defined]
@@ -447,32 +497,33 @@ class StockRecommenderFromModel:
 		# Build mask
 		mask_allowed = torch.isfinite(transactions_vec_tensor) & (transactions_vec_tensor >= float(MIN_TRADES_FOR_RECOMMENDATION))  # type: ignore[attr-defined]
 
-		# Convert to numpy for easy handling (retain original scores)
-		scores_np = out_from_model_flat.numpy()
+		# Clone scores and apply the allow-mask by setting disallowed scores to -inf.
+		# This ensures we don't recommend or return valid scores for stocks that
+		# failed the transactions filter.
+		masked_scores = out_from_model_flat.clone()
+		if mask_allowed is not None and mask_allowed.numel() == self._output_size:  # type: ignore[attr-defined]
+			masked_scores[~mask_allowed.cpu()] = -float("inf")
+
+		# Convert to numpy for returning. We return the MASKED scores so that
+		# display logic doesn't inadvertently show valid scores for filtered tickers.
+		scores_np = masked_scores.numpy()
 
 		# Argpartition/argsort for top-k indices (largest first)
-		# Apply the allow-mask by setting disallowed scores to -inf
-		if mask_allowed is not None and mask_allowed.numel() == self._output_size:  # type: ignore[attr-defined]
-			masked_scores = out_from_model_flat.clone()
-			masked_scores[~mask_allowed] = -float("inf")
-			topk_vals, topk_idx = torch.topk(masked_scores, k=top_k, largest=True, sorted=True)  # type: ignore[attr-defined]
-		else:
-			# Defensive: should not happen because mask is required; keep fallback
-			topk_vals, topk_idx = torch.topk(out_from_model_flat, k=top_k, largest=True, sorted=True)  # type: ignore[attr-defined]
+		topk_vals, topk_idx = torch.topk(masked_scores, k=top_k, largest=True, sorted=True)  # type: ignore[attr-defined]
 		idx_list = topk_idx.tolist()
 
 		# Map to ticker ids if mapping present; else convert to index_base offset
 		top_ids: List[int] = []
-		# if self._ticker_id_map and len(self._ticker_id_map) == self._output_size:
-		# 	for i in idx_list:
-		# 		if self._ticker_id_map[i]:
-		# 			top_ids.append(int(self._ticker_id_map[i]))
-		# else:
-		if True:
+		if self.ticker_ids and len(self.ticker_ids) == self._output_size:
+			for i in idx_list:
+				if masked_scores[i] > -float("inf"):
+					top_ids.append(int(self.ticker_ids[i]))
+		else:
 			# Dense slots -> ticker ids 1..T or 0..T-1
 			offset = 1 if int(index_base) == 1 else 0
 			for i in idx_list:
-				top_ids.append(int(i + offset))
+				if masked_scores[i] > -float("inf"):
+					top_ids.append(int(i + offset))
 
 		return scores_np, top_ids
 
@@ -483,6 +534,33 @@ class StockRecommenderFromModel:
 	@output_size.setter
 	def output_size(self, value):
 		self._output_size = value
+
+	def email_recommendations(self, recommendations_text: str, recipient_email: str = "vagabard@gmail.com"):
+		"""Send recommendations via email.
+
+		Args:
+			recommendations_text: The text content of the recommendations.
+			recipient_email: The email address to send the recommendations to.
+		"""
+		smtp_host = os.getenv("SMTP_HOST", "localhost")
+		smtp_port = int(os.getenv("SMTP_PORT", "25"))
+		smtp_user = os.getenv("SMTP_USER")
+		smtp_pass = os.getenv("SMTP_PASS")
+
+		msg = MIMEText(recommendations_text)
+		msg["Subject"] = "Stock Recommendations"
+		msg["From"] = smtp_user or "recommender@stockguidance.com"
+		msg["To"] = recipient_email
+
+		try:
+			with smtplib.SMTP(smtp_host, smtp_port) as server:
+				if smtp_user and smtp_pass:
+					server.starttls()
+					server.login(smtp_user, smtp_pass)
+				server.send_message(msg)
+			print(f"Recommendations emailed to {recipient_email}")
+		except Exception as e:
+			print(f"Failed to send email to {recipient_email}: {e}")
 
 
 def main(self):

@@ -38,7 +38,7 @@ use_torch=True, results are returned as torch_interface.FloatTensors.
 """
 from __future__ import annotations
 
-from typing import Optional, Tuple, Any
+from typing import Optional, Tuple, Any, List
 
 import numpy as np
 from numpy import dtype, ndarray
@@ -69,10 +69,12 @@ class TrainingInstanceProvider:
         limit: Optional[int] = None,
         use_torch: bool = False,
         current_day_change: bool = True,
-	    volume_ratio: bool = True,
-	    vwap_ratio: bool = True,
-	    tranaction_ratio: bool = True,
-	    day_change_centered: str = "one",
+        volume_ratio: bool = False,
+        vwap_ratio: bool = False,
+        tranaction_ratio: bool = False,
+        day_change_centered: str = "zero",
+        start_date_id: Optional[int] = None,
+        end_date_id: Optional[int] = None,
     ) -> None:
         """Load per-date matrices from the database and cache them in memory.
 
@@ -80,21 +82,33 @@ class TrainingInstanceProvider:
           - dates: shape (D,)
           - ticker_data_list_flat: shape (D, T*F)
           - labels_for_training: shape (D, T)
+          - ticker_ids: list of ticker_id values
         """
-        dates, ticker_data_list_flat, labels_for_training = fetch_grouped_by_date(
+        dates, ticker_data_list_flat, labels_for_training, ticker_ids = fetch_grouped_by_date(
             dbinfo_file=dbinfo_file,
             limit=limit,
             return_2d=False,
-	        current_day_change=current_day_change,
-	        volume_ratio=volume_ratio,
-	        vwap_ratio=vwap_ratio,
-	        tranaction_ratio=tranaction_ratio,
-	        day_change_centered=day_change_centered
+            current_day_change=current_day_change,
+            volume_ratio=volume_ratio,
+            vwap_ratio=vwap_ratio,
+            tranaction_ratio=tranaction_ratio,
+            day_change_centered=day_change_centered,
+            start_date_id=start_date_id,
+            end_date_id=end_date_id,
         )
 
         self.cumulative_dates_for_train_validation_and_test_sets: np.ndarray = dates.astype(np.int32, copy=False)
         self.ticker_data_list_flat: np.ndarray = ticker_data_list_flat.astype(np.float64, copy=False)
         self.labels_for_training: np.ndarray = labels_for_training.astype(np.float64, copy=False)
+
+        if TORCH_AVAILABLE:
+            # Wrap as torch tensors to leverage shared memory in multi-processing (spawn mode)
+            # This significantly reduces pickling overhead when num_workers > 0 on Windows.
+            self.cumulative_dates_for_train_validation_and_test_sets = torch.from_numpy(self.cumulative_dates_for_train_validation_and_test_sets)
+            self.ticker_data_list_flat = torch.from_numpy(self.ticker_data_list_flat)
+            self.labels_for_training = torch.from_numpy(self.labels_for_training)
+
+        self.ticker_ids: List[int] = ticker_ids
         self.number_of_prior_days_to_include_in_feature: int = 0
         self._use_torch: bool = bool(use_torch and TORCH_AVAILABLE)
         self._current_day_change: bool = current_day_change
@@ -122,7 +136,8 @@ class TrainingInstanceProvider:
         if number_of_prior_dates >= self.number_of_dates_or_dates_times_number_of_features_times_number_tickers:
             # Would leave no valid instances
             raise ValueError(
-                f"number_of_prior_dates ({number_of_prior_dates}) must be < total dates ({self.number_of_dates_or_dates_times_number_of_features_times_number_tickers})"
+                f"number_of_prior_dates ({number_of_prior_dates}) must be < total dates ({self.number_of_dates_or_dates_times_number_of_features_times_number_tickers}). "
+                f"Try reducing --prior-days or ensure the date range contains enough data."
             )
         self.number_of_prior_days_to_include_in_feature = number_of_prior_dates
 
@@ -130,8 +145,8 @@ class TrainingInstanceProvider:
         """Total number of 1-based instances available with current window size."""
         return max(0, self.number_of_dates_or_dates_times_number_of_features_times_number_tickers - self.number_of_prior_days_to_include_in_feature)
 
-    def get_feature_and_label_pair(self, selected_training_instance: int) -> tuple[Tensor, Tensor] | tuple[
-	    ndarray[tuple[Any, ...], dtype[Any]], Any]:
+    def get_feature_and_label_pair(self, selected_training_instance: int) -> tuple[Tensor, Tensor, int] | tuple[
+	    ndarray, Any, int ]:
         """Return (features, labels) for a 1-based instance index.
 
         The mapping is defined so that instance index 1 corresponds to the earliest
@@ -152,7 +167,11 @@ class TrainingInstanceProvider:
         d = self.number_of_prior_days_to_include_in_feature + (selected_training_instance - 1)
 
         # Concatenate features for [d, d-1, ..., d-num_prior] using shared utility
-        feats = concat_features_current_then_prior(self.ticker_data_list_flat, d, self.number_of_prior_days_to_include_in_feature)
+        # Convert torch tensors to numpy if needed for the utility
+        feats_src = self.ticker_data_list_flat
+        if hasattr(feats_src, "numpy"):
+            feats_src = feats_src.numpy()
+        feats = concat_features_current_then_prior(feats_src, d, self.number_of_prior_days_to_include_in_feature)
 
         # Optional debug dump of one random ticker's feature window
         if env_feature_debug_enabled() and np.random.rand() < 0.001:
@@ -166,10 +185,17 @@ class TrainingInstanceProvider:
             if self._tranaction_ratio:
                 feature_names.append("transactions_normalized")
 
+            labels_src = self.labels_for_training
+            if hasattr(labels_src, "numpy"):
+                labels_src = labels_src.numpy()
+            dates_src = self.cumulative_dates_for_train_validation_and_test_sets
+            if hasattr(dates_src, "numpy"):
+                dates_src = dates_src.numpy()
+
             dump_feature_window(
-                X_flat=self.ticker_data_list_flat,
-                dates=self.cumulative_dates_for_train_validation_and_test_sets,
-                labels=self.labels_for_training,
+                X_flat=feats_src,
+                dates=dates_src,
+                labels=labels_src,
                 d=d,
                 num_prior=self.number_of_prior_days_to_include_in_feature,
                 current_day_change_used=self._current_day_change,
@@ -179,14 +205,17 @@ class TrainingInstanceProvider:
             )
 
         labels = self.labels_for_training[d]
+        if hasattr(labels, "numpy"):
+            labels = labels.numpy()
 
         if self._use_torch:
             # Convert to float32 tensors (typical for NN inputs)
-            feats_t = torch.from_numpy(feats.astype(np.float32, copy=False))
-            labels_t = torch.from_numpy(labels.astype(np.float32, copy=False))
-            return feats_t, labels_t
+            feats_t = torch.as_tensor(feats, dtype=torch.float32)
+            labels_t = torch.as_tensor(labels, dtype=torch.float32)
+
+            return feats_t, labels_t, int(self.cumulative_dates_for_train_validation_and_test_sets[d])
         else:
-            return feats, labels
+            return feats, labels, int(self.cumulative_dates_for_train_validation_and_test_sets[d])
 
 
 # Convenience factory function (optional)

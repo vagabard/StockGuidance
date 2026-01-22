@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import List
+
 try:
     import torch  # type: ignore
     import torch.nn as nn  # type: ignore
@@ -22,7 +24,7 @@ class ConvolutionAndTransformerFeedForwareNet(nn.Module):
     The `hidden_layers` argument is retained for CLI compatibility but unused.
     """
 
-    def __init__(self, input_size: int, output_size: int, hidden_layers: int):
+    def __init__(self, input_size: int, output_size: int, hidden_layers: List[int]):
         super().__init__()
         channels = 16
         ks = 15

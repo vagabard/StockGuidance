@@ -57,7 +57,7 @@ def main() -> int:
                 continue
 
             idx = instance_index if instance_index <= max_n else max_n
-            features, labels = provider.get_feature_and_label_pair(idx)
+            features, labels, date_id_extra = provider.get_feature_and_label_pair(idx)
 
             # Print basic info for this configuration
             print(f"n_prior={n_prior}: max_instances={max_n}, feature_length={len(features)}, label_length={len(labels)}")
@@ -146,7 +146,7 @@ def main() -> int:
                 continue
 
             idx = instance_index_233 if instance_index_233 <= max_n else max_n
-            features, labels = provider.get_feature_and_label_pair(idx)
+            features, labels, date_id_extra = provider.get_feature_and_label_pair(idx)
 
             # Print basic info for this configuration
             print(f"[233] n_prior={n_prior}: max_instances={max_n}, feature_length={len(features)}, label_length={len(labels)}")
@@ -279,7 +279,7 @@ def main() -> int:
                 continue
 
             idx = inst if inst <= max_n else max_n
-            features, labels = provider.get_feature_and_label_pair(idx)
+            features, labels, date_id_extra = provider.get_feature_and_label_pair(idx)
             print(f"[post inst={inst}] Using max_prior={max_prior_tested}, feature_length={len(features)}, label_length={len(labels)}")
 
             # Iterate day_index 0..max_prior_tested and print 7-value sequences at the requested starts

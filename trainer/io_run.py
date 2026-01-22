@@ -105,7 +105,11 @@ def create_manifest_dictionary( single_run: SingleRun|None, model_state_path:str
 		"arch": str(single_run.family_run.neural_network_type),
 		"input_size": int(input_size),
 		"output_size": int(output_size),
-		"hidden_layers": int(single_run.family_run.hidden_layer_size),
+		"hidden_layers": (
+			[int(v) for v in single_run.family_run.hidden_layer_size]
+			if single_run.family_run.hidden_layer_size is not None
+			else 0
+		),
 		"mlp_layers": int(single_run.mlp_layers),
 		"activation": (str(single_run.activation) if single_run.family_run.neural_network_type == "mlp" else None),
 		"final_activation": (str(single_run.final_activation) if single_run.family_run.neural_network_type == "mlp" else None),
@@ -122,6 +126,7 @@ def create_manifest_dictionary( single_run: SingleRun|None, model_state_path:str
 		# "current_day_change_used": bool(getattr(single_run.single_run, "change_in_price_today", False)),
 		"day_change_centered": single_run.day_change_centered,
 		"precision": str((single_run.family_run.precision or "auto").lower()),
+		"ticker_ids": list(single_run.ticker_ids) if single_run.ticker_ids is not None else None,
 	}
 	if model_state_path is not None and model_state_path != "":
 		manifest["state_dict_path"] = os.path.basename(model_state_path)

@@ -1,31 +1,39 @@
+import os
+import sys
+from pathlib import Path
+
+# Add project root to sys.path to allow imports from sibling packages like 'database'
+root_path = Path(__file__).resolve().parent.parent
+if str(root_path) not in sys.path:
+	sys.path.insert(0, str(root_path))
+
+import streamlit as st
+import pandas as pd
+import numpy as np
 import io
 import json
-import os
 import re
 import traceback
 from math import ceil, sqrt
 from typing import Dict, List, Any, Tuple
 
-try:
-	import streamlit as st
-	import pandas as pd
-	import numpy as np
-except ImportError:
-	print("This viewer requires Streamlit, pandas, and numpy.")
-	st = None
-	pd = None
-	np = None
+import plotly.express as px
+import plotly.graph_objects as go
 
-from compare_runs_shared import (
+
+from viewers.compare_runs_shared import (
 	build_run_families,
 	compute_selected_timestamps,
 	group_runs_by_timestamp,
+	render_common_params,
 	scan_runs,
+	sidebar_family_and_build_selector,
 	has_any_simulation_files,
+	load_preferences,
+	save_preference,
 )
 from database.db_connect import get_connection
 
-from compare_runs_shared import scan_runs  # type: ignore[redefined-builtin]
 
 
 @st.cache_data
@@ -46,7 +54,7 @@ def _fetch_market_deltas(min_date_id: int, max_date_id: int) -> Dict[int, List[f
 		cur = conn.cursor()
 		query = """
 			SELECT ddsd.date_id,
-			       ddsd.change_in_price_over_day
+				   ddsd.change_in_price_over_day
 			FROM daily_delta_stock_data ddsd
 			WHERE ddsd.date_id BETWEEN %s AND %s
 			  AND ddsd.change_in_price_over_day IS NOT NULL
@@ -118,48 +126,48 @@ def _fetch_rank_ratios(date_ticker_pairs: List[Tuple[int, int]]) -> Dict[Tuple[i
 
 		query = f"""
 WITH target AS (
-    -- **MySQL 8.0.19+ Compatible Syntax for Ad-Hoc Table**
-    -- Using ROW() to define the pairs, which is clean and efficient.
-    SELECT date_id, ticker_id FROM (
-        -- Replace this with your actual, prepared (date_id, ticker_id) pairs
-        VALUES
-            {values_clause}
-    ) AS tmp(date_id, ticker_id)
+	-- **MySQL 8.0.19+ Compatible Syntax for Ad-Hoc Table**
+	-- Using ROW() to define the pairs, which is clean and efficient.
+	SELECT date_id, ticker_id FROM (
+		-- Replace this with your actual, prepared (date_id, ticker_id) pairs
+		VALUES
+			{values_clause}
+	) AS tmp(date_id, ticker_id)
 ),
 target_ret AS (
-    -- Get the specific return (target_ret) for the selected pairs
-    SELECT
-        t.date_id,
-        t.ticker_id,
-        d.change_in_price_over_day AS target_ret
-    FROM target t
-    JOIN daily_delta_stock_data d
-        ON d.date_id = t.date_id AND d.ticker_id = t.ticker_id
-    WHERE d.change_in_price_over_day IS NOT NULL
+	-- Get the specific return (target_ret) for the selected pairs
+	SELECT
+		t.date_id,
+		t.ticker_id,
+		d.change_in_price_over_day AS target_ret
+	FROM target t
+	JOIN daily_delta_stock_data d
+		ON d.date_id = t.date_id AND d.ticker_id = t.ticker_id
+	WHERE d.change_in_price_over_day IS NOT NULL
 )
 SELECT
-    tr.date_id,
-    tr.ticker_id,
-    -- 1. Conditional Count: Count how many stocks performed worse than target_ret
-    SUM(CASE WHEN d2.change_in_price_over_day < tr.target_ret THEN 1 ELSE 0 END) AS worse_count,
+	tr.date_id,
+	tr.ticker_id,
+	-- 1. Conditional Count: Count how many stocks performed worse than target_ret
+	SUM(CASE WHEN d2.change_in_price_over_day < tr.target_ret THEN 1 ELSE 0 END) AS worse_count,
 
-    -- 2. Total Count: Count total stocks on that date
-    COUNT(d2.ticker_id) AS total_count,
+	-- 2. Total Count: Count total stocks on that date
+	COUNT(d2.ticker_id) AS total_count,
 
-    -- 3. The final ratio (Note: Use floating point numbers for division)
-    SUM(CASE WHEN d2.change_in_price_over_day < tr.target_ret THEN 1.0 ELSE 0.0 END) / COUNT(d2.ticker_id) AS rank_ratio
+	-- 3. The final ratio (Note: Use floating point numbers for division)
+	SUM(CASE WHEN d2.change_in_price_over_day < tr.target_ret THEN 1.0 ELSE 0.0 END) / COUNT(d2.ticker_id) AS rank_ratio
 FROM target_ret tr
 JOIN daily_delta_stock_data d2
-    ON d2.date_id = tr.date_id -- Join to ALL stocks for that date
+	ON d2.date_id = tr.date_id -- Join to ALL stocks for that date
 WHERE d2.change_in_price_over_day IS NOT NULL
 -- GROUP BY is correct for strict mode (ONLY_FULL_GROUP_BY)
 GROUP BY
-    tr.date_id,
-    tr.ticker_id,
-    tr.target_ret;		"""
+	tr.date_id,
+	tr.ticker_id,
+	tr.target_ret;		"""
 
-#		print("Sql query is ", query, " with params:")
-#		print("[_fetch_rank_ratios] Executing SQL with pairs=", params)
+		print("Sql query is ", query, " with params:")
+		print("[_fetch_rank_ratios] Executing SQL with pairs=", params)
 		cur.execute(query  )  #, params)
 		rows = cur.fetchall()
 		print(f"[_fetch_rank_ratios] fetched {len(rows)} rows; sample={rows[:5]}")
@@ -232,7 +240,7 @@ def _run_as_script():
 	st.set_page_config(page_title="Training Runs Viewer", layout="wide")
 
 	# Sidebar: base directory
-	default_base = os.path.join(os.getcwd(), "data")
+	default_base = os.path.join(os.getcwd(), "../data")
 	# Prefer project default path if running elsewhere
 	win_default = r"C:\\Projects\\StockGuidance\\data"
 	base_dir = st.sidebar.text_input("Base data directory", value=(win_default if os.path.isdir(win_default) else default_base))
@@ -241,7 +249,18 @@ def _run_as_script():
 
 	# --- Filtering based on "Runs with simulation" checkbox ---
 	st.sidebar.subheader("Filter options")
-	sim_only = st.sidebar.checkbox("Runs with simulation", value=False)
+
+	# Initialise session state from preferences on first load
+	prefs = load_preferences()
+	if "crv_sim_only" not in st.session_state:
+		st.session_state["crv_sim_only"] = prefs.get("crv_sim_only", False)
+
+	sim_only = st.sidebar.checkbox(
+		"Runs with simulation",
+		value=st.session_state["crv_sim_only"],
+		key="crv_sim_only",
+		on_change=lambda: save_preference("crv_sim_only", st.session_state["crv_sim_only"]),
+	)
 
 	if sim_only:
 		filtered_runs = []
@@ -308,55 +327,31 @@ def _run_as_script():
 		return
 
 	# ------------------------------------------------------------------
-	# Sidebar selection: run family -> underlying builds (timestamps)
+	# Sidebar selection: families + builds (shared across viewers)
 	# ------------------------------------------------------------------
-	# Provide a lightweight way to rescan the base directory for new
-	# run families without restarting the Streamlit app. Clicking this
-	# button triggers a rerun and therefore re-runs ``scan_runs``.
 	st.sidebar.button("Refresh runs list")
-	st.sidebar.subheader("Select family and builds")
+	st.sidebar.subheader("Select families and builds")
 
-	# Primary selector: run families derived from the directory structure.
-	# We add an "(all families)" option so users can still compare
-	# builds across families when desired.
-	family_options = ["(all families)"] + family_names
-	fam_key = "crv_family_sel"
-	cur_family = st.session_state.get(fam_key, "(all families)")
-	if cur_family not in family_options:
-		cur_family = "(all families)"
-	family_sel = st.sidebar.selectbox(
-		"Run family",
-		options=family_options,
-		index=family_options.index(cur_family),
-		key=fam_key,
+	def update_list_of_runs_selected(selected_runs: List[str]) -> None:
+		# Keep last sidebar selection for other panels in this viewer.
+		st.session_state["crv_runs_selected"] = list(selected_runs)
+
+	selected_builds, selected_families, _available_builds = sidebar_family_and_build_selector(
+		timestamp_names=timestamp_names,
+		family_names=family_names,
+		family_to_ts=family_to_ts,
+		key_prefix="crv",
+		default_select_all_builds=False,
+		empty_builds_means_all=False,
+		on_runs_updated=update_list_of_runs_selected,
 	)
 
-	# Determine which timestamped builds are available for the chosen
-	# family. When "(all families)" is selected we expose every
-	# discovered timestamp so cross-family comparisons remain possible.
-	if family_sel == "(all families)":
-		available_builds = timestamp_names
-	else:
-		available_builds = family_to_ts.get(family_sel, [])
+	# Do not populate the main window until at least one family is selected.
+	if not selected_families:
+		st.info("Select one or more run families in the sidebar to begin.")
+		return
 
-	# Multiselect of builds (logical single runs) within the chosen
-	# family. Persisted across reruns.
-	sidebar_ms_key = "crv_build_multiselect"
-	ms_default = st.session_state.get(sidebar_ms_key)
-	if not ms_default:
-		# Default to no preselected builds to avoid heavy initial rendering.
-		ms_default = []
-	# Ensure defaults only contain still-valid options
-	ms_default = [m for m in ms_default if m in available_builds]
-	multi = st.sidebar.multiselect(
-		"Builds (timestamps)",
-		options=available_builds,
-		default=ms_default,
-		key=sidebar_ms_key,
-		help="Select which timestamped single runs to compare for the chosen family.",
-	)
-
-	selected_set = set(multi)
+	selected_set = set(selected_builds)
 
 	# Allow empty selection: we'll still render the grid to let users pick rows there
 	if not selected_set:
@@ -391,11 +386,7 @@ def _run_as_script():
 	common = _compute_common_params(selected_params)
 	common_keys = set(common.keys())
 
-	with st.expander("Common attributes (read-only)", expanded=False):
-		if not common:
-			st.caption("No common attributes across all selected runs.")
-		else:
-			st.json(common)
+	render_common_params(common, title="Common parameters across runs", expanded=False)
 
 	st.subheader("Run parameters (differences)")
 
@@ -416,26 +407,32 @@ def _run_as_script():
 	other_cols = [c for c in all_cols if c not in default_cols]
 	# Persist column visibility preferences across reruns.
 	vis_key = "crv_visible_cols"
-	if vis_key in st.session_state:
-		vis_default = [c for c in st.session_state[vis_key] if c in all_cols]
-		if not vis_default:
-			vis_default = default_cols + other_cols
-	else:
+	if vis_key not in st.session_state:
+		st.session_state[vis_key] = prefs.get(vis_key, default_cols + other_cols)
+
+	vis_default = [c for c in st.session_state[vis_key] if c in all_cols]
+	if not vis_default:
 		vis_default = default_cols + other_cols
+
 	visible_cols = st.multiselect(
 		"Visible columns",
 		options=all_cols,
 		default=vis_default,
 		key=vis_key,
+		on_change=lambda: save_preference(vis_key, st.session_state[vis_key]),
 	)
 
 	# Simple filtering
 	with st.expander("Filters"):
 		col1, col2, col3 = st.columns(3)
 		# Persist simple filter/sort controls across reruns.
+		if "crv_search_text" not in st.session_state:
+			st.session_state["crv_search_text"] = prefs.get("crv_search_text", "")
 		search = col1.text_input(
 			"Substring filter (any column)",
+			value=st.session_state["crv_search_text"],
 			key="crv_search_text",
+			on_change=lambda: save_preference("crv_search_text", st.session_state["crv_search_text"]),
 		)
 
 	fdf = df.copy()
@@ -668,60 +665,77 @@ def _run_as_script():
 		st.subheader("Metrics to show")
 		# Global toggle for logarithmic Y-axis across all charts in the viewer.
 		# Persisted via session_state so it survives tab switches and reruns.
-		log_y_default = bool(st.session_state.get("viewer_log_y", False))
-		log_y = st.checkbox("Logarithmic Y-axis", value=log_y_default, key="viewer_log_y")
+		if "viewer_log_y" not in st.session_state:
+			st.session_state["viewer_log_y"] = prefs.get("viewer_log_y", False)
+		log_y = st.checkbox(
+			"Logarithmic Y-axis",
+			value=st.session_state["viewer_log_y"],
+			key="viewer_log_y",
+			on_change=lambda: save_preference("viewer_log_y", st.session_state["viewer_log_y"]),
+		)
 
 		# Number of initial points to ignore from the beginning of each run's series.
-		# Implemented as a small dropdown (0	6) so it's quick to adjust and consistent
+		# Implemented as a small dropdown (0..5) so it's quick to adjust and consistent
 		# across all charts. Persisted in session_state.
-		ignore_head_default = int(st.session_state.get("viewer_ignore_head", 0) or 0)
-		ignore_head_default = max(0, min(5, ignore_head_default))
+		if "viewer_ignore_head" not in st.session_state:
+			st.session_state["viewer_ignore_head"] = prefs.get("viewer_ignore_head", 0)
+		ignore_head_val = int(st.session_state["viewer_ignore_head"] or 0)
+		ignore_head_val = max(0, min(5, ignore_head_val))
 		ignore_head = st.selectbox(
 			"Ignore first N points",
 			options=list(range(0, 6)),
-			index=ignore_head_default,
+			index=ignore_head_val,
 			help="Number of leading data points to drop from each run before plotting.",
 			key="viewer_ignore_head",
-			width=100,
+			#width=100,  # selectbox doesn't take width
+			on_change=lambda: save_preference("viewer_ignore_head", st.session_state["viewer_ignore_head"]),
 		)
 
 		# Layout toggle: either one chart per run (original behaviour) or
 		# a single combined chart that overlays all selected runs to make
 		# comparisons easier.
-		single_chart_default = bool(st.session_state.get("viewer_single_chart", False))
+		if "viewer_single_chart" not in st.session_state:
+			st.session_state["viewer_single_chart"] = prefs.get("viewer_single_chart", False)
 		single_chart = st.checkbox(
 			"Single chart (overlay all selected runs)",
-			value=single_chart_default,
+			value=st.session_state["viewer_single_chart"],
 			key="viewer_single_chart",
 			help=(
 				"When enabled, show all selected runs together in a single chart. "
 				"Each run/metric pair will appear as a separate line in the legend."
 			),
+			on_change=lambda: save_preference("viewer_single_chart", st.session_state["viewer_single_chart"]),
 		)
 		if not all_metric_cols:
 			st.warning("No metric CSVs found for selected runs. Ensure each run contains a *_training_metrics.csv file.")
-		# Default: show all numeric metrics except the x-axis if present
-		current_checks = st.session_state.get("viewer_metric_checks", {})
-		# Initialize missing keys
+		# Initialize missing keys from preferences
 		for col in all_metric_cols:
 			if col == x_axis:
 				continue
-			if col not in current_checks:
-				current_checks[col] = True
-		# Remove stale keys no longer present
-		for k in list(current_checks.keys()):
-			if k not in all_metric_cols:
-				current_checks.pop(k, None)
-		st.session_state["viewer_metric_checks"] = current_checks
+			key = f"metric_check_{col}"
+			if key not in st.session_state:
+				# Default current_learning_rate to False so it doesn't squash the MSE curves by default
+				if col == "current_learning_rate":
+					st.session_state[key] = prefs.get(key, False)
+				else:
+					st.session_state[key] = prefs.get(key, True)
 
 		# Render checkboxes in 4 columns
 		if all_metric_cols:
 			cols = st.columns(4)
 			for i, col in enumerate([c for c in all_metric_cols if c != x_axis]):
 				with cols[i % 4]:
-					current_checks[col] = st.checkbox(col, value=bool(current_checks.get(col, True)), key=f"metric_check_{col}")
+					key = f"metric_check_{col}"
+					if key not in st.session_state:
+						st.session_state[key] = prefs.get(key, True)
+					st.checkbox(
+						col,
+						key=key,
+						value=st.session_state[key],
+						on_change=lambda k=key: save_preference(k, st.session_state[k]),
+					)
 
-		selected_metrics = [c for c, on in current_checks.items() if on]
+		selected_metrics = [c for c in all_metric_cols if c != x_axis and st.session_state.get(f"metric_check_{c}", False)]
 
 		# Render charts in n x n grid
 		n = len(metric_dfs)
@@ -794,21 +808,44 @@ def _run_as_script():
 			# Prefer Plotly for rich interactive comparison.
 			try:
 				import plotly.graph_objects as go  # type: ignore
+				from plotly.subplots import make_subplots # type: ignore
 
-				fig = go.Figure()
+				# Check if we should use a secondary Y-axis (e.g. for learning rate)
+				use_secondary_y = "current_learning_rate" in selected_metrics
+
+				if use_secondary_y:
+					fig = make_subplots(specs=[[{"secondary_y": True}]])
+				else:
+					fig = go.Figure()
+
 				for xs, ys, label in series:
-					fig.add_trace(go.Scatter(x=xs, y=ys, mode="lines", name=label))
+					is_lr = label.endswith(": current_learning_rate")
+					if use_secondary_y:
+						fig.add_trace(
+							go.Scatter(x=xs, y=ys, mode="lines", name=label),
+							secondary_y=is_lr
+						)
+					else:
+						fig.add_trace(go.Scatter(x=xs, y=ys, mode="lines", name=label))
 
 				fig.update_layout(
 					height=360,
 					margin=dict(l=10, r=10, t=10, b=10),
 					legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
 					xaxis_title=x_axis or "index",
-					yaxis_title="value",
 				)
+
+				fig.update_yaxes(title_text="MSE / Metrics", secondary_y=False)
+				if use_secondary_y:
+					fig.update_yaxes(title_text="Learning Rate", secondary_y=True)
+
 				if log_y:
-					fig.update_yaxes(type="log")
-				st.plotly_chart(fig, width='stretch')
+					fig.update_yaxes(type="log", secondary_y=False)
+					if use_secondary_y:
+						# Keep LR linear usually, but could be log too.
+						# Let's keep it consistent with the user's choice for now.
+						fig.update_yaxes(type="log", secondary_y=True)
+				st.plotly_chart(fig, width='stretch', use_container_width=True)
 				return
 			except Exception:
 				pass
@@ -858,10 +895,26 @@ def _run_as_script():
 			# Prefer Plotly (no Altair dependency)
 			try:
 				import plotly.graph_objects as go  # type: ignore
+				from plotly.subplots import make_subplots # type: ignore
 
-				fig = go.Figure()
+				# Check if we should use a secondary Y-axis (e.g. for learning rate)
+				use_secondary_y = "current_learning_rate" in plot_df.columns and "current_learning_rate" in selected_metrics
+
+				if use_secondary_y:
+					fig = make_subplots(specs=[[{"secondary_y": True}]])
+				else:
+					fig = go.Figure()
+
 				for col in [c for c in plot_df.columns if c != x_enc]:
-					fig.add_trace(go.Scatter(x=plot_df[x_enc], y=plot_df[col], mode="lines", name=str(col)))
+					is_lr = (col == "current_learning_rate")
+					if use_secondary_y:
+						fig.add_trace(
+							go.Scatter(x=plot_df[x_enc], y=plot_df[col], mode="lines", name=str(col)),
+							secondary_y=is_lr
+						)
+					else:
+						fig.add_trace(go.Scatter(x=plot_df[x_enc], y=plot_df[col], mode="lines", name=str(col)))
+
 				# Optional horizontal reference line
 				if y_ref is not None:
 					try:
@@ -873,10 +926,17 @@ def _run_as_script():
 					margin=dict(l=10, r=10, t=10, b=10),
 					legend=dict(orientation="h"),
 				)
+
+				fig.update_yaxes(title_text="Metrics", secondary_y=False)
+				if use_secondary_y:
+					fig.update_yaxes(title_text="Learning Rate", secondary_y=True)
+
 				if log_y:
 					# Use logarithmic scale on Y axis; non-positive values will be ignored by Plotly.
-					fig.update_yaxes(type="log")
-				st.plotly_chart(fig, width='stretch')
+					fig.update_yaxes(type="log", secondary_y=False)
+					if use_secondary_y:
+						fig.update_yaxes(type="log", secondary_y=True)
+				st.plotly_chart(fig, width='stretch', use_container_width=True)
 				return
 			except Exception:
 				pass
@@ -1047,8 +1107,20 @@ def _run_as_script():
 							st.caption(f"Not enough points to plot after ignoring first {trim_n} values.")
 							continue
 						plot_df = plot_df.iloc[trim_n:].reset_index(drop=True)
+
+					# Check for secondary Y axis support if using Altair
+					use_secondary_y = "current_learning_rate" in plot_df.columns and "current_learning_rate" in selected_metrics
+
 					# Melt to long for Altair
 					try:
+						# If we have secondary Y, we might want to handle it differently in Altair,
+						# but standard melt will put everything on the same axis.
+						# Altair secondary axis is complex, let's see if we can just use the fallback for that case.
+						if use_secondary_y and alt is not None:
+							# Force fallback to _plot_lines for secondary axis to keep it simple and consistent with Plotly implementation
+							_plot_lines(plot_df, x_enc, height=260)
+							continue
+
 						mdf = plot_df.melt(id_vars=[x_enc], var_name="metric", value_name="value")
 						if alt is not None:
 							y_encoding = alt.Y(
@@ -1271,12 +1343,12 @@ def _run_as_script():
 							# import pandas as pd  # type: ignore
 							rep_dfs = pd.read_csv(best_csv_path)
 
-							# Collect numeric/top columns from this rep so they are available
+							# Collect numeric columns from this rep so they are available
 							# even if the ensemble file didn't have them.
 							rep_cols = [
 								c for c in rep_dfs.columns
 								if c not in ["feature_date_id", "open_date_id", "close_date_id"]
-								and "top" in c
+								and (rep_dfs[c].dtype.kind in "if")
 							]
 							all_top_cols = list(sorted(set(all_top_cols + rep_cols)))
 						except Exception:
@@ -1369,67 +1441,47 @@ def _run_as_script():
 					sim_cols = cand_cols
 					break
 
-		# Persist per-column visibility in session_state so choices survive
-		# reruns and tab switches.
-		current_sim_checks = dict(st.session_state.get("stock_sim_checks", {}))
+		# Initialize missing keys from preferences
 		for col in sim_cols:
-			if col not in current_sim_checks:
-				current_sim_checks[col] = True
-		# Drop any stale entries from previous selections.
-		for k in list(current_sim_checks.keys()):
-			if k not in sim_cols:
-				current_sim_checks.pop(k, None)
+			key = f"stock_sim_col_{col}"
+			if key not in st.session_state:
+				st.session_state[key] = prefs.get(key, True)
 
-		# Compute whether *currently* all columns are selected *before* we
-		# apply any new Select All action. This is used to initialise the
-		# checkbox so its visual state reflects the per-column selection.
-		all_selected_before = bool(sim_cols) and all(current_sim_checks.get(c, False) for c in sim_cols)
-		prev_select_all = bool(st.session_state.get("stock_sim_select_all", True))
+		if f"stock_sim_show_cdf" not in st.session_state:
+			st.session_state["stock_sim_show_cdf"] = prefs.get("stock_sim_show_cdf", True)
 
 		st.markdown("**Stock simulation columns to show**")
-		select_all = st.checkbox(
+		if st.button(
 			"Select all",
-			value=all_selected_before,
-			key="stock_sim_select_all",
-			help=(
-				"Toggle visibility of all stock simulation graphs. If all are currently "
-				"selected and this is unchecked, every graph will be hidden."
-			),
-		)
-
-		# Special behaviour for Select All:
-		#  - If it transitions from checked to unchecked, we clear *all*
-		#    column checkboxes, regardless of their previous mix of states.
-		#  - If it transitions from unchecked to checked, we select every
-		#    column regardless of previous per-column state.
-		if prev_select_all and not select_all:
+			key="stock_sim_select_all_btn",
+			help="Check all stock simulation column boxes and show CDF overlays.",
+		):
 			for col in sim_cols:
-				current_sim_checks[col] = False
-		elif (not prev_select_all) and select_all:
-			for col in sim_cols:
-				current_sim_checks[col] = True
+				key = f"stock_sim_col_{col}"
+				st.session_state[key] = True
+				save_preference(key, True)
+			st.session_state["stock_sim_show_cdf"] = True
+			save_preference("stock_sim_show_cdf", True)
 
 		# Render individual checkboxes in a compact multi-column layout.
 		if sim_cols:
 			cols_ui = st.columns(4)
 			for idx, col in enumerate(sim_cols):
 				with cols_ui[idx % 4]:
-					current_sim_checks[col] = st.checkbox(
+					key = f"stock_sim_col_{col}"
+					if key not in st.session_state:
+						st.session_state[key] = prefs.get(key, True)
+					st.checkbox(
 						col,
-						value=bool(current_sim_checks.get(col, True)),
-						key=f"stock_sim_col_{col}",
+						key=key,
+						value=st.session_state[key],
+						on_change=lambda k=key: save_preference(k, st.session_state[k]),
 					)
 
-		# Persist updated state for next rerun.
-		st.session_state["stock_sim_checks"] = current_sim_checks
-		st.session_state["stock_sim_all_selected_prev"] = bool(
-			bool(sim_cols) and all(current_sim_checks.get(c, False) for c in sim_cols)
-		)
-
 		# Final list of columns that are actually enabled for plotting.
-		selected_sim_cols = [c for c in sim_cols if current_sim_checks.get(c, False)]
+		selected_sim_cols = [c for c in sim_cols if st.session_state.get(f"stock_sim_col_{c}", False)]
 
-		# Bin width for histograms of day-over-day change magnitudes in the
+		# Bin width for histograms of day-over-day change ratios in the
 		# stock simulation curves. Expressed as a ratio (e.g. 0.01 == 1%).
 		# Kept separate from the main metrics controls so it only affects the
 		# stock simulation section.
@@ -1445,30 +1497,37 @@ def _run_as_script():
 			key="stock_sim_hist_bin_width",
 			help=(
 				"Width of each histogram bin expressed as a day-over-day change ratio. "
-				"For example, 0.01 groups changes in 1% increments by |ratio|."
+				"For example, 0.01 groups changes in 1% increments."
 			),
 		)
 
 		# Independent control for whether CDF overlays are shown on the
 		# per-run stock simulation charts. This ensures the CDF lines are
 		# also user-controllable, as requested.
-		show_cdf_default = bool(st.session_state.get("stock_sim_show_cdf", True))
+		if "stock_sim_show_cdf" not in st.session_state:
+			st.session_state["stock_sim_show_cdf"] = prefs.get("stock_sim_show_cdf", True)
+
 		show_cdf = st.checkbox(
 			"Show CDF overlays",
-			value=show_cdf_default,
 			key="stock_sim_show_cdf",
+			value=st.session_state["stock_sim_show_cdf"],
 			help=(
 				"When enabled, overlay CDF percentile curves alongside portfolio values "
 				"for each stock simulation run."
 			),
+			on_change=lambda: save_preference("stock_sim_show_cdf", st.session_state["stock_sim_show_cdf"]),
 		)
 
 		# Independent control for combining all *_top curves on a single chart.
+		if "stock_sim_single_chart" not in st.session_state:
+			st.session_state["stock_sim_single_chart"] = prefs.get("stock_sim_single_chart", False)
+
 		sim_single_chart = st.checkbox(
 			"Display on single chart",
-			value=False,
 			key="stock_sim_single_chart",
+			value=st.session_state["stock_sim_single_chart"],
 			help="When enabled, overlay *_top curves from all runs on one chart.",
+			on_change=lambda: save_preference("stock_sim_single_chart", st.session_state["stock_sim_single_chart"]),
 		)
 
 		# Determine x-axis for stock simulations: prefer feature_date_id if present.
@@ -1602,9 +1661,6 @@ def _run_as_script():
 				except Exception:
 					cols_here = []
 
-			# Apply the global stock-simulation column visibility filter. When
-			# the user unchecks all columns via the Select All toggle, this
-			# will intentionally hide all curves for every run.
 			if selected_sim_cols:
 				cols_here = [c for c in cols_here if c in selected_sim_cols]
 
@@ -1626,10 +1682,11 @@ def _run_as_script():
 			# Filter numeric cols to exclude any existing CDF/percentile columns for the primary axis
 			primary_cols = [c for c in cols_here if "percentile" not in c and "CDF" not in c]
 
-			# Split into portfolio-value vs daily-return-percent series to avoid
-			# hiding small percent traces against ~1000-value portfolio curves.
+			# Split into portfolio-value vs daily-return-percent vs rank-percent series to avoid
+			# hiding small percent/rank traces against ~1000-value portfolio curves.
 			percent_cols = [c for c in primary_cols if isinstance(c, str) and c.lower().startswith("return percent")]
-			value_cols = [c for c in primary_cols if c not in percent_cols]
+			rank_cols = [c for c in primary_cols if isinstance(c, str) and c.lower().startswith("rank percent")]
+			value_cols = [c for c in primary_cols if c not in percent_cols and c not in rank_cols]
 
 			# Build plot_df with just primary cols first
 			cols_needed = primary_cols[:]
@@ -1642,9 +1699,9 @@ def _run_as_script():
 				plot_df.insert(0, "index", range(len(plot_df)))
 				x_enc = "index"
 
-			# Ensure percent_cols are numeric (coerce errors to NaN so they still plot)
+			# Ensure percent_cols and rank_cols are numeric (coerce errors to NaN so they still plot)
 			try:
-				for _c in percent_cols:
+				for _c in percent_cols + rank_cols:
 					if _c in plot_df.columns:
 						plot_df[_c] = pd.to_numeric(plot_df[_c], errors="coerce")
 			except Exception:
@@ -1653,6 +1710,9 @@ def _run_as_script():
 			# Dynamic CDF calculation (optional)
 			cdf_cols = []
 			date_col = "open_date_id"
+
+			if "stock_sim_show_cdf" not in st.session_state:
+				st.session_state["stock_sim_show_cdf"] = prefs.get("stock_sim_show_cdf", True)
 
 			if show_cdf and date_col in dfs.columns and not dfs.empty and value_cols:
 				print(
@@ -1752,152 +1812,287 @@ def _run_as_script():
 			has_cdf = len(cdf_cols) > 0
 			print(f"[stock_sim] has_cdf={has_cdf} for title={title}, cdf_cols={cdf_cols}")
 
-			if has_cdf:
-				try:
-					import plotly.graph_objects as go
-					from plotly.subplots import make_subplots
+			try:
+				import plotly.graph_objects as go
+				from plotly.subplots import make_subplots
 
-					fig = make_subplots(specs=[[{"secondary_y": True}]])
+				# Always use dual-axis Plotly for consistent appearance
+				fig = make_subplots(specs=[[{"secondary_y": True}]])
 
-					# Primary: Portfolio Values
-					for col in value_cols:
-						fig.add_trace(
-							go.Scatter(x=plot_df[x_enc], y=plot_df[col], mode="lines", name=col),
-							secondary_y=False
-						)
+				# Primary: Portfolio Values
+				for col in value_cols:
+					y_vals = pd.to_numeric(plot_df[col], errors="coerce")
+					fig.add_trace(
+						go.Scatter(x=plot_df[x_enc], y=y_vals, mode="lines", name=col),
+						secondary_y=False
+					)
 
-					# Secondary: Percent series (if any)
-					for col in percent_cols:
-						fig.add_trace(
-							go.Scatter(x=plot_df[x_enc], y=plot_df[col], mode="lines", name=col),
-							secondary_y=True
-						)
+				# Secondary: Percent series (if any)
+				for col in percent_cols:
+					y_vals = pd.to_numeric(plot_df[col], errors="coerce")
+					fig.add_trace(
+						go.Scatter(x=plot_df[x_enc], y=y_vals, mode="lines", name=col),
+						secondary_y=True
+					)
 
-					# Secondary: CDFs
-					for cdf_name in cdf_cols:
-						fig.add_trace(
-							go.Scatter(
-								x=plot_df[x_enc],
-								y=plot_df[cdf_name],
-								mode="lines",
-								name=cdf_name,
-								line=dict(width=3, dash="dot", color="black"),
-								opacity=0.85,
-							),
-							secondary_y=True
-						)
+				# Secondary: Rank series (if any)
+				for col in rank_cols:
+					y_vals = pd.to_numeric(plot_df[col], errors="coerce")
+					fig.add_trace(
+						go.Scatter(x=plot_df[x_enc], y=y_vals, mode="lines", name=col),
+						secondary_y=True
+					)
 
-					# Reference lines
-					fig.add_hline(y=1000.0, line=dict(color="red", dash="dash", width=1), secondary_y=False)
+				# Secondary: CDFs
+				for cdf_name in cdf_cols:
+					fig.add_trace(
+						go.Scatter(
+							x=plot_df[x_enc],
+							y=plot_df[cdf_name],
+							mode="lines",
+							name=cdf_name,
+							line=dict(width=3, dash="dot", color="black"),
+							opacity=0.85,
+						),
+						secondary_y=True
+					)
+
+				# Reference lines
+				fig.add_hline(y=1000.0, line=dict(color="red", dash="dash", width=1), secondary_y=False)
+				if has_cdf or percent_cols or rank_cols:
 					fig.add_hline(y=0.5, line=dict(color="gray", dash="dash", width=1), secondary_y=True)
 
-					fig.update_layout(
-						height=350,
-						margin=dict(l=10, r=10, t=10, b=10),
-						legend=dict(orientation="h"),
-					)
-					fig.update_yaxes(title_text="Portfolio Value", secondary_y=False)
-					# If we have any percent series or CDFs, show a sensible secondary axis.
-					fig.update_yaxes(title_text="Percent / Percentile", range=[-0.05, 1.05], secondary_y=True)
+				fig.update_layout(
+					height=350 if has_cdf else 260,
+					margin=dict(l=10, r=10, t=10, b=10),
+					legend=dict(orientation="h"),
+				)
+				fig.update_yaxes(title_text="Portfolio Value", secondary_y=False)
 
-					st.plotly_chart(fig, width="stretch")
-
-				except Exception as e:
-					print(f"[stock_sim] Plotly dual-axis error: {e}")
-					_plot_lines(plot_df[[x_enc] + primary_cols], x_enc, height=260, y_ref=1000.0)
-			else:
-				# Standard plotting without CDFs.
-				# If we have a mix of portfolio and percent series, use dual-axis Plotly;
-				# otherwise fall back to the default helper.
-				if value_cols and percent_cols:
-					try:
-						import plotly.graph_objects as go
-						from plotly.subplots import make_subplots
-
-						fig = make_subplots(specs=[[{"secondary_y": True}]])
-						for col in value_cols:
-							fig.add_trace(
-								go.Scatter(x=plot_df[x_enc], y=plot_df[col], mode="lines", name=col),
-								secondary_y=False,
-							)
-						for col in percent_cols:
-							fig.add_trace(
-								go.Scatter(x=plot_df[x_enc], y=plot_df[col], mode="lines", name=col),
-								secondary_y=True,
-							)
-						fig.add_hline(y=1000.0, line=dict(color="red", dash="dash", width=1), secondary_y=False)
-						fig.update_layout(height=260, margin=dict(l=10, r=10, t=10, b=10), legend=dict(orientation="h"))
-						fig.update_yaxes(title_text="Portfolio Value", secondary_y=False)
-						fig.update_yaxes(title_text="Percent", secondary_y=True)
-						st.plotly_chart(fig, width='stretch')
-					except Exception:
-						_plot_lines(plot_df[[x_enc] + primary_cols], x_enc, height=260, y_ref=1000.0)
+				if has_cdf or rank_cols:
+					fig.update_yaxes(title_text="Percent / Rank / Percentile", range=[-0.05, 1.05], secondary_y=True)
+				elif percent_cols:
+					fig.update_yaxes(title_text="Percent", secondary_y=True)
 				else:
-					_plot_lines(plot_df[[x_enc] + primary_cols], x_enc, height=260, y_ref=1000.0)
+					# Even if no secondary data, keep the axis for consistent rendering style
+					fig.update_yaxes(title_text="", secondary_y=True)
 
-			# ------------------------------------------------------------------
-			# Histogram of day-over-day change magnitudes for this run.
-			#
-			# We interpret "change-in-price-over-day" as the ratio of
-			# consecutive portfolio values for each selected simulation column,
-			# i.e. ratio_t = (v_t / v_{t-1}) - 1, and use |ratio_t| as the
-			# magnitude to be histogrammed.
-			# ------------------------------------------------------------------
+				st.plotly_chart(fig, width="stretch", use_container_width=True)
+
+			except Exception as e:
+				print(f"[stock_sim] Plotly dual-axis error: {e}")
+				_plot_lines(plot_df[[x_enc] + primary_cols], x_enc, height=260, y_ref=1000.0)
+
+				# ------------------------------------------------------------------
+				# Histogram of day-over-day change ratios for this run.
+				#
+				# We group the simulation columns by their "topN" suffix
+				# (top1, top3, top5) and stack them in the histogram.
+				# ------------------------------------------------------------------
 			try:
 				import numpy as _np  # type: ignore
 
-				magnitudes: list[float] = []
+				# Group columns by top1, top3, top5
+				groups = ["top1", "top3", "top5"]
+				group_values: dict[str, list[float]] = {g: [] for g in groups}
+				other_values: list[float] = []
+
 				for col in cols_here:
-					series = dfs[col].to_numpy(dtype=float)
+					try:
+						# Coerce to numeric, dropping any non-numeric strings
+						s_numeric = pd.to_numeric(dfs[col], errors="coerce")
+						series = s_numeric.to_numpy(dtype=float)
+					except Exception:
+						continue
+
 					if series.size < 2:
 						continue
 					prev = series[:-1]
 					curr = series[1:]
 					with _np.errstate(divide="ignore", invalid="ignore"):
 						ratio = curr / prev - 1.0
-					ratio = _np.abs(ratio)
 					# Drop NaN/inf values that may arise from zero or invalid
 					# previous values.
 					ratio = ratio[_np.isfinite(ratio)]
 					if ratio.size:
-						magnitudes.extend(ratio.tolist())
+						# Assign to group
+						col_lower = str(col).lower()
+						assigned = False
+						for g in groups:
+							if g in col_lower:
+								group_values[g].extend(ratio.tolist())
+								assigned = True
+								break
+						if not assigned:
+							other_values.extend(ratio.tolist())
 
-				if not magnitudes:
-					print(f"[stock_sim] no histogram magnitudes for title={title}")
+				all_vals = []
+				for g in groups:
+					all_vals.extend(group_values[g])
+				all_vals.extend(other_values)
+
+				if not all_vals:
+					print(f"[stock_sim] no histogram values for title={title}")
 					continue
 
-				mags = _np.asarray(magnitudes, dtype=float)
-				max_mag = float(_np.max(mags))
-				min_mag = 0.0
+				vals = _np.asarray(all_vals, dtype=float)
+				max_val = float(_np.max(vals))
+				min_val = float(_np.min(vals))
 
 				if hist_bin_width <= 0.0:
 					print(f"[stock_sim] invalid hist_bin_width={hist_bin_width} for title={title}")
 					continue
 
 				# Build bin edges using the configured window size.
-				# Ensure at least one bin even for very small ranges.
-				span = max(max_mag - min_mag, float(hist_bin_width))
-				n_bins = max(1, int(ceil(span / float(hist_bin_width))))
-				edges = _np.linspace(min_mag, min_mag + n_bins * float(hist_bin_width), n_bins + 1)
-				counts, bin_edges = _np.histogram(mags, bins=edges)
+				neg_bins = int(ceil(abs(min(0.0, min_val)) / float(hist_bin_width)))
+				pos_bins = int(ceil(max(0.0, max_val) / float(hist_bin_width)))
 
-				# Representative x value for each bin: use the bin centre.
-				bin_centres = (bin_edges[:-1] + bin_edges[1:]) / 2.0
+				edges = _np.arange(-neg_bins * float(hist_bin_width), (pos_bins + 1) * float(hist_bin_width), float(hist_bin_width))
+				bin_centres = (edges[:-1] + edges[1:]) / 2.0
 
 				# Prefer Plotly for the histogram; fall back to Matplotlib if
 				# Plotly is not available.
 				try:
 					import plotly.graph_objects as _go  # type: ignore
+					from plotly.subplots import make_subplots as _make_subplots
 
-					fig_hist = _go.Figure()
-					fig_hist.add_trace(_go.Bar(x=bin_centres, y=counts, name="|day-over-day change ratio|"))
+					# Detect large gaps to handle outliers ("broken axis" effect)
+					# Calculate total counts across all groups to find empty spaces
+					total_counts = _np.zeros(len(bin_centres))
+					group_counts = {}
+					for g in groups:
+						g_vals = _np.asarray(group_values[g], dtype=float)
+						if g_vals.size > 0:
+							counts, _ = _np.histogram(g_vals, bins=edges)
+							group_counts[g] = counts
+							total_counts += counts
+
+					if other_values:
+						o_vals = _np.asarray(other_values, dtype=float)
+						counts, _ = _np.histogram(o_vals, bins=edges)
+						group_counts["other"] = counts
+						total_counts += counts
+
+					# Find indices where counts > 0
+					nz = _np.where(total_counts > 0)[0]
+					gap_split_idx = None
+					if nz.size > 1:
+						gaps = _np.diff(nz)
+						if gaps.size > 0:
+							# Find all large gaps (> 50 bins)
+							large_gaps = _np.where(gaps > 50)[0]
+							if large_gaps.size > 0:
+								# If there are large gaps, we want to isolate the "Main" cluster.
+								# We define clusters separated by large gaps.
+								cluster_starts = _np.concatenate(([0], large_gaps + 1))
+								cluster_ends = _np.concatenate((large_gaps, [len(nz) - 1]))
+
+								# Identify the "Main" cluster: the one with the most points,
+								# prioritizing clusters near 0.
+								best_cluster_idx = 0
+								best_score = -1.0
+								for i in range(len(cluster_starts)):
+									c_nz_indices = nz[cluster_starts[i] : cluster_ends[i] + 1]
+									c_bin_centres = bin_centres[c_nz_indices]
+									c_counts = total_counts[c_nz_indices]
+									c_total_points = _np.sum(c_counts)
+
+									# Score: favor more points and proximity to 0
+									# dist_to_zero is 0 if 0 is within [min, max] of cluster
+									c_min, c_max = _np.min(c_bin_centres), _np.max(c_bin_centres)
+									dist_to_zero = 0.0
+									if c_min > 0: dist_to_zero = c_min
+									elif c_max < 0: dist_to_zero = abs(c_max)
+
+									score = c_total_points / (1.0 + dist_to_zero)
+									if score > best_score:
+										best_score = score
+										best_cluster_idx = i
+
+								# Now we have the main cluster.
+								# If it's not the only cluster, we need to split.
+								# For now, we still support 2 subplots.
+								# If the main cluster is the first one, we split after it.
+								# If it's not the first, we might want to split before it?
+								# Usually, outliers are to the right.
+								if len(cluster_starts) > 1:
+									if best_cluster_idx == 0:
+										# Split after the first cluster
+										gap_split_idx = nz[large_gaps[0]]
+									elif best_cluster_idx == len(cluster_starts) - 1:
+										# Split before the last cluster
+										gap_split_idx = nz[large_gaps[-1]]
+									else:
+										# Main cluster is in the middle? Split at the largest gap.
+										gap_split_idx = nz[_np.argmax(gaps)]
+
+					# Fallback to original logic if we couldn't decide or for extra safety
+					if gap_split_idx is None and nz.size > 1:
+						gaps = _np.diff(nz)
+						if gaps.size > 0:
+							max_gap_val = _np.max(gaps)
+							if max_gap_val > 50 and max_gap_val > (len(bin_centres) * 0.4):
+								gap_split_idx = nz[_np.argmax(gaps)]
+
+					if gap_split_idx is not None:
+						# Heuristic to name subplots: which side has more points?
+						left_count = _np.sum(total_counts[:gap_split_idx+1])
+						right_count = _np.sum(total_counts[gap_split_idx+1:])
+						if left_count >= right_count:
+							titles = ("Main Distribution", "Outliers")
+						else:
+							titles = ("Outliers", "Main Distribution")
+
+						fig_hist = _make_subplots(
+							rows=1, cols=2,
+							shared_yaxes=True,
+							horizontal_spacing=0.05,
+							subplot_titles=titles
+						)
+						masks = [
+							_np.arange(len(bin_centres)) <= gap_split_idx,
+							_np.arange(len(bin_centres)) > gap_split_idx
+						]
+					else:
+						fig_hist = _go.Figure()
+						masks = [_np.ones(len(bin_centres), dtype=bool)]
+
+					# Colors for top1, top3, top5
+					colors = {"top1": "#636EFA", "top3": "#EF553B", "top5": "#00CC96", "other": "#AB63FA"}
+
+					for col_idx, mask in enumerate(masks):
+						if not _np.any(mask): continue
+
+						# If we have subplots, we need to add traces to both?
+						# No, only if the data exists in that range.
+						for g_name in list(groups) + (["other"] if other_values else []):
+							counts = group_counts.get(g_name)
+							if counts is not None and _np.any(counts[mask] > 0):
+								trace = _go.Bar(
+									x=bin_centres[mask],
+									y=counts[mask],
+									name=g_name,
+									marker_color=colors.get(g_name),
+									legendgroup=g_name,
+									showlegend=(col_idx == 0) # Only show in legend once
+								)
+								if gap_split_idx is not None:
+									fig_hist.add_trace(trace, row=1, col=col_idx + 1)
+								else:
+									fig_hist.add_trace(trace)
+
 					fig_hist.update_layout(
-						height=220,
-						margin=dict(l=10, r=10, t=10, b=10),
-						xaxis_title="|change ratio| (day-over-day)",
+						height=280,
+						margin=dict(l=10, r=10, t=30, b=10),
+						xaxis_title="change ratio (day-over-day)" if gap_split_idx is None else None,
 						yaxis_title="frequency",
-						showlegend=False,
+						barmode='stack',
+						legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
 					)
+					if gap_split_idx is not None:
+						fig_hist.update_xaxes(title_text="Ratio", row=1, col=1)
+						fig_hist.update_xaxes(title_text="Outliers", row=1, col=2)
+
 					# Use explicit width with a unique key to avoid duplicate-element errors
 					st.plotly_chart(fig_hist, width="stretch", key=f"stock_sim_hist_{title}")
 				except Exception as e:
@@ -1905,11 +2100,98 @@ def _run_as_script():
 					try:
 						import matplotlib.pyplot as _plt  # type: ignore
 
-						fig_hist, ax_hist = _plt.subplots(figsize=(7.0, 3.0))
-						ax_hist.bar(bin_centres, counts, width=float(hist_bin_width) * 0.9)
-						ax_hist.set_xlabel("|change ratio| (day-over-day)")
-						ax_hist.set_ylabel("frequency")
-						ax_hist.grid(True, alpha=0.3)
+						# Find indices where counts > 0 for gap detection (reuse logic if possible or recalculate)
+						# Recalculate total_counts for fallback
+						tc_plt = _np.zeros(len(bin_centres))
+						g_counts_plt = {}
+						for g in groups:
+							gv = _np.asarray(group_values[g], dtype=float)
+							if gv.size > 0:
+								c, _ = _np.histogram(gv, bins=edges)
+								g_counts_plt[g] = c
+								tc_plt += c
+						if other_values:
+							ov = _np.asarray(other_values, dtype=float)
+							c, _ = _np.histogram(ov, bins=edges)
+							g_counts_plt["other"] = c
+							tc_plt += c
+
+						nz_plt = _np.where(tc_plt > 0)[0]
+						gap_split_idx_plt = None
+						if nz_plt.size > 1:
+							gaps_plt = _np.diff(nz_plt)
+							if gaps_plt.size > 0:
+								large_gaps_plt = _np.where(gaps_plt > 50)[0]
+								if large_gaps_plt.size > 0:
+									cluster_starts_plt = _np.concatenate(([0], large_gaps_plt + 1))
+									cluster_ends_plt = _np.concatenate((large_gaps_plt, [len(nz_plt) - 1]))
+									best_cluster_idx_plt = 0
+									best_score_plt = -1.0
+									for i in range(len(cluster_starts_plt)):
+										c_nz_indices = nz_plt[cluster_starts_plt[i] : cluster_ends_plt[i] + 1]
+										c_bin_centres = bin_centres[c_nz_indices]
+										c_counts = tc_plt[c_nz_indices]
+										c_total_points = _np.sum(c_counts)
+										c_min, c_max = _np.min(c_bin_centres), _np.max(c_bin_centres)
+										dist_to_zero = 0.0
+										if c_min > 0: dist_to_zero = c_min
+										elif c_max < 0: dist_to_zero = abs(c_max)
+										score = c_total_points / (1.0 + dist_to_zero)
+										if score > best_score_plt:
+											best_score_plt = score
+											best_cluster_idx_plt = i
+									if len(cluster_starts_plt) > 1:
+										if best_cluster_idx_plt == 0:
+											gap_split_idx_plt = nz_plt[large_gaps_plt[0]]
+										elif best_cluster_idx_plt == len(cluster_starts_plt) - 1:
+											gap_split_idx_plt = nz_plt[large_gaps_plt[-1]]
+										else:
+											gap_split_idx_plt = nz_plt[_np.argmax(gaps_plt)]
+
+						if gap_split_idx_plt is None and nz_plt.size > 1:
+							gaps_plt = _np.diff(nz_plt)
+							if gaps_plt.size > 0:
+								max_gap_plt = _np.max(gaps_plt)
+								if max_gap_plt > 50 and max_gap_plt > (len(bin_centres) * 0.4):
+									gap_split_idx_plt = nz_plt[_np.argmax(gaps_plt)]
+
+						if gap_split_idx_plt is not None:
+							fig_hist, (ax1, ax2) = _plt.subplots(1, 2, figsize=(9.0, 4.0), sharey=True)
+							_plt.subplots_adjust(wspace=0.1)
+							axes = [ax1, ax2]
+							masks_plt = [
+								_np.arange(len(bin_centres)) <= gap_split_idx_plt,
+								_np.arange(len(bin_centres)) > gap_split_idx_plt
+							]
+						else:
+							fig_hist, ax_hist = _plt.subplots(figsize=(7.0, 4.0))
+							axes = [ax_hist]
+							masks_plt = [_np.ones(len(bin_centres), dtype=bool)]
+
+						colors_plt = {"top1": "tab:blue", "top3": "tab:red", "top5": "tab:green", "other": "tab:purple"}
+
+						for ax, mask in zip(axes, masks_plt):
+							if not _np.any(mask): continue
+							bottom = _np.zeros(_np.sum(mask))
+							bc_masked = bin_centres[mask]
+
+							for g_name in list(groups) + (["other"] if other_values else []):
+								counts = g_counts_plt.get(g_name)
+								if counts is not None and _np.any(counts[mask] > 0):
+									c_masked = counts[mask]
+									ax.bar(bc_masked, c_masked, width=float(hist_bin_width) * 0.9,
+										   bottom=bottom, label=g_name, color=colors_plt.get(g_name))
+									bottom += c_masked
+
+							ax.set_xlabel("ratio")
+							ax.grid(True, alpha=0.3)
+
+						axes[0].set_ylabel("frequency")
+						if len(axes) > 1:
+							axes[0].set_title("Main" if _np.sum(tc_plt[masks_plt[0]]) >= _np.sum(tc_plt[masks_plt[1]]) else "Outliers")
+							axes[1].set_title("Outliers" if _np.sum(tc_plt[masks_plt[0]]) >= _np.sum(tc_plt[masks_plt[1]]) else "Main")
+
+						axes[0].legend()
 						st.pyplot(fig_hist, clear_figure=True)
 					except Exception as e_plt:
 						print(f"[stock_sim] Matplotlib histogram error: {e_plt}")
@@ -1917,9 +2199,18 @@ def _run_as_script():
 						try:
 							st.caption("Plotly/Matplotlib missing; using native Streamlit chart.")
 							import pandas as _pd
-							# Format bin centres for readable x-axis labels
+
+							chart_data = {}
+							for g in groups:
+								if group_values[g]:
+									counts, _ = _np.histogram(group_values[g], bins=edges)
+									chart_data[g] = counts
+							if other_values:
+								counts, _ = _np.histogram(other_values, bins=edges)
+								chart_data["other"] = counts
+
 							labels = [f"{x:.3f}" for x in bin_centres]
-							hist_df = _pd.DataFrame({"frequency": counts}, index=labels)
+							hist_df = _pd.DataFrame(chart_data, index=labels)
 							st.bar_chart(hist_df)
 						except Exception as e_native:
 							print(f"[stock_sim] Native chart error: {e_native}")

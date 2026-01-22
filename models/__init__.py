@@ -1,6 +1,7 @@
 import torch
 from torch import nn
 from torch.nn import Module
+from typing import List, Optional
 
 from .convolution_transformer import ConvolutionAndTransformerFeedForwareNet
 from .multi_layer_mlp import MultiLayerLinearNet
@@ -51,11 +52,13 @@ def make_model(
 	arch: str,
 	input_size: int,
 	output_size: int,
-	hidden_layers: int,
+	hidden_layers: List[int] | int,
 	activation:str|None=None,
 	final_activation:str|None =None,
 	num_layers: int = 3,
 ):
+	if isinstance(hidden_layers, int):
+		hidden_layers = [hidden_layers]
 	arch = (arch or "").lower()
 	if arch in ("conv_trans", "convtransformer", "conv_tx", "convolution_transformer"):
 		# `hidden_layers` unused by this architecture; kept for signature compatibility
@@ -83,7 +86,11 @@ def load_model_from_manifest(manifest_path: str, map_location: str = "cpu") -> t
 	arch = m.get("arch")
 	input_size = int(m.get("input_size"))
 	output_size = int(m.get("output_size"))
-	hidden_layers = int(m.get("hidden_layers", 0))
+	hidden_layers_raw = m.get("hidden_layers", 0)
+	if isinstance(hidden_layers_raw, list):
+		hidden_layers = [int(x) for x in hidden_layers_raw]
+	else:
+		hidden_layers = [int(hidden_layers_raw)]
 	mlp_layers = int(m.get("mlp_layers", 3))
 	activation = m.get("activation", "relu")
 	final_activation = m.get("final_activation", "")

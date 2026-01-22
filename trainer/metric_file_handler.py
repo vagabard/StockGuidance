@@ -22,6 +22,7 @@ class MetricFileHandler:
         "val_mse",
         "train_top10_mse",
         "val_top10_mse",
+        "current_learning_rate",
     ]
 
     def __init__(self, path: str, header: Optional[Sequence[str]] = None):

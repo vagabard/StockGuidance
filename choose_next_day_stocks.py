@@ -37,8 +37,7 @@ import numpy as np
 
 from StockRecommenderFromModel import StockRecommenderFromModel
 from database.db_connect import get_connection
-from feature_windowing import best_fit_feature_vector
-from load_database_rows_into_tensors import fetch_grouped_by_date
+from feature_vector_builder import FeatureVectorBuilder
 from load_latest_raw_stock_data_date import (
     get_latest_raw_stock_data,
 )
@@ -47,7 +46,11 @@ from polygon_fetch import (
 	market_summary_file_path,
 	iso_date,
 )
-from populate_db_raw_stock_info import main as populate_raw_stock_main
+from database.populate_db_daily_delta_stock_data import (
+	get_ordered_date_ids,
+	populate_deltas,
+)
+from database.populate_db_raw_stock_info import main as populate_raw_stock_main
 from train_pytorch_network import TrainPytorchNetwork
 
 # Time (UTC) after which the current day's market data is considered stable
@@ -117,9 +120,9 @@ def _populate_daily_delta_stock_data_range(
 ) -> None:
 	"""Call the stored procedure to backfill ``daily_delta_stock_data``.
 
-	This assumes the MySQL database defines a procedure
-	``populate_daily_delta_stock_data(IN p_start_date_id INT, IN p_end_date_id INT)``
-	which populates/updates rows in ``daily_delta_stock_data`` based on
+	This iterates through dates and calls
+	``populate_daily_delta_stock_data(IN p_date_id INT, IN p_prior_date_id INT, IN p_next_date_id INT)``
+	to populate/update rows in ``daily_delta_stock_data`` based on
 	``raw_stock_data``.
 	"""
 
@@ -129,18 +132,9 @@ def _populate_daily_delta_stock_data_range(
 
 	conn = get_connection(dbinfo_file=dbinfo_file)
 	try:
-		cur = conn.cursor()
-		# Use parameterised call to avoid any formatting issues.
-		db_result = cur.callproc(
-			"populate_daily_delta_stock_data",
-			[start_date_id,]
-		)
-		print("database result = ", db_result,)
-		try:
-			conn.commit()
-		except Exception:
-			# Some drivers may be in autocommit mode; ignore commit errors.
-			pass
+		print(f"Populating daily_delta_stock_data range [{start_date_id}, {end_date_id}]")
+		date_ids = get_ordered_date_ids(conn.cursor())
+		populate_deltas(conn, date_ids, start_date_id=start_date_id, end_date_id=end_date_id)
 	finally:
 		try:
 			conn.close()
@@ -258,8 +252,11 @@ def _score_for_ticker_id(scores: np.ndarray, ticker_id: int, rec: StockRecommend
 
 	idx: int
 	try:
-		# Access private mapping conservatively; fall back to dense ids.
-		ticker_map = getattr(rec, "_ticker_id_map", None)
+		# Use public ticker_ids if available; then try private _ticker_id_map (legacy/internal)
+		ticker_map = getattr(rec, "ticker_ids", None)
+		if ticker_map is None:
+			ticker_map = getattr(rec, "_ticker_id_map", None)
+
 		output_size = int(getattr(rec, "_output_size", len(scores)))
 		if ticker_map and len(ticker_map) == output_size:
 			try:
@@ -469,6 +466,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 	# Determine the latest date already present in raw_stock_data so we can
 	# later backfill any newer NDJSON files into the database.
 	latest_date_id, latest_date = _load_latest_raw_stock_data_date(dbinfo_file=args.dbinfo_file)
+	print(f"Latest raw_stock_data date_id: {latest_date_id}")
 
 	api_key = args.api_key
 	if not api_key:
@@ -601,14 +599,30 @@ def main(argv: Optional[List[str]] = None) -> int:
 	)
 
 	print("Done populating daily_delta_stock_data.")
+	prior_days = 7
+	hidden_layers = "15000,7500,5000"
+	mlp_layers = 4
+	activation = "leaky_relu"
+	final_activation = "sigmoid"
+	day_change_centered = "zero"
+	precision = "fp32"
+	learning_rate = "0.000001"
+	learning_rate_adjustment_parameter = "0.9932"
+	batch_size = 256
+	epochs = 1000
+	period_to_train_on = 1000
+
+
 
 	# ------------------------------------------------------------------
 	# 4. Train a PyTorch network on the most recent 1000 days
 	# ------------------------------------------------------------------
-	print("Preparing to train PyTorch model on most recent 1000 days of data...")
+	# Hyperparameters for this automated training run.
+
+	print(f"Preparing to train PyTorch model on most recent {period_to_train_on} days of data...")
 
 	window = _get_recent_date_id_window_from_daily_delta_stock_data(
-		1000,
+		period_to_train_on,
 		dbinfo_file=args.dbinfo_file,
 	)
 	if window is None:
@@ -616,33 +630,29 @@ def main(argv: Optional[List[str]] = None) -> int:
 		return 0
 
 	# The most recent trading day does not yet have a usable "next day" label,
-	# so restrict the effective training window to end at (most recent - 1).
-	train_start_id, raw_train_end_id = window
-	if raw_train_end_id <= train_start_id:
-		print(
-			"Not enough labeled days available to train a model (need at least "
-			"two distinct dates to compute next-day labels); skipping training.",
-		)
-		return 0
-
-	train_end_id = raw_train_end_id - 1
+	# so restrict the effective training window to end at the second to last date.
+	conn = get_connection(dbinfo_file=args.dbinfo_file)
+	try:
+		cur = conn.cursor()
+		cur.execute("SELECT DISTINCT date_id FROM daily_delta_stock_data ORDER BY date_id DESC LIMIT 2")
+		rows = cur.fetchall()
+		if len(rows) < 2:
+			print("Not enough labeled days available to train a model; skipping training.")
+			return 0
+		train_end_id = int(rows[1][0])
+		# The window from _get_recent_date_id_window_from_daily_delta_stock_data(1001)
+		# might have a start_id that we want to keep, but we need to ensure it's
+		# <= train_end_id.
+		train_start_id = window[0]
+		if train_start_id > train_end_id:
+			train_start_id = train_end_id # fallback
+	finally:
+		conn.close()
 
 	print(
-		"Training window (date_id) for model (up to most recent day - 1): "
+		"Training window (date_id) for model (up to second most recent day): "
 		f"{train_start_id} through {train_end_id} (inclusive).",
 	)
-
-	# Hyperparameters for this automated training run.
-	prior_days = 4
-	hidden_layers = 6000
-	mlp_layers = 4
-	activation = "leaky_relu"
-	final_activation = "sigmoid"
-	day_change_centered = "zero"
-	precision = "fp32"
-	learning_rate = "0.000001"
-	batch_size = 256
-	epochs = 5000
 
 	train_argv = [
 		"--mode=train",
@@ -650,6 +660,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 		f"--epochs={epochs}",
 		f"--batch-size={batch_size}",
 		f"--lr={learning_rate}",
+		f"--learning-rate-adjustment-parameter={learning_rate_adjustment_parameter}",
 		"--train-percent=1.0",
 		"--val-percent=0.0",
 		f"--hidden-layers={hidden_layers}",
@@ -687,22 +698,28 @@ def main(argv: Optional[List[str]] = None) -> int:
 	# 5. Build feature vector for the latest date and get top-5 stocks
 	# ------------------------------------------------------------------
 	print("Fetching grouped features from database for recommendation step...")
-	dates, X_flat, _Y = fetch_grouped_by_date(
-		dbinfo_file=args.dbinfo_file,
-		day_change_centered=day_change_centered,
-		current_day_change=False,
-		volume_ratio=False,
-		vwap_ratio=False,
-		tranaction_ratio=False,
-		# start_date_id=trainer.family_run.train_start_date_id,
-		# end_date_id=trainer.family_run.train_end_date_id,
+	rec = StockRecommenderFromModel(
+		run_dir,
+		device="auto",
+		ensemble_normalize=bool(getattr(args, "ensemble_normalize", False)),
 	)
 
-	print("dates found ", dates)
-	if dates.size == 0 or X_flat.size == 0:
-		print("No data returned from fetch_grouped_by_date; skipping recommendations.")
-		return 0
+	# For inference, we need to use the exact same ticker_ids that the model
+	# was trained on.
+	#
+	# The model was trained with ticker_ids present in both train_start_id
+	# and train_end_id.
 
+	# Build feature vector for the latest date and get top-5 stocks
+	builder = FeatureVectorBuilder.from_db(
+		rec,
+		dbinfo_file=args.dbinfo_file,
+		start_date_id=train_start_id,
+		end_date_id=latest_after_date_id,
+		ticker_pool_end_date_id=train_end_id,
+	)
+
+	dates = builder.dates
 	# Use the most recent available feature date.
 	last_idx = int(len(dates) - 1)
 	feature_date_id = int(dates[last_idx])
@@ -721,20 +738,9 @@ def main(argv: Optional[List[str]] = None) -> int:
 			f"date_id {feature_date_id} (transaction_date lookup returned no row)...",
 		)
 
-	rec = StockRecommenderFromModel(
-		run_dir,
-		device="auto",
-		ensemble_normalize=bool(getattr(args, "ensemble_normalize", False)),
-	)
-	required_prior = rec.get_required_previous_days()
-	expected_input_size = rec.input_size
-
-	feat_vec = best_fit_feature_vector(
-		X_flat,
-		last_idx,
-		int(required_prior),
-		int(expected_input_size),
-		prefer_prior_only=True,
+	feat_vec, feature_date_id = builder.build_for_date(
+		expected_input_size=int(rec.input_size),
+		prefer_prior_only=True
 	)
 
 	# Request top-5 ticker recommendations from the trained model.

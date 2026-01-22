@@ -21,9 +21,8 @@ def ranking_score(predicted_order: Iterable, true_order: Iterable) -> float:
 			raise ValueError("All items in predicted_order must exist in true_order")
 		t0 = pos_true[item]  # 0-based true position
 		gain = float(N - t0)
-		# Discount by TRUE position (heavier discount as true position gets lower/worse)
-		true_p1 = float(t0 + 1)  # 1-based true position
-		denom = 0.5 if true_p1 == 1.0 else math.log2(true_p1)
+		# Discount by PREDICTED position (heavier discount as predicted position gets lower/worse)
+		denom = 1.0 if p1 == 1 else math.log2(float(p1))
 		score += (gain / denom)
 	return score
 
@@ -34,11 +33,11 @@ def ranking_max_score(list_length: int) -> float:
 	N = int(list_length)
 	if N <= 0:
 		return 0.0
-	# Maximum achieved when predicted equals true order; discount by true position
+	# Maximum achieved when predicted equals true order; discount by predicted position
 	total = 0.0
 	for p in range(1, N + 1):  # p is both predicted and true position in perfect ranking
 		gain = float(N - (p - 1))
-		denom = 0.5 if p == 1 else math.log2(float(p))
+		denom = 1.0 if p == 1 else math.log2(float(p))
 		total += gain / denom
 	return total
 
@@ -75,10 +74,10 @@ def ranking_score_from_positions(positions: List[int]) -> float:
 	  - `positions[p-1]` indicates the true 1-based rank of the item placed at
 		predicted position `p` (1 is top/best).
 
-	Scoring (discount by TRUE position):
+	Scoring (discount by PREDICTED position):
 	  - Let t0 = positions[p-1] - 1 (0-based true position).
 	  - gain = N - t0
-	  - discount = 0.5 if (true position)==1 else log2(true position)
+	  - discount = 1.0 if (predicted position)==1 else log2(predicted position)
 	  - score = sum_p gain/discount
 	"""
 
@@ -96,9 +95,8 @@ def ranking_score_from_positions(positions: List[int]) -> float:
 	for p1, true_pos1 in enumerate(positions, start=1):
 		t0 = int(true_pos1) - 1
 		gain = float(N - t0)
-		# Discount by TRUE position (not predicted)
-		tp = float(true_pos1)
-		denom = 0.5 if tp == 1.0 else math.log2(tp)
+		# Discount by PREDICTED position (not true)
+		denom = 1.0 if p1 == 1 else math.log2(float(p1))
 		total += gain / denom
 	return total
 

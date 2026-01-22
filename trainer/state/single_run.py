@@ -50,6 +50,7 @@ class SingleRun:
 	include_features: Sequence[str] | None = None
 	train_validation_test_sets_start_date_id : Optional[int] = None # these are calculated from raw_train_start_with_special_characters and raw_train_end_with_special_characters
 	train_validation_test_sets_end_date_id : Optional[int] = None
+	ticker_ids: List[int] | None = None
 
 
 	def __init__(
@@ -68,6 +69,7 @@ class SingleRun:
 		file_structure: FileStructureSingleRunHandler | None = None,
 		train_start_date_id: Optional[int] = None,
 		train_end_date_id: Optional[int] = None,
+		ticker_ids: List[int] | None = None,
 
 	) -> None:
 		"""Explicit initialiser for :class:`SingleRun`.
@@ -90,6 +92,7 @@ class SingleRun:
 		self.include_features = include_features
 		self.train_validation_test_sets_start_date_id = train_start_date_id
 		self.train_validation_test_sets_end_date_id = train_end_date_id
+		self.ticker_ids = ticker_ids
 		if (self.train_validation_test_sets_start_date_id is None or self.train_validation_test_sets_end_date_id is None):
 			date_resolver = DateBoundResolver(self.prior_days)
 			if self.train_validation_test_sets_start_date_id is None:
@@ -162,6 +165,7 @@ class SingleRun:
 			"include_features": include_features,
 			"train_validation_test_sets_start_date_id": self.train_validation_test_sets_start_date_id,
 			"train_validation_test_sets_end_date_id": self.train_validation_test_sets_end_date_id,
+			"ticker_ids": self.ticker_ids,
 			"file_structure": self.file_structure.to_dict()
 
 			#single_run: "FamilyRun"
@@ -236,6 +240,7 @@ class SingleRun:
 			file_structure=my_file_structure,
 			train_start_date_id=sr_dict.get("train_validation_test_sets_start_date_id"),
 			train_end_date_id=sr_dict.get("train_validation_test_sets_end_date_id"),
+			ticker_ids=sr_dict.get("ticker_ids"),
 		)
 
 	def to_commandline(self) -> List[str]:

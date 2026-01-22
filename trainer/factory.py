@@ -23,6 +23,7 @@ def create_model_and_optimizer(
     activation: str,
     device: torch.device,
     lr: float,
+    to_device: bool = True,
 ) -> tuple[torch.nn.Module, optim.Optimizer, torch.amp.GradScaler, bool, Optional[torch.dtype]]:
 	"""Instantiate model via make_model and create Adam optimizer and AMP scaler."""
 	if make_model is None:
@@ -32,11 +33,12 @@ def create_model_and_optimizer(
 		arch=str(family_run.neural_network_type),
 		input_size=int(input_size),
 		output_size=int(output_size),
-		hidden_layers=int(family_run.hidden_layer_size),
+		hidden_layers=family_run.hidden_layer_size,
 		num_layers=int(num_layers),
 		activation=str(activation),
 	)
-	model = model.to(device)
+	if to_device:
+		model = model.to(device)
 	optimizer = optim.Adam(model.parameters(), lr=float(lr))  # type: ignore[attr-defined]
 
 	requested_precision = (family_run.precision or "auto").lower()

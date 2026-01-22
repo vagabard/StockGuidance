@@ -4,9 +4,42 @@ import json
 import sys
 import traceback
 from datetime import datetime
-from typing import Any, Dict, List, Tuple
+from typing import Any, Callable, Dict, List, Tuple, Optional
+from pathlib import Path
 
 
+def get_preferences_path() -> Path:
+	"""Return the path to the preferences JSON file in the cache directory."""
+	# Path to this file is viewers/compare_runs_shared.py.
+	# Root is the parent of viewers/.
+	root = Path(__file__).resolve().parent.parent
+	cache_dir = root / "cache"
+	cache_dir.mkdir(exist_ok=True)
+	return cache_dir / "viewer_preferences.json"
+
+
+def load_preferences() -> Dict[str, Any]:
+	"""Load preferences from disk."""
+	path = get_preferences_path()
+	if path.exists():
+		try:
+			with open(path, "r") as f:
+				return json.load(f)
+		except Exception:
+			pass
+	return {}
+
+
+def save_preference(key: str, value: Any) -> None:
+	"""Save a single preference to disk."""
+	prefs = load_preferences()
+	prefs[key] = value
+	path = get_preferences_path()
+	try:
+		with open(path, "w") as f:
+			json.dump(prefs, f, indent=2)
+	except Exception:
+		pass
 
 
 def _is_timestamp_dir(name: str) -> bool:
@@ -30,7 +63,7 @@ def has_any_simulation_files(path: str) -> bool:
 		return False
 
 	for n in names:
-		if re.match(r"stock_simulation_\d+(?:days|percent)?(?:_epoch_\d+)?\.csv$", n):
+		if re.match(r"stock_simulation_(?:ensemble_)?\d+(?:days|percent)?(?:_epoch_\d+)?\.csv$", n):
 			return True
 		if n.startswith("recommendations-") and n.endswith(".txt"):
 			return True
@@ -561,6 +594,7 @@ def plot_lines(
 	y_ref: float | None = None,
 	log_y: bool = False,
 	watermark_text: str | None = None,
+	key: str | None = None,
 ):  # type: ignore[override]
 	"""Shared small plotting helper for viewers.
 
@@ -620,7 +654,10 @@ def plot_lines(
 				pass
 
 		fig.update_layout(height=height, margin=dict(l=40, r=20, t=30, b=40))
-		st.plotly_chart(fig, width='stretch')
+		# NOTE: Streamlit auto-generates element IDs for Plotly charts based on the
+		# figure + params. When many similar charts are rendered (e.g., in loops or
+		# placeholder-data scenarios), IDs can collide unless we pass an explicit key.
+		st.plotly_chart(fig, use_container_width=True, key=key)
 	except Exception as e:
 		print(f"Plotly error in plot_lines: {e}")
 		# As an ultra‑simple fallback, show the data table so that the user at
@@ -637,4 +674,141 @@ def plot_lines(
 				traceback.print_exception(e2)
 				# Last‑ditch: print to stderr.
 				#debug(f"plot_lines fallback: unable to display plot or dataframe: {e2}")
+
+
+
+def render_common_params(
+	common: Dict[str, Any],
+	*,
+	title: str = "Common parameters across runs",
+	expanded: bool = False,
+) -> None:
+	"""Render a shared "common parameters" expander in Streamlit.
+
+	Both viewers show a JSON blob of parameters that are identical across the
+	currently scoped runs. Keeping the display consistent avoids subtle UI drift.
+
+	The function is safe to import in non-Streamlit contexts because it imports
+	Streamlit lazily.
+	"""
+	try:  # pragma: no cover - UI rendering
+		import streamlit as st  # type: ignore
+	except Exception:
+		return
+
+	with st.expander(title, expanded=expanded):
+		if not common:
+			st.caption("No common attributes across the current selection.")
+		else:
+			st.json(common)
+
+
+def sidebar_family_and_build_selector(
+	*,
+	timestamp_names: List[str],
+	family_names: List[str],
+	family_to_ts: Dict[str, List[str]],
+	key_prefix: str,
+	default_select_all_builds: bool,
+	empty_builds_means_all: bool = True,
+	on_runs_updated: Callable[[List[str]], None] | None = None,
+	caption: str | None = None,
+) -> Tuple[List[str], List[str], List[str]]:
+	"""Shared sidebar selector for (families, builds/timestamps).
+
+	Requirements addressed:
+	- select one or more run families
+	- select one or more individual runs (timestamps)
+	- shared behavior across viewers
+
+	Behavior:
+	- If *no families* are selected, the selector behaves as "all families".
+	- If *no builds* are selected, the selector behaves as "all builds".
+
+	Returns
+	-------
+	selected_builds, selected_families, available_builds
+	"""
+	try:  # pragma: no cover - UI rendering
+		import streamlit as st  # type: ignore
+	except Exception:
+		# Non-Streamlit context: fall back to selecting everything.
+		return list(timestamp_names), [], list(timestamp_names)
+
+	if caption:
+		st.sidebar.caption(caption)
+
+	# --- Family selection (multi) ---
+	fam_key = f"{key_prefix}_families"
+	prev_fams = st.session_state.get(fam_key)
+	if not isinstance(prev_fams, list):
+		prev_fams = []
+	prev_fams = [f for f in prev_fams if f in family_names]
+	selected_families = st.sidebar.multiselect(
+		"Run families",
+		options=family_names,
+		default=prev_fams,
+		key=fam_key,
+		help=(
+			"Select one or more families. If none are selected, all families are included."
+		),
+	)
+
+	# --- Builds selection (multi) ---
+	if selected_families:
+		# Preserve order as per family_names iteration; de-duplicate timestamps.
+		seen: set[str] = set()
+		available_builds: List[str] = []
+		for fam in selected_families:
+			for ts in family_to_ts.get(fam, []):
+				ts_s = str(ts)
+				if ts_s not in seen:
+					available_builds.append(ts_s)
+					seen.add(ts_s)
+	else:
+		available_builds = list(timestamp_names)
+
+	builds_key = f"{key_prefix}_builds"
+	prev_builds = st.session_state.get(builds_key)
+	if not isinstance(prev_builds, list):
+		prev_builds = []
+	prev_builds = [b for b in prev_builds if b in available_builds]
+	if not prev_builds and default_select_all_builds:
+		prev_builds = list(available_builds)
+
+	selected_builds = st.sidebar.multiselect(
+		"Builds (timestamps)",
+		options=available_builds,
+		default=prev_builds,
+		key=builds_key,
+		help="Select one or more timestamped runs. If none are selected, all available builds are included.",
+	)
+
+	# If at least one family is selected but no builds are selected, treat the
+	# empty selection as "all available builds for the selected families".
+	# This keeps behavior consistent across viewers: choosing a family should
+	# immediately scope the run grid without requiring a second click.
+	if (not selected_builds) and selected_families:
+		selected_builds = list(available_builds)
+	elif (not selected_builds) and empty_builds_means_all:
+		selected_builds = list(available_builds)
+
+	# Optional callback for viewers that want to react to run selection updates.
+	# We only call it when the effective selected_builds list changes.
+	if on_runs_updated is not None:
+		last_key = f"{key_prefix}_last_selected_builds"
+		prev = st.session_state.get(last_key)
+		# Normalize to list[str]
+		prev_list: List[str] = prev if isinstance(prev, list) else []
+		prev_list = [str(x) for x in prev_list]
+		cur_list = [str(x) for x in selected_builds]
+		if cur_list != prev_list:
+			st.session_state[last_key] = list(cur_list)
+			try:
+				on_runs_updated(list(cur_list))
+			except Exception:
+				# Defensive: selection callbacks should not break the UI.
+				pass
+
+	return selected_builds, selected_families, available_builds
 

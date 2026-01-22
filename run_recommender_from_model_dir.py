@@ -20,6 +20,7 @@ DB access is standardized to a single ``--dbinfo-file`` argument.
 from __future__ import annotations
 
 import argparse
+import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Any
@@ -27,8 +28,8 @@ from typing import Optional, Any
 import numpy as np
 
 from StockRecommenderFromModel import StockRecommenderFromModel
-from feature_windowing import concat_features_current_then_prior
-from load_database_rows_into_tensors import fetch_grouped_by_date
+from feature_vector_builder import FeatureVectorBuilder
+from load_database_rows_into_tensors import get_recent_date_id_window
 
 from choose_next_day_stocks import (
 	_lookup_transaction_date_for_date_id,
@@ -106,11 +107,6 @@ def _build_feature_vector_for_latest_date(
 	"""
 
 	prior_days = int(rec.get_required_previous_days())
-	day_change_centered = rec.get_day_change_centered()
-	current_day_change = rec.get_current_day_change_used()
-	volume_ratio = rec.get_volume_ratio_used()
-	vwap_ratio = rec.get_vwap_ratio_used()
-	tranaction_ratio = rec.get_tranaction_ratio_used()
 	expected_input_size = int(rec.input_size)
 
 	print(
@@ -118,48 +114,25 @@ def _build_feature_vector_for_latest_date(
 		"step..."
 	)
 
-	dates, X_flat, _Y = fetch_grouped_by_date(
-		dbinfo_file=dbinfo_file,
-		day_change_centered=day_change_centered,
-		current_day_change=current_day_change,
-		volume_ratio=volume_ratio,
-		vwap_ratio=vwap_ratio,
-		tranaction_ratio=tranaction_ratio,
-	)
-	if dates.size == 0 or X_flat.size == 0:
-		raise RuntimeError(
-			"No data returned from fetch_grouped_by_date; cannot build feature vector."
-		)
+	# Efficiency: Only fetch enough dates to satisfy the priors.
+	window_size = prior_days + 10  # Buffer of 10 days
 
-	# Choose index: explicit date_id if provided, else latest
 	if date_id is not None:
-		# Find the index of the specified date_id in the dates array
-		matches = np.where(dates == int(date_id))[0]
-		if matches.size == 0:
-			raise ValueError(
-				f"Requested date_id {date_id} not found in available dates."
-			)
-		date_idx = int(matches[0])
+		start_date_id = max(0, int(date_id) - window_size)
 	else:
-		date_idx = int(len(dates) - 1)
+		window = get_recent_date_id_window(max_days=window_size, dbinfo_file=dbinfo_file)
+		start_date_id = window[0] if window else None
 
-	feature_date_id = int(dates[date_idx])
-
-	print(
-		"Building feature vector for latest data point: "
-		f"date_id {feature_date_id}, prior_days={prior_days}, "
-		f"day_change_centered={day_change_centered}...",
+	builder = FeatureVectorBuilder.from_db(
+		rec,
+		dbinfo_file=dbinfo_file,
+		start_date_id=start_date_id,
 	)
 
-	# Always use [current + priors] layout; this matches the training provider.
-	feat_vec = concat_features_current_then_prior(X_flat, date_idx, prior_days)
-	flat_size = int(np.asarray(feat_vec).size)
-	if flat_size != expected_input_size:
-		raise ValueError(
-			"Feature vector size mismatch for latest date: "
-			f"expected {expected_input_size}, got {flat_size}. "
-			"Check that the manifest feature flags match the DB features."
-		)
+	feat_vec, feature_date_id = builder.build_for_date(
+		date_id=date_id,
+		expected_input_size=expected_input_size
+	)
 
 	return feat_vec, feature_date_id
 
@@ -186,13 +159,14 @@ def main(argv: Optional[list[str]] = None) -> int:
 			date_id=args.date_id,
 		)
 	except Exception as e:
+		traceback.print_exc(e)
 		print(f"Failed to build feature vector for latest date: {e}")
 		return 1
 
 	# Look up human-readable transaction_date for logging, if available.
 	recent_tx_date = _lookup_transaction_date_for_date_id(feature_date_id, dbinfo_file=args.dbinfo_file)
-	scores: list[Any]
-	top_ids: list[Any]
+	scores: np.ndarray
+	top_ids: list[int]
 
 
 	# Always pass current_date_id and dbinfo_file so that the transactions
@@ -245,12 +219,16 @@ def main(argv: Optional[list[str]] = None) -> int:
 
 	timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
 	rec_file = out_dir / f"recommendations-{timestamp}.txt"
+	rec_text = "\n".join(rec_output_lines) + "\n"
 	try:
-		rec_file.write_text("\n".join(rec_output_lines) + "\n", encoding="utf-8")
+		rec_file.write_text(rec_text, encoding="utf-8")
 		print(f"Recommendations saved to {rec_file}")
 	except Exception as e:  # pragma: no cover - defensive logging
 		print(f"Failed to write recommendations file {rec_file}: {e}")
 		return 1
+
+	# Email the results
+	rec.email_recommendations(rec_text)
 
 	return 0
 

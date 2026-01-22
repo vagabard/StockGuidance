@@ -114,7 +114,7 @@ def build_parser() -> argparse.ArgumentParser:
 	parser.add_argument(
 		"--learning-rate-adjustment-parameter",
 		type=float,
-		default=0.998,
+		default=1.0,
 		help=(
 			"Learning rate adjustment parameter used as gamma in ExponentialLR. "
 			"Controls per-epoch multiplicative decay of the learning rate."
@@ -141,9 +141,13 @@ def build_parser() -> argparse.ArgumentParser:
 	)
 	parser.add_argument(
 		"--hidden-layers",
-		type=int,
-		default=6000,
-		help="Hidden layer width for MLP (defaults to input size if <=0)",
+		type=str,
+		default="6000",
+		help=(
+			"Hidden layer configuration for MLP. Accepts a comma-separated list of "
+			"integers representing the number of nodes in each hidden layer "
+			"(e.g., '6000,3000,1000'). Defaults to input size if <=0 or empty."
+		),
 	)
 	# Accept single int or inclusive range like "2-4" for multiple runs
 	parser.add_argument(
@@ -158,13 +162,13 @@ def build_parser() -> argparse.ArgumentParser:
 	parser.add_argument(
 		"--train-percent",
 		type=float,
-		default="0.90",
+		default="0.95",
 		help="percent of data to train on",
 	)
 	parser.add_argument(
 		"--val-percent",
 		type=float,
-		default="0.05",
+		default="0.04",
 		help="percent of data to use for validation",
 	)
 	# parser.add_argument(
@@ -188,7 +192,7 @@ def build_parser() -> argparse.ArgumentParser:
 	# 	),
 	# )
 	parser.add_argument(
-		"--raw-train-start-with-special-characters",
+		'--raw-train-start-with-special-characters','--train-start-date-id',
 		type=str,
 		default=None,
 		help=(
@@ -203,7 +207,7 @@ def build_parser() -> argparse.ArgumentParser:
 		),
 	)
 	parser.add_argument(
-		"--raw-train-end-with-special-characters",
+		'--raw-train-end-with-special-characters','--train-end-date-id',
 		type=str,
 		default=None,
 		help=(
@@ -285,7 +289,7 @@ def build_parser() -> argparse.ArgumentParser:
 			"random_order_train_validation",
 			"mix_training_and_validation",
 		],
-		default="random_order_train_validation",
+		default="mix_training_and_validation",
 		help=(
 			"How to split train/val/test: sequential (by time/index), "
 			"random_order_train_validation (shuffled indices), "
@@ -306,25 +310,6 @@ def build_parser() -> argparse.ArgumentParser:
 		help=(
 			"Math precision for training/inference: auto (CUDA->fp16 else fp32), "
 			"fp32, fp16, or bf16"
-		),
-	)
-	parser.add_argument(
-		"--run-repeat-index",
-		type=int,
-		default=1,
-		help=(
-			"Internal index (1-based) of this repeat when --run-repeats > 1. "
-			"Normally set by the launcher; users do not need to specify this."
-		),
-	)
-	parser.add_argument(
-		"--initial-run",
-		type=str,
-		default=None,
-		help=(
-			"Identifier of the initial run in a compound invocation. "
-			"This is normally set by higher-level harnesses to allow grouping "
-			"related runs in comparison tools."
 		),
 	)
 	parser.add_argument(
@@ -402,12 +387,6 @@ def build_parser() -> argparse.ArgumentParser:
 		"--simulate-after",
 		action="store_true",
 		help="After saving the trained model, run simulate_trading on it",
-	)
-	parser.add_argument(
-		"--simulate-percent",
-		type=float,
-		default=5.0,
-		help="Percent of dates to simulate in simulate_trading (last N percent)",
 	)
 	parser.add_argument(
 		"--simulate-top-k",

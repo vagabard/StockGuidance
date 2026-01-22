@@ -10,31 +10,29 @@ import torch
 from trainer.torch_interface.compat import TORCH_AVAILABLE
 
 
-def tensorize_and_sanitize(x, y):
-    """Convert inputs to float32 torch_interface tensors and replace NaN/Inf values.
+def tensorize_and_sanitize(x, y, device=None, non_blocking=False):
+    """Convert inputs to float32 torch tensors and replace NaN/Inf values.
 
-    Constructs tensors directly on the CUDA device when available to avoid
-    extra host→device copies. If torch_interface is not available, returns inputs
-    unchanged (memest mode).
+    Optionally constructs tensors directly on the provided device.
+    If torch is not available, returns inputs unchanged.
     """
     if not TORCH_AVAILABLE:
         return x, y
 
-    # Prefer CUDA when available to save a CPU→GPU transfer later.
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")  # type: ignore[attr-defined]
+    if device is None:
+        device = torch.device("cpu")
 
     # Convert/transfer X
     if not isinstance(x, torch.Tensor):
-        # Create directly on target device; as_tensor allows device specification.
         x = torch.as_tensor(np.asarray(x, dtype=np.float32), dtype=torch.float32, device=device)
     else:
-        x = x.to(device=device, dtype=torch.float32)
+        x = x.to(device=device, dtype=torch.float32, non_blocking=non_blocking)
 
     # Convert/transfer y
     if not isinstance(y, torch.Tensor):
         y = torch.as_tensor(np.asarray(y, dtype=np.float32), dtype=torch.float32, device=device)
     else:
-        y = y.to(device=device, dtype=torch.float32)
+        y = y.to(device=device, dtype=torch.float32, non_blocking=non_blocking)
 
     # Sanitize NaN/Inf values on-device
     x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)

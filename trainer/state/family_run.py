@@ -90,11 +90,10 @@ class FamilyRun:
 	volume_ratio : bool = False
 	vwap_ratio : bool = False
 	transaction_ratio : bool = False
-	raw_train_start_with_special_characters : Optional[str] = None, # keep this and the next as str, so we can write a relative number, like +100, or -100, to indicate distance from an end, as well as absolute distance
-	raw_train_end_with_special_characters : Optional[str] = None,
-	# If set, pick a random contiguous window such that end_index - start_index == duration
-	random_training_duration : Optional[int] = None,
-	split_mode : Optional[str] = None,
+	raw_train_start_with_special_characters : Optional[str] = None # keep this and the next as str, so we can write a relative number, like +100, or -100, to indicate distance from an end, as well as absolute distance
+	raw_train_end_with_special_characters : Optional[str] = None
+	random_training_duration : Optional[int] = None
+	split_mode : Optional[str] = None
 	random_seed_splits : Optional[int] = None
 	train_percent : Optional[float] = None
 	val_percent : Optional[float] = None
@@ -110,11 +109,10 @@ class FamilyRun:
 	run_repeats : Optional[int] = None
 
 	neural_network_type : Optional[str] = None
-	hidden_layer_size : Optional[int] = None
+	hidden_layer_size : Optional[List[int]] = None
 	drop_last : Optional[bool] = False
 	persistent_workers : Optional[bool] = None
 
-	family_commands:list[list[str]] = None
 
 	use_ranking_error_loss : bool = False
 	rank_temperature : float = 0.01
@@ -128,6 +126,8 @@ class FamilyRun:
 	trading_interval : int = 0
 	ensemble_interval : int = 0
 	simulate_after_training : bool = False
+
+	ticker_ids : List[int] = None
 
 	# Database connection info (optional; when provided via CLI or restored from dict)
 	dbinfo: Optional["DbInfo"] = None
@@ -208,7 +208,8 @@ class FamilyRun:
 			run_repeats = getattr(args, "run_repeats", None)
 
 			neural_network_type = getattr(args, "arch", None)
-			hidden_layer_size = getattr(args, "hidden_layers", None)
+			hidden_layers_raw = getattr(args, "hidden_layers", "")
+			hidden_layer_size = [int(x) for x in general_arg_parser_understands_lists(str(hidden_layers_raw), "hidden_layers")]
 			drop_last = getattr(args, "drop_last", False)
 			persistent_workers = getattr(args, "persistent_workers", None)
 
@@ -255,7 +256,6 @@ class FamilyRun:
 				current_index=0,
 				completed=False,
 				limit=limit,
-#					current_day_change=args.day_change, #a hack, skipping this for now
 				volume_ratio=args.volume_ratio,
 				vwap_ratio=args.vwap_ratio,
 				transaction_ratio=args.transaction_ratio,
@@ -292,7 +292,8 @@ class FamilyRun:
 				trading_interval=args.trading_interval,
 				ensemble_interval=args.ensemble_interval,
 				simulate_after_training=args.simulate_after,
-				file_structure=file_structure
+				file_structure=file_structure,
+				ticker_ids=getattr(args, "ticker_ids", None)
 			)
 			new_family_run.file_structure = file_structure
 			return new_family_run
@@ -394,6 +395,8 @@ class FamilyRun:
 		# list for JSON serialisation.
 		data["base_optional_features"] = sorted(str(v) for v in self.base_optional_features)
 		data["base_args"] = list(self.base_args_list or [])
+		data["hidden_layer_size"] = [int(v) for v in self.hidden_layer_size] if self.hidden_layer_size is not None else None
+		data["ticker_ids"] = list(self.ticker_ids) if self.ticker_ids is not None else None
 		# Normalise the combinations list to plain dictionaries so that
 		# back-references from SingleRun -> FamilyRun are not embedded.
 		serialised_single_runs: List[Dict[str, Any]] = []
@@ -553,7 +556,13 @@ class FamilyRun:
 		pin_GPU_memory = _get_bool("pin_GPU_memory")
 		run_repeats = _get_int("run_repeats") or 1
 		neural_network_type = _get_str("neural_network_type") or "mlp"
-		hidden_layer_size = _get_int("hidden_layer_size") or 0
+		hidden_layer_size = _as_int_list(data.get("hidden_layer_size"))
+		if not hidden_layer_size: # Fallback for old states that might have a single int
+			old_val = _get_int("hidden_layer_size")
+			if old_val is not None:
+				hidden_layer_size = [old_val]
+			else:
+				hidden_layer_size = []
 
 		drop_last = _get_bool("drop_last")
 		persistent_workers = _get_bool("persistent_workers")
@@ -567,6 +576,7 @@ class FamilyRun:
 		ensemble_interval = _get_int("ensemble_interval")
 		simulate_after_training = _get_bool("simulate_after_training") or _get_bool("simulate_after")
 		current_day_change = _get_bool("current_day_change") or _get_bool("change_in_price_today")
+		ticker_ids = _as_int_list(data.get("ticker_ids")) if data.get("ticker_ids") is not None else None
 
 		# Rehydrate optional DB info if present
 		dbinfo_obj = None
@@ -651,6 +661,7 @@ class FamilyRun:
 			ensemble_interval=ensemble_interval,
 			simulate_after_training=simulate_after_training,
 			current_day_change=current_day_change,
+			ticker_ids=ticker_ids,
 		)
 
 	def save(self) -> Tuple[Dict[str, Any], str]:

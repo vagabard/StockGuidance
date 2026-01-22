@@ -4,7 +4,7 @@ Modules:
 - compat: optional torch_interface imports and TORCH_AVAILABLE flag
 - utils: small shared helpers (counting, bytes formatting, CSV opener)
 - device: device/precision setup and enforcement
-- datasets: RangeDataset/IndexDataset and batching helpers
+- datasets: IndexDataset and batching helpers
 - splits: train/val/test split helpers
 - dataloaders: optional DataLoader construction
 - ranking: ranking primitives and position utilities

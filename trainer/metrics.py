@@ -8,18 +8,20 @@ import torch
 from trainer.torch_interface.compat import  nn
 from .loss_functions.losses import mse_restricted, rank_range_displacement
 from trainer.loss_functions.ranking import batch_positions_from_prediction_and_labels, ranking_error_from_positions
+from trainer.util.utils import tensorize_and_sanitize
 
 
 def eval_epoch(
 	model: "nn.Module",
-	batch_iter: Iterable[Tuple["torch_interface.Tensor", "torch_interface.Tensor"]],
-	device: "torch_interface.device",
+	batch_iter: Iterable[Tuple["torch.Tensor", "torch.Tensor"]],
+	device: "torch.device",
 	amp_enabled: bool = False,
-	amp_dtype: Optional["torch_interface.dtype"] = None,
+	amp_dtype: Optional["torch.dtype"] = None,
 	rank_lower: int = 1,
 	rank_upper: int = 10,
 	compute_rank_err: bool = True,
 	compute_rank_disp: bool = True,
+	pin_memory: bool = False,
 ) -> Tuple[float, float, float]:
 	model.eval()
 	total = 0
@@ -34,6 +36,7 @@ def eval_epoch(
 	with torch.no_grad():
 		with amp_cm:
 			for xb, yb in batch_iter:
+				xb, yb = tensorize_and_sanitize(xb, yb, device=device, non_blocking=pin_memory)
 				# print(xb.shape)
 				# print(yb.shape)
 				pred = model(xb)

@@ -1,22 +1,34 @@
 import os
 import re
+import sys
+from pathlib import Path
 from typing import Any, Dict, List, Tuple
 import re as _re
+
+# Add project root to sys.path to allow imports from sibling packages like 'database'
+root_path = Path(__file__).resolve().parent.parent
+if str(root_path) not in sys.path:
+    sys.path.insert(0, str(root_path))
 
 #import pandas as pd  # type: ignore
 import streamlit as st  # type: ignore
 from pandas import read_csv, DataFrame
 
-from compare_runs_shared import (
+
+from viewers.compare_runs_shared import (
     build_run_families,
     build_timestamp_list,
     compute_common_params,
     compute_selected_timestamps,
     group_runs_by_timestamp,
     plot_lines,
+    render_common_params,
     runs_to_dataframe_dicts,
     scan_runs,
+    sidebar_family_and_build_selector,
     has_any_simulation_files,
+    load_preferences,
+    save_preference,
 )
 
 
@@ -164,8 +176,9 @@ def _find_epoch_files(run_path: str) -> List[Tuple[int, int, str]]:
         #   stock_simulation_10_epoch_3.csv
         #   stock_simulation_10d_epoch_3.csv
         #   stock_simulation_10p_epoch_3.csv
+        #   stock_simulation_ensemble_10d_epoch_3.csv
         # We ignore the optional d/p variant when parsing set_size.
-        m = re.match(r"stock_simulation_(\d+)(?:days|percent)?_epoch_(\d+)\.csv$", fname)
+        m = re.match(r"stock_simulation_(?:ensemble_)?(\d+)(?:days|percent)?_epoch_(\d+)\.csv$", fname)
         if not m:
             continue
         try:
@@ -200,8 +213,9 @@ def _load_end_csv(run_path: str) -> Dict[int, str]:
         #   stock_simulation_10.csv
         #   stock_simulation_10d.csv
         #   stock_simulation_10p.csv
+        #   stock_simulation_ensemble_10d.csv
         # The optional d/p suffix is ignored when deriving set_size.
-        m = re.match(r"stock_simulation_(\d+)(?:days|percent)?\.csv$", fname)
+        m = re.match(r"stock_simulation_(?:ensemble_)?(\d+)(?:days|percent)?\.csv$", fname)
         if not m:
             continue
         try:
@@ -445,7 +459,7 @@ def _run_as_script() -> None:
 
     st.set_page_config(page_title="Run Statistics Viewer", layout="wide")
 
-    default_base = os.path.join(os.getcwd(), "data")
+    default_base = os.path.join(os.getcwd(), "../data")
     win_default = r"C:\\Projects\\StockGuidance\\data"
     base_dir = st.sidebar.text_input(
         "Base data directory",
@@ -456,7 +470,18 @@ def _run_as_script() -> None:
 
     # --- Filtering based on "Runs with simulation" checkbox ---
     st.sidebar.subheader("Filter options")
-    sim_only = st.sidebar.checkbox("Runs with simulation", value=False)
+
+    # Initialise session state from preferences on first load
+    prefs = load_preferences()
+    if "crsv_sim_only" not in st.session_state:
+        st.session_state["crsv_sim_only"] = prefs.get("crsv_sim_only", False)
+
+    sim_only = st.sidebar.checkbox(
+        "Runs with simulation",
+        value=st.session_state["crsv_sim_only"],
+        key="crsv_sim_only",
+        on_change=lambda: save_preference("crsv_sim_only", st.session_state["crsv_sim_only"]),
+    )
 
     if sim_only:
         filtered_runs = []
@@ -493,66 +518,40 @@ def _run_as_script() -> None:
     )
 
     # ------------------------------------------------------------------
-    # Sidebar selection: run family -> underlying builds (timestamps)
+    # Sidebar selection: families + builds (shared across viewers)
     # ------------------------------------------------------------------
-    # Provide a small refresh control above the selectors. Pressing this
-    # button causes Streamlit to rerun the script, re-executing
-    # ``scan_runs(base_dir)`` and repopulating the family/build lists with
-    # any newly created timestamp directories.
     st.sidebar.button("Refresh runs list")
-    st.sidebar.subheader("Select family and builds")
+    st.sidebar.subheader("Select families and builds")
 
-    # Primary selector: run families derived from the directory structure. The
-    # "(all families)" option allows cross-family comparisons based purely
-    # on build (timestamp) selection.
-    family_options = ["(all families)"] + family_names
-    fam_key = "crsv_family_sel"
-    cur_family = st.session_state.get(fam_key, "(all families)")
-    if cur_family not in family_options:
-        cur_family = "(all families)"
-    family_sel = st.sidebar.selectbox(
-        "Run family",
-        options=family_options,
-        index=family_options.index(cur_family),
-        key=fam_key,
+    def update_list_of_runs_selected(selected_runs: List[str]) -> None:
+        st.session_state["crsv_runs_selected"] = list(selected_runs)
+
+    selected_builds, selected_families, _available_builds = sidebar_family_and_build_selector(
+        timestamp_names=timestamp_names,
+        family_names=family_names,
+        family_to_ts=family_to_ts,
+        key_prefix="crsv",
+        # Keep the viewer light on initial load: require the user to pick a
+        # family before we build the large statistics table and charts.
+        default_select_all_builds=False,
+        empty_builds_means_all=False,
+        on_runs_updated=update_list_of_runs_selected,
     )
 
-    # Determine which timestamped builds are available for the chosen
-    # family. When "(all families)" is selected we expose every
-    # discovered timestamp.
-    if family_sel == "(all families)":
-        available_builds = timestamp_names
-    else:
-        available_builds = family_to_ts.get(family_sel, [])
-
-    # Multiselect of builds (logical single runs) within the chosen
-    # family. Persisted across reruns.
-    builds_ms_key = "crsv_build_multiselect"
-    builds_default = st.session_state.get(builds_ms_key)
-    if not builds_default:
-        builds_default = list(available_builds)
-    builds_default = [b for b in builds_default if b in available_builds]
-    selected_builds = st.sidebar.multiselect(
-        "Builds (timestamps)",
-        options=available_builds,
-        default=builds_default,
-        key=builds_ms_key,
-        help="Select which timestamped single runs to include in the statistics table.",
-    )
-
-    selected_builds_set = set(selected_builds or available_builds)
+    # Match the behavior of the other runs viewer: do not populate the grid
+    # or draw charts until at least one run family has been selected.
+    if not selected_families:
+        st.info("Select one or more run families in the sidebar to begin.")
+        return
+    selected_builds_set = set(selected_builds)
 
     # Build per‑timestamp statistics rows
     stat_rows = _build_statistics_rows(base_dir, ts_to_runs)
     common = compute_common_params(stat_rows)
     common_keys = sorted(common.keys())
 
-    # Show common parameters for quick inspection
-    with st.expander("Common parameters across runs", expanded=False):
-        if not common:
-            st.caption("No common attributes across discovered runs.")
-        else:
-            st.json(common)
+    # Shared common-params display
+    render_common_params(common, title="Common parameters across runs", expanded=False)
 
     # Construct DataFrame using the shared helper so that identifying
     # columns (``run`` / ``run_timestamp``) show up consistently.
@@ -567,7 +566,14 @@ def _run_as_script() -> None:
 
     # Simple substring filter (applied on top of the Start/End range).
     with st.expander("Filter runs", expanded=False):
-        search = st.text_input("Substring filter (any column)", key="crsv_search_text")
+        if "crsv_search_text" not in st.session_state:
+            st.session_state["crsv_search_text"] = prefs.get("crsv_search_text", "")
+        search = st.text_input(
+            "Substring filter (any column)",
+            value=st.session_state["crsv_search_text"],
+            key="crsv_search_text",
+            on_change=lambda: save_preference("crsv_search_text", st.session_state["crsv_search_text"]),
+        )
 
     # Hide rep rows by default in the main table; keep them available below
     # in a separate expander. We still compute charts for all variants.
@@ -597,11 +603,11 @@ def _run_as_script() -> None:
     # enabled/disabled easily, mirroring compare_runs_viewer.
     all_cols = list(fdf.columns)
     vis_key = "crsv_visible_cols"
-    if vis_key in st.session_state:
-        vis_default = [c for c in st.session_state[vis_key] if c in all_cols]
-        if not vis_default:
-            vis_default = all_cols
-    else:
+    if vis_key not in st.session_state:
+        st.session_state[vis_key] = prefs.get(vis_key, all_cols)
+
+    vis_default = [c for c in st.session_state[vis_key] if c in all_cols]
+    if not vis_default:
         vis_default = all_cols
 
     visible_cols = st.multiselect(
@@ -609,6 +615,7 @@ def _run_as_script() -> None:
         options=all_cols,
         default=vis_default,
         key=vis_key,
+        on_change=lambda: save_preference(vis_key, st.session_state[vis_key]),
     )
 
     # Determine which columns to *display* in the grid. Internally we always
@@ -687,32 +694,72 @@ def _run_as_script() -> None:
 
     st.subheader("Per‑run epoch statistics")
 
+    # Checkboxes for graph visibility
+    st.markdown("##### Graph visibility")
+    col1, col2, col3 = st.columns(3)
+
+    if "crsv_show_final" not in st.session_state:
+        st.session_state["crsv_show_final"] = prefs.get("crsv_show_final", True)
+    if "crsv_show_first5" not in st.session_state:
+        st.session_state["crsv_show_first5"] = prefs.get("crsv_show_first5", True)
+    if "crsv_show_avgcdf" not in st.session_state:
+        st.session_state["crsv_show_avgcdf"] = prefs.get("crsv_show_avgcdf", True)
+
+    with col1:
+        show_final = st.checkbox(
+            "Final value",
+            value=st.session_state["crsv_show_final"],
+            key="crsv_show_final",
+            on_change=lambda: save_preference("crsv_show_final", st.session_state["crsv_show_final"]),
+        )
+    with col2:
+        show_first5 = st.checkbox(
+            "Best first 5 days",
+            value=st.session_state["crsv_show_first5"],
+            key="crsv_show_first5",
+            on_change=lambda: save_preference("crsv_show_first5", st.session_state["crsv_show_first5"]),
+        )
+    with col3:
+        show_avgcdf = st.checkbox(
+            "Average CDF",
+            value=st.session_state["crsv_show_avgcdf"],
+            key="crsv_show_avgcdf",
+            on_change=lambda: save_preference("crsv_show_avgcdf", st.session_state["crsv_show_avgcdf"]),
+        )
+
     # Toggle for grouping mode
     grouping_key = "crsv_chart_grouping"
     grouping_options = [
         "Per run (overlay N lines)",
         "Across runs (overlay runs)",
     ]
+    if grouping_key not in st.session_state:
+        st.session_state[grouping_key] = prefs.get(grouping_key, grouping_options[0])
+
     grouping_mode = st.radio(
         "Chart grouping",
         options=grouping_options,
-        index=grouping_options.index(st.session_state.get(grouping_key, grouping_options[0])) if st.session_state.get(grouping_key) in grouping_options else 0,
+        index=grouping_options.index(st.session_state[grouping_key]) if st.session_state[grouping_key] in grouping_options else 0,
         key=grouping_key,
         help=(
             "Per run: for each run/variant, show one chart per metric with N=1/3/5 overlays.\n"
             "Across runs: for each metric+N, overlay all selected runs (ensemble and reps) on one chart."
         ),
+        on_change=lambda: save_preference(grouping_key, st.session_state[grouping_key]),
     )
 
     # Allow the user to toggle a logarithmic Y‑axis for all charts in this
     # viewer.  The setting is persisted across reruns via session_state so
     # switching selections does not reset the scale preference.
-    log_y_default = bool(st.session_state.get("crsv_log_y", False))
+    if "crsv_log_y" not in st.session_state:
+        st.session_state["crsv_log_y"] = prefs.get("crsv_log_y", False)
+
     log_y = st.checkbox(
         "Logarithmic Y-axis",
-        value=log_y_default,
+        value=st.session_state["crsv_log_y"],
         key="crsv_log_y",
         help="Apply a log scale to the Y axis for all epoch statistics charts.",
+        on_change=lambda: save_preference("crsv_log_y", st.session_state["crsv_log_y"]),
     )
 
     if not selected_ts:
@@ -862,7 +909,7 @@ def _run_as_script() -> None:
                 st.markdown(f"#### {label}")
 
                 # Final by epoch (overlay N)
-                if by_topn:
+                if show_final and by_topn:
                     # Build a unified epoch set
                     all_epochs = sorted({e for m in by_topn.values() for e in m.keys()})
                     plot_df = DataFrame({"epoch": all_epochs})
@@ -884,10 +931,11 @@ def _run_as_script() -> None:
                         y_ref=1000.0,
                         log_y=log_y,
                         watermark_text=("FAKE" if used_placeholder else None),
+                        key=f"crsv_perrun_final__{ts_name}__{label}",
                     )
 
                 # First5 by epoch (overlay N)
-                if by_topn_first5:
+                if show_first5 and by_topn_first5:
                     all_epochs = sorted({e for m in by_topn_first5.values() for e in m.keys()})
                     plot_df = DataFrame({"epoch": all_epochs})
                     for n, epoch_map in sorted(by_topn_first5.items()):
@@ -903,10 +951,11 @@ def _run_as_script() -> None:
                         y_ref=1000.0,
                         log_y=log_y,
                         watermark_text=("FAKE" if used_placeholder else None),
+                        key=f"crsv_perrun_first5__{ts_name}__{label}",
                     )
 
                 # Avg CDF by epoch (overlay N)
-                if by_topn_avgcdf:
+                if show_avgcdf and by_topn_avgcdf:
                     all_epochs = sorted({e for m in by_topn_avgcdf.values() for e in m.keys()})
                     plot_df = DataFrame({"epoch": all_epochs})
                     for n, epoch_map in sorted(by_topn_avgcdf.items()):
@@ -922,6 +971,7 @@ def _run_as_script() -> None:
                         y_ref=1000.0,
                         log_y=log_y,
                         watermark_text=("FAKE" if used_placeholder else None),
+                        key=f"crsv_perrun_avgcdf__{ts_name}__{label}",
                     )
 
             else:
@@ -936,38 +986,41 @@ def _run_as_script() -> None:
     # Render Across-runs charts if that mode is selected
     if grouping_mode == "Across runs (overlay runs)":
         # Final
-        for n in sorted(acc_final.keys()):
-            series_dict = acc_final[n]
-            # Union of all epochs across runs
-            all_epochs = sorted({e for m in series_dict.values() for e in m.keys()})
-            plot_df = DataFrame({"epoch": all_epochs})
-            for series_label, epoch_map in sorted(series_dict.items()):
-                plot_df[series_label] = [epoch_map.get(e) for e in all_epochs]
-            title = f"Final value by epoch — top{n}" if n != 0 else "Final value by epoch"
-            st.markdown(f"**{title}**")
-            plot_lines(plot_df, "epoch", height=300, y_ref=1000.0, log_y=log_y)
+        if show_final:
+            for n in sorted(acc_final.keys()):
+                series_dict = acc_final[n]
+                # Union of all epochs across runs
+                all_epochs = sorted({e for m in series_dict.values() for e in m.keys()})
+                plot_df = DataFrame({"epoch": all_epochs})
+                for series_label, epoch_map in sorted(series_dict.items()):
+                    plot_df[series_label] = [epoch_map.get(e) for e in all_epochs]
+                title = f"Final value by epoch — top{n}" if n != 0 else "Final value by epoch"
+                st.markdown(f"**{title}**")
+                plot_lines(plot_df, "epoch", height=300, y_ref=1000.0, log_y=log_y, key=f"crsv_across_final__top{n}")
 
         # First5
-        for n in sorted(acc_first5.keys()):
-            series_dict = acc_first5[n]
-            all_epochs = sorted({e for m in series_dict.values() for e in m.keys()})
-            plot_df = DataFrame({"epoch": all_epochs})
-            for series_label, epoch_map in sorted(series_dict.items()):
-                plot_df[series_label] = [epoch_map.get(e) for e in all_epochs]
-            title = f"Best first‑5‑day by epoch — top{n}" if n != 0 else "Best first‑5‑day by epoch"
-            st.markdown(f"**{title}**")
-            plot_lines(plot_df, "epoch", height=300, y_ref=1000.0, log_y=log_y)
+        if show_first5:
+            for n in sorted(acc_first5.keys()):
+                series_dict = acc_first5[n]
+                all_epochs = sorted({e for m in series_dict.values() for e in m.keys()})
+                plot_df = DataFrame({"epoch": all_epochs})
+                for series_label, epoch_map in sorted(series_dict.items()):
+                    plot_df[series_label] = [epoch_map.get(e) for e in all_epochs]
+                title = f"Best first‑5‑day by epoch — top{n}" if n != 0 else "Best first‑5‑day by epoch"
+                st.markdown(f"**{title}**")
+                plot_lines(plot_df, "epoch", height=300, y_ref=1000.0, log_y=log_y, key=f"crsv_across_first5__top{n}")
 
         # Avg CDF
-        for n in sorted(acc_avgcdf.keys()):
-            series_dict = acc_avgcdf[n]
-            all_epochs = sorted({e for m in series_dict.values() for e in m.keys()})
-            plot_df = DataFrame({"epoch": all_epochs})
-            for series_label, epoch_map in sorted(series_dict.items()):
-                plot_df[series_label] = [epoch_map.get(e) for e in all_epochs]
-            title = f"Average CDF by epoch — top{n}" if n != 0 else "Average CDF by epoch"
-            st.markdown(f"**{title}**")
-            plot_lines(plot_df, "epoch", height=300, y_ref=1000.0, log_y=log_y)
+        if show_avgcdf:
+            for n in sorted(acc_avgcdf.keys()):
+                series_dict = acc_avgcdf[n]
+                all_epochs = sorted({e for m in series_dict.values() for e in m.keys()})
+                plot_df = DataFrame({"epoch": all_epochs})
+                for series_label, epoch_map in sorted(series_dict.items()):
+                    plot_df[series_label] = [epoch_map.get(e) for e in all_epochs]
+                title = f"Average CDF by epoch — top{n}" if n != 0 else "Average CDF by epoch"
+                st.markdown(f"**{title}**")
+                plot_lines(plot_df, "epoch", height=300, y_ref=1000.0, log_y=log_y, key=f"crsv_across_avgcdf__top{n}")
 
 
 if __name__ == "__main__":  # pragma: no cover - manual invocation only

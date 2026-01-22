@@ -32,7 +32,7 @@ def test_stock_recommender_random_inputs_vary_argmax(tmp_path):
     # Define a small model configuration
     input_size = 16
     output_size = 7
-    hidden_layers = 32
+    hidden_layers = [32]
     mlp_layers = 3
     activation = "relu"
     arch = "mlp"
@@ -71,14 +71,17 @@ def test_stock_recommender_random_inputs_vary_argmax(tmp_path):
 
     # Instantiate the recommender pointing at the run directory
     rec = StockRecommenderFromModel(str(run_dir), device="cpu")
-    assert rec.get_input_size() == input_size
+    assert rec.input_size == input_size
 
     # Generate several random inputs and record the top-1 output id each time
     top1_ids = []
     trials = 12
+    # Mock transactions to satisfy the always-on filter in StockRecommenderFromModel
+    dummy_transactions = np.ones(output_size, dtype=np.float32) * 1000
+
     for _ in range(trials):
         x = np.random.randn(input_size).astype(np.float32)
-        scores, top_ids = rec.getBuyRecommendations(x, top_k=1)
+        scores, top_ids = rec.getBuyRecommendations(x, top_k=1, transactions_per_ticker=dummy_transactions)
         #print(top_ids[0])
         assert scores.shape == (output_size,)
         assert len(top_ids) == 1

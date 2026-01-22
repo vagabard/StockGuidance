@@ -52,11 +52,11 @@ def test_split_datasets_uses_expected_window_with_floating_head_tail(monkeypatch
 
 	# Number of synthetic dates we want the provider to see. Keeping this
 	# non-round so fractional trimming has to go through floor/ceil logic.
-	#D = 137
-	#T = 5
-	#F = 3
+	D = 137
+	T = 5
+	F = 3
 
-	def _fake_fetch_grouped_by_date(*, host, database, user, password, port, driver, limit, return_2d, current_day_change, volume_ratio, vwap_ratio, tranaction_ratio, day_change_centered):  # noqa: D401,E501
+	def _fake_fetch_grouped_by_date(*args, **kwargs):  # noqa: D401,E501
 		"""Return synthetic (dates, X_flat, Y) for provider tests.
 
 		We ignore all arguments and just construct small deterministic
@@ -68,11 +68,10 @@ def test_split_datasets_uses_expected_window_with_floating_head_tail(monkeypatch
 		dates = np.arange(1, D + 1, dtype=np.int32)
 		X_flat = np.zeros((D, T * F), dtype=np.float64)
 		Y = np.zeros((D, T), dtype=np.float64)
-		return dates, X_flat, Y
+		return dates, X_flat, Y, [1, 2, 3, 4, 5]
 
-	import load_database_rows_into_tensors as ldr
-
-	monkeypatch.setattr(ldr, "fetch_grouped_by_date", _fake_fetch_grouped_by_date)
+	import training_instance_provider
+	monkeypatch.setattr(training_instance_provider, "fetch_grouped_by_date", _fake_fetch_grouped_by_date)
 
 	provider = TrainingInstanceProvider(use_torch=False, limit=None)
 
@@ -86,15 +85,24 @@ def test_split_datasets_uses_expected_window_with_floating_head_tail(monkeypatch
 
 	args = types.SimpleNamespace()
 	args.split_mode = "sequential"
-	args.seed = 42
+	args.random_seed_splits = 42
 	args.data_head_ignore_percent = head_frac
 	args.data_tail_ignore_percent = tail_frac
 
+	import math
+	head_frac_clamped = max(0.0, min(float(head_frac), 1.0))
+	tail_frac_clamped = max(0.0, min(float(tail_frac), 1.0))
+	base_start = int(math.floor(head_frac_clamped * max_inst)) + 1
+	base_end = int(math.floor((1.0 - tail_frac_clamped) * max_inst))
 
+	# provider dates are 1..D, and prior=0, so inst_idx 1 is date 1.
+	# The date ID for inst_idx k is k.
 	train_ds, val_ds, test_ds = split_datasets(
 		provider,
 		args,
 		max_inst,
+		train_validation_and_test_set_start_date_id=base_start,
+		train_validation_and_test_set_end_date_id=base_end,
 		train_percent=0.6,
 		validation_percent=0.25,
 	)
