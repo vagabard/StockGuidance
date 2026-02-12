@@ -71,7 +71,7 @@ def parse_sweep_lists(
 	args: Any,
 	valid_activations: Optional[Iterable[str]] = None,
 	valid_day_centers: Optional[Iterable[str]] = None,
-) -> Tuple[List[int], List[int], List[float], List[str], List[str], List[str]]:
+) -> Tuple[List[int], List[int], List[float], List[str], List[str], List[str], List[str]]:
 	"""Parse and normalise the main sweepable option lists for training.
 
 	This consolidates the list / range parsing previously in
@@ -80,7 +80,7 @@ def parse_sweep_lists(
 
 	Returns a tuple:
 	``(prior_days_list, mlp_layers_list, lr_list, activation_list,
-	final_activation_list, day_change_centered_list)``.
+	final_activation_list, day_change_centered_list, optimizer_list)``.
 	"""
 
 	prior_days_list = parse_int_list(getattr(args, "prior_days"), "prior_days")
@@ -102,6 +102,11 @@ def parse_sweep_lists(
 		"day_change_centered",
 		valid_values=list(valid_day_centers) if valid_day_centers is not None else None,
 	)
+	optimizer_list = general_arg_parser_understands_lists(
+		getattr(args, "optimizer", "adam"),
+		"optimizer",
+		valid_values=["adam", "adamw", "sgd"],
+	)
 
 	return (
 		prior_days_list,
@@ -110,6 +115,7 @@ def parse_sweep_lists(
 		activation_list,
 		final_activation_list,
 		day_change_centered_list,
+		optimizer_list,
 	)
 
 

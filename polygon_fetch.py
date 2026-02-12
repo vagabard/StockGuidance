@@ -132,6 +132,16 @@ def parse_args() -> argparse.Namespace:
 		action="store_true",
 		help="Fetch and save the per-ticker daily summary (open/close) for each selected ticker/day (off by default).",
 	)
+	parser.add_argument(
+		"--discovery-only",
+		action="store_true",
+		help="Only discover tickers and update ticker files; do not fetch quotes.",
+	)
+	parser.add_argument(
+		"--force-discovery",
+		action="store_true",
+		help="Force ticker discovery even if ticker files already exist.",
+	)
 	return parser.parse_args()
 
 
@@ -329,6 +339,7 @@ def discover_tickers(api_key: str, market: str, active: bool, exchanges: List[st
 		params = {}
 	# Post-filter by primary_exchange if field exists
 	tickers: List[str] = []
+	filtered_results: List[Dict] = []
 	ex_set = set(exchanges)
 	for item in results:
 		# primary_exchange can be None for some assets
@@ -338,14 +349,70 @@ def discover_tickers(api_key: str, market: str, active: bool, exchanges: List[st
 		sym = item.get("ticker") or item.get("symbol")
 		if sym:
 			tickers.append(sym)
+			filtered_results.append(item)
 	# If requested, write discovered files with optional date suffix
 	if output_dir is not None:
 		try:
-			_write_tickers_files(output_dir, tickers, results, date=date)
+			_write_tickers_files(output_dir, tickers, filtered_results, date=date)
 		except Exception as e:
 			# Do not fail discovery if write fails; just log
 			print(f"WARN: failed to write tickers files: {e}")
-	return tickers, results
+	return tickers, filtered_results
+
+
+def discover_all_tickers(
+	api_key: str,
+	market: str,
+	exchanges: List[str],
+	*,
+	max_retries: int = 5,
+	output_dir: Optional[Path] = None,
+) -> Tuple[List[str], List[Dict]]:
+	"""Discover all tickers (historical and current) by fetching with active=false and active=true.
+	Returns the union of both sets.
+	"""
+	# Fetch all tickers (including inactive)
+	tickers_all, full_all = discover_tickers(
+		api_key,
+		market,
+		active=False,
+		exchanges=exchanges,
+		max_retries=max_retries,
+		output_dir=output_dir,
+	)
+
+	# Fetch active tickers specifically (usually redundant if active=false works as expected,
+	# but sometimes point-in-time data is more accurate)
+	tickers_active, full_active = discover_tickers(
+		api_key,
+		market,
+		active=True,
+		exchanges=exchanges,
+		max_retries=max_retries,
+		output_dir=output_dir,
+	)
+
+	# Merge them
+	by_symbol = {}
+	for obj in full_all:
+		sym = obj.get("ticker") or obj.get("symbol")
+		if sym:
+			by_symbol[sym] = obj
+
+	# Prefer active records if there's any difference in payload
+	for obj in full_active:
+		sym = obj.get("ticker") or obj.get("symbol")
+		if sym:
+			by_symbol[sym] = obj
+
+	sorted_tickers = sorted(by_symbol.keys())
+	final_full = [by_symbol[s] for s in sorted_tickers]
+
+	# Write consolidated files without date suffix if output_dir is provided
+	if output_dir is not None:
+		_write_tickers_files(output_dir, sorted_tickers, final_full, date=None)
+
+	return sorted_tickers, final_full
 
 
 def discover_consistent_tickers(
@@ -642,15 +709,19 @@ def main() -> int:
 
 	# Load or discover tickers
 	tickers_path = output_dir / TICKERS_FILE
-	if tickers_path.exists():
+	if tickers_path.exists() and not args.force_discovery:
 		with tickers_path.open("r", encoding="utf-8") as f:
 			tickers = [ln.strip() for ln in f if ln.strip()]
 		print(f"Loaded {len(tickers)} tickers from {tickers_path}")
 	else:
-		print("Discovering tickers...")
+		if args.force_discovery:
+			print("Forcing discovery of tickers (all historical and current)...")
+		else:
+			print("Discovering tickers (all historical and current)...")
 		exchanges = [ex.strip() for ex in args.exchanges.split(",") if ex.strip()]
-		# tickers, full_results = discover_tickers(api_key, args.market, args.active, exchanges, max_retries=args.max_retries)
-		tickers, full_results = discover_consistent_tickers(api_key, args.market, args.active, exchanges,start_date=iso_date(start_date), max_retries=args.max_retries)
+		# We want all historical and current tickers, so we use discover_all_tickers
+		# which ignores the 'active' filter to get everything.
+		tickers, full_results = discover_all_tickers(api_key, args.market, exchanges, max_retries=args.max_retries, output_dir=output_dir)
 		if not tickers:
 			print("No tickers discovered.")
 			return 1
@@ -665,6 +736,11 @@ def main() -> int:
 			for obj in full_results:
 				ff.write(json.dumps(obj))
 				ff.write("\n")
+
+	if args.discovery_only:
+		print("Discovery complete (--discovery-only). Exiting.")
+		return 0
+
 	# Apply max-tickers and skip completed
 	selected = []
 	for t in tickers:

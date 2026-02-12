@@ -28,6 +28,7 @@ in `polygon_fetch.py` – it only updates the daily market grouped summary.
 from __future__ import annotations
 
 import argparse
+import os
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
@@ -38,6 +39,7 @@ import numpy as np
 from StockRecommenderFromModel import StockRecommenderFromModel
 from database.db_connect import get_connection
 from feature_vector_builder import FeatureVectorBuilder
+from trainer.state.single_run import SingleRun
 from load_latest_raw_stock_data_date import (
     get_latest_raw_stock_data,
 )
@@ -452,6 +454,44 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 	return parser
 
 
+def find_single_run_json(base_dir: str | Path) -> Path:
+	"""Locate the SingleRun state JSON file in the given directory or its subdirectories.
+
+	Searches for 'single_run_*.json'. If multiple matches are found, raises RuntimeError.
+	If none are found, raises FileNotFoundError.
+	"""
+	import glob
+	base_path = Path(base_dir)
+	# Pattern for wildcard search
+	pattern = "single_run_*.json"
+
+	# Look in the base directory
+	matches = list(base_path.glob(pattern))
+
+	# If none found in base directory, look in subdirectories (e.g., rep subdirs)
+	if not matches:
+		matches = list(base_path.glob(f"*/{pattern}"))
+
+	if not matches:
+		# Special case: check for single_run_epoch.json specifically if it doesn't match the wildcard
+		# (though wildcard should cover it)
+		epoch_matches = list(base_path.glob("single_run_epoch.json"))
+		if not epoch_matches:
+			epoch_matches = list(base_path.glob("*/single_run_epoch.json"))
+		matches = epoch_matches
+
+	if not matches:
+		raise FileNotFoundError(f"Could not find any single_run_*.json in {base_dir} or its subdirectories")
+
+	if len(matches) > 1:
+		raise RuntimeError(
+			f"Multiple SingleRun state files found in {base_dir}: "
+			+ ", ".join(m.name for m in matches)
+		)
+
+	return matches[0]
+
+
 def main(argv: Optional[List[str]] = None) -> int:
 	"""Entry point for the end-to-end "choose next day stocks" pipeline.
 
@@ -599,19 +639,21 @@ def main(argv: Optional[List[str]] = None) -> int:
 	)
 
 	print("Done populating daily_delta_stock_data.")
-	prior_days = 7
-	hidden_layers = "15000,7500,5000"
+	prior_days = 12
+	hidden_layers = "20000,5000,2500"
 	mlp_layers = 4
 	activation = "leaky_relu"
-	final_activation = "sigmoid"
+	final_activation = "sigmoid_range"
 	day_change_centered = "zero"
+#	day_change_centered = "stock_change_ratio_ranked"
 	precision = "fp32"
 	learning_rate = "0.000001"
-	learning_rate_adjustment_parameter = "0.9932"
+	layer_types = "linear"
+	learning_rate_adjustment_parameter = "0.992"
 	batch_size = 256
-	epochs = 1000
-	period_to_train_on = 1000
-
+	epochs = 700
+	period_to_train_on = 2110
+	optimizer = "adamw"
 
 
 	# ------------------------------------------------------------------
@@ -667,10 +709,12 @@ def main(argv: Optional[List[str]] = None) -> int:
 		f"--mlp-layers={mlp_layers}",
 		f"--activation={activation}",
 		f"--final-activation={final_activation}",
+		f"--layer-types={layer_types}",
 		f"--day-change-centered={day_change_centered}",
 		f"--precision={precision}",
 		f"--raw-train-start-with-special-characters={train_start_id}",
 		f"--raw-train-end-with-special-characters={train_end_id}",
+		f"--optimizer={optimizer}",
 		"--split-mode=sequential",
 		"--shuffle"
 	]
@@ -698,7 +742,13 @@ def main(argv: Optional[List[str]] = None) -> int:
 	# 5. Build feature vector for the latest date and get top-5 stocks
 	# ------------------------------------------------------------------
 	print("Fetching grouped features from database for recommendation step...")
+
+	# Load SingleRun
+	sr_path = find_single_run_json(run_dir)
+	single_run = SingleRun.load(str(sr_path))
+
 	rec = StockRecommenderFromModel(
+		single_run,
 		run_dir,
 		device="auto",
 		ensemble_normalize=bool(getattr(args, "ensemble_normalize", False)),

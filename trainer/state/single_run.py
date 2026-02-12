@@ -40,6 +40,7 @@ class SingleRun:
 	learning_rate_adjustment_parameter: float
 	activation: str
 	final_activation: str
+	optimizer: str
 	timestamp_id: str
 	last_save_location:str
 	# Per-run file structure helper. This is typically derived from the
@@ -51,6 +52,8 @@ class SingleRun:
 	train_validation_test_sets_start_date_id : Optional[int] = None # these are calculated from raw_train_start_with_special_characters and raw_train_end_with_special_characters
 	train_validation_test_sets_end_date_id : Optional[int] = None
 	ticker_ids: List[int] | None = None
+	input_size: Optional[int] = None
+	output_size: Optional[int] = None
 
 
 	def __init__(
@@ -65,11 +68,14 @@ class SingleRun:
 		learning_rate_adjustment_parameter: float = 0.998,
 		activation: str,
 		final_activation: str,
+		optimizer: str = "adam",
 		include_features: Sequence[str] | None = None,
 		file_structure: FileStructureSingleRunHandler | None = None,
 		train_start_date_id: Optional[int] = None,
 		train_end_date_id: Optional[int] = None,
 		ticker_ids: List[int] | None = None,
+		input_size: Optional[int] = None,
+		output_size: Optional[int] = None,
 
 	) -> None:
 		"""Explicit initialiser for :class:`SingleRun`.
@@ -89,10 +95,13 @@ class SingleRun:
 		self.learning_rate_adjustment_parameter = float(learning_rate_adjustment_parameter)
 		self.activation = str(activation)
 		self.final_activation = str(final_activation)
+		self.optimizer = str(optimizer)
 		self.include_features = include_features
 		self.train_validation_test_sets_start_date_id = train_start_date_id
 		self.train_validation_test_sets_end_date_id = train_end_date_id
 		self.ticker_ids = ticker_ids
+		self.input_size = input_size
+		self.output_size = output_size
 		if (self.train_validation_test_sets_start_date_id is None or self.train_validation_test_sets_end_date_id is None):
 			date_resolver = DateBoundResolver(self.prior_days)
 			if self.train_validation_test_sets_start_date_id is None:
@@ -133,6 +142,7 @@ class SingleRun:
 			learning_rate_adjustment_parameter=float(getattr(args, "learning_rate_adjustment_parameter", 0.998)),
 			activation=str(args.activation),
 			final_activation=str(args.final_activation),
+			optimizer=str(getattr(args, "optimizer", "adam")),
 			include_features=getattr(args, "include_features", None),
 			file_structure=self.file_structure,
 			train_start_date_id=getattr(args, "train_validation_test_sets_start_date_id", None),
@@ -153,6 +163,13 @@ class SingleRun:
 		else:
 			include_features = [str(f) for f in self.include_features]
 
+		def _normalize_to_list(val: Any) -> Any:
+			if hasattr(val, "tolist"):  # Handle numpy arrays
+				return val.tolist()
+			if isinstance(val, (list, tuple, set)):
+				return [_normalize_to_list(v) for v in val]
+			return val
+
 		return {
 			"day_change_centered": str(self.day_change_centered),
 			"prior_days": int(self.prior_days),
@@ -161,18 +178,15 @@ class SingleRun:
 			"learning_rate_adjustment_parameter": float(self.learning_rate_adjustment_parameter),
 			"activation": str(self.activation),
 			"final_activation": str(self.final_activation),
+			"optimizer": str(self.optimizer),
 			"timestamp_id": str(self.timestamp_id),
 			"include_features": include_features,
 			"train_validation_test_sets_start_date_id": self.train_validation_test_sets_start_date_id,
 			"train_validation_test_sets_end_date_id": self.train_validation_test_sets_end_date_id,
-			"ticker_ids": self.ticker_ids,
+			"ticker_ids": _normalize_to_list(self.ticker_ids),
+			"input_size": self.input_size,
+			"output_size": self.output_size,
 			"file_structure": self.file_structure.to_dict()
-
-			#single_run: "FamilyRun"
-
-
-
-
 		}
 
 	def save(self, path: str) -> Dict[str, Any]:
@@ -236,11 +250,14 @@ class SingleRun:
 			learning_rate_adjustment_parameter=float(sr_dict.get("learning_rate_adjustment_parameter", 0.998)),
 			activation=str(sr_dict["activation"]),
 			final_activation=str(sr_dict["final_activation"]),
+			optimizer=str(sr_dict.get("optimizer", "adam")),
 			include_features=tuple(sr_dict.get("include_features") or []),
 			file_structure=my_file_structure,
 			train_start_date_id=sr_dict.get("train_validation_test_sets_start_date_id"),
 			train_end_date_id=sr_dict.get("train_validation_test_sets_end_date_id"),
 			ticker_ids=sr_dict.get("ticker_ids"),
+			input_size=sr_dict.get("input_size"),
+			output_size=sr_dict.get("output_size"),
 		)
 
 	def to_commandline(self) -> List[str]:

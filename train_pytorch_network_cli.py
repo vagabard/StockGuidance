@@ -4,6 +4,8 @@ import argparse
 import os
 from typing import List, Optional
 
+from trainer.state.family_run import VALID_ACTIVATIONS, VALID_DAY_CENTERS
+
 
 def build_parser() -> argparse.ArgumentParser:
 	"""Build the ArgumentParser for ``train_pytorch_network``.
@@ -68,16 +70,6 @@ def build_parser() -> argparse.ArgumentParser:
 		default=10,
 		help="Profiler schedule: number of active profiling steps.",
 	)
-	parser.add_argument(
-		"--ensemble-interval",
-		type=int,
-		default=0,
-		help=(
-			"If > 0 and run-repeats > 1, run an ensemble simulate_trading pass across all "
-			"repeats every N epochs. Works similarly to --trading-interval but operates "
-			"on the ensemble of repeated runs."
-		),
-	)
 	# Accept single int or inclusive range like "2-4" for multiple runs
 	parser.add_argument(
 		"--prior-days",
@@ -86,6 +78,16 @@ def build_parser() -> argparse.ArgumentParser:
 		help=(
 			"How many prior days to include in the feature window (>=0) or a range "
 			"like '2-4' to run multiple"
+		),
+	)
+	parser.add_argument(
+		"--optimizer",
+		type=str,
+		default="adam",
+		help=(
+			"Optimizer to use for training. "
+			"Accepts a single value or a comma-separated list for grid runs. "
+			"Supported: adam, adamw, sgd"
 		),
 	)
 	parser.add_argument(
@@ -326,7 +328,7 @@ def build_parser() -> argparse.ArgumentParser:
 		help=(
 			"Activation for MLP hidden layers (ignored for conv_trans). "
 			"Accepts a single value or a comma-separated list. Supported: "
-			"relu, gelu, tanh, sigmoid, silu, swish, leaky_relu, elu, tanshrink"
+			f"relu, gelu, tanh, sigmoid, sigmoid_range, silu, swish, leaky_relu, elu, tanshrink. All choices: {', '.join(sorted(VALID_ACTIVATIONS))}"
 		),
 	)
 	parser.add_argument(
@@ -336,8 +338,7 @@ def build_parser() -> argparse.ArgumentParser:
 		help=(
 			"Activation for MLP output layers (ignored for conv_trans). "
 			"Accepts a single value or a comma-separated list. Supported: "
-			"relu, gelu, tanh, sigmoid, silu, swish, leaky_relu, elu, tanshrink, "
-			"softmax, logsoftmax"
+			f"relu, gelu, tanh, sigmoid, sigmoid_range, silu, swish, leaky_relu, elu, tanshrink, softmax, logsoftmax. All choices: {', '.join(sorted(VALID_ACTIVATIONS))}"
 		),
 	)
 	parser.add_argument(
@@ -347,7 +348,7 @@ def build_parser() -> argparse.ArgumentParser:
 		help=(
 			"Center of next_day_change_in_price ratio. "
 			"Accepts a single value or a comma-separated list. Supported values: "
-			"one, half, zero, gapped01, binary_labels, top_100_binary_labels."
+			f"one, half, zero, gapped01, binary_labels, top_100_binary_labels, stock_change_ratio_ranked. All choices: {', '.join(sorted(VALID_DAY_CENTERS))}"
 		),
 	)
 	parser.add_argument(
@@ -437,6 +438,12 @@ def build_parser() -> argparse.ArgumentParser:
 			"Enable DataLoader pin_memory for faster host->GPU transfer "
 			"(only when --use-dataloader)"
 		),
+	)
+	parser.add_argument(
+		"--layer-types",
+		type=str,
+		default="linear",
+		help="Comma-separated list of layer types: linear, sparse-structured, sparse-random, transformer (e.g., linear,transformer,linear)",
 	)
 	return parser
 

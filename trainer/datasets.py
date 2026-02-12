@@ -7,7 +7,6 @@ import torch
 
 from torch.utils.data import Dataset
 from trainer.torch_interface.compat import TORCH_AVAILABLE
-from trainer.util.utils import tensorize_and_sanitize
 from training_instance_provider import TrainingInstanceProvider
 
 
@@ -23,23 +22,18 @@ class IndexDataset(Dataset):
 	def __iter__(self):
 		for i in self.indices:
 			x, y, date_for_instance = self.provider.get_feature_and_label_pair(int(i))
-			# We return numpy arrays/scalars and let DataLoader's default_collate handle tensorization,
-			# which is more compatible with pin_memory.
-			if hasattr(x, "numpy"): x = x.numpy()
-			if hasattr(y, "numpy"): y = y.numpy()
+			# We return tensors directly if they are already tensors, as they now use float32.
+			# This avoids the conversion back to numpy and then back to torch in DataLoader.
 			yield x, y
 
 	def __getitem__(self, idx0: int):
 		i = int(self.indices[int(idx0)])
 		x, y, date_for_instance = self.provider.get_feature_and_label_pair(i)
-		if hasattr(x, "numpy"): x = x.numpy()
-		if hasattr(y, "numpy"): y = y.numpy()
 		return x, y
 
 	def get_next_feature_label_date(self):
 		for i in self.indices:
 			x, y, date_for_instance = self.provider.get_feature_and_label_pair(int(i))
-			x, y = tensorize_and_sanitize(x, y, device=torch.device("cpu"))
 			yield x, y, date_for_instance
 
 	def get_feature_label_date(self, idx0: int):

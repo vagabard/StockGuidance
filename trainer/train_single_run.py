@@ -6,11 +6,17 @@ import json
 import os
 import time
 import traceback
-from typing import Any, Dict, List, Optional
+import gc
+from concurrent.futures import ThreadPoolExecutor
+from random import random, Random
+from typing import Any, Dict, List, Optional, Tuple
 
+import psutil
 import line_profiler
 import torch
-from torch import nn
+import numpy as np
+from torch import nn, Tensor
+from torch.nn import Module, MSELoss
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import ExponentialLR
 from torch.utils.data import DataLoader
@@ -21,6 +27,7 @@ from trainer.ai_type import AIType
 from trainer.dataloaders import build_dataloaders
 from trainer.datasets import IndexDataset
 from trainer.factory import create_model_and_optimizer
+from trainer.model_loader import load_model_from_checkpoint
 from trainer.file_structure_single_run_handler import FileStructureSingleRunHandler
 from trainer.io_run import save_model_and_manifest
 from trainer.loss_functions.losses import ranking_surrogate_loss, mse_restricted
@@ -31,8 +38,9 @@ from trainer.state.single_run import SingleRun
 from trainer.torch_interface.compat import TORCH_AVAILABLE
 from trainer.torch_interface.device import setup_device_and_precision, enforce_cuda_or_fail
 from trainer.training_bundle import TrainingBundle
-from trainer.util.utils import count_elements, tensorize_and_sanitize
+from trainer.util.utils import count_elements
 from training_instance_provider import TrainingInstanceProvider
+
 
 #torch.set_float32_matmul_precision("high")
 #import torch_tensorrt
@@ -40,183 +48,69 @@ from training_instance_provider import TrainingInstanceProvider
 #print(torch.compiler.list_backends())
 
 
-def _update_per_epoch_scores(per_epoch_csv_path: str, epoch: int, top_k: List[int]) -> None:
-	"""Append a summary row for ``epoch`` into ``per_epoch_scores.csv``.
-
-	The summary is derived from the per-day stock simulation CSV that lives in
-	``per_epoch_csv_path``.  For each K in ``top_k`` we compute the maximum
-	portfolio value observed across all simulated days for that epoch, and we
-	also compute the average of the ``top1_market_percentile`` column as a
-	compact CDF-like score.
-	"""
-	try:
-		if not os.path.exists(per_epoch_csv_path):
-			return
-		# Normalise and deduplicate K values so that column ordering is stable.
-		unique_top_k = sorted({int(k) for k in top_k if int(k) > 0})
-		if not unique_top_k:
-			return
-		max_by_k: Dict[int, float] = {k: float("-inf") for k in unique_top_k}
-		cdf_sum = 0.0
-		cdf_count = 0
-		with open(per_epoch_csv_path, "r", newline="", encoding="utf-8") as f_in:
-			reader = csv.reader(f_in)
-			header = next(reader, None)
-			if not header:
-				return
-			# Column indices
-			try:
-				cdf_idx = header.index("top1_market_percentile")
-			except ValueError:
-				cdf_idx = -1
-			# Portfolio columns
-			if len(unique_top_k) == 1:
-				# Single-K simulations use a column named ``portfolio_value``.
-				try:
-					col_idx = header.index("portfolio_value")
-				except ValueError:
-					col_idx = -1
-				col_idx_by_k: Dict[int, int] = {unique_top_k[0]: col_idx}
-			else:
-				col_idx_by_k = {}
-				for k in unique_top_k:
-					col_name = f"portfolio_top{k}"
-					try:
-						col_idx_by_k[k] = header.index(col_name)
-					except ValueError:
-						col_idx_by_k[k] = -1
-
-			for row in reader:
-				if not row:
-					continue
-				# CDF / percentile average
-				if 0 <= cdf_idx < len(row):
-					try:
-						v = float(row[cdf_idx])
-					except ValueError:
-						v = None
-					if v is not None:
-						cdf_sum += v
-						cdf_count += 1
-				# Max portfolio per K
-				for k, idx in col_idx_by_k.items():
-					if idx < 0 or idx >= len(row):
-						continue
-					try:
-						pv = float(row[idx])
-					except ValueError:
-						continue
-					if pv > max_by_k[k]:
-						max_by_k[k] = pv
-
-		# Guard against empty/invalid data
-		if cdf_count == 0:
-			return
-		avg_cdf = cdf_sum / float(cdf_count)
-		# Replace -inf with 0.0 for Ks that had no valid data.
-		for k, v in list(max_by_k.items()):
-			if v == float("-inf"):
-				max_by_k[k] = 0.0
-
-		out_dir = os.path.dirname(per_epoch_csv_path)
-		out_path = os.path.join(out_dir, "per_epoch_scores.csv")
-		file_exists = os.path.exists(out_path)
-		with open(out_path, "a", newline="", encoding="utf-8") as f_out:
-			writer = csv.writer(f_out)
-			if not file_exists:
-				# ``avg_top1_market_percentile_over_days`` makes it explicit that this
-				# value is the average top-1 market percentile across all simulated
-				# days for the given epoch, rather than a single-day percentile.
-				header_cols = ["epoch", "average_over_time_of_cdf_top_stock"]
-				for k in unique_top_k:
-					header_cols.append(f"max_portfolio_top{k}")
-				writer.writerow(header_cols)
-			row_vals = [epoch, avg_cdf]
-			for k in unique_top_k:
-				row_vals.append(max_by_k.get(k, 0.0))
-			writer.writerow(row_vals)
-	except Exception as e:
-		print(f"Warning: failed to update per_epoch_scores for {per_epoch_csv_path}: {e}")
-		traceback.print_exception(e)
-
-@line_profiler.profile
-def simulate_trading_with_trained_model(model_type_to_use: AIType, dbinfo_file: str, epoch: int, family_run: FamilyRun,
-										recommenders: list[StockRecommenderFromModel],
-										rep_index: int, sim_topks_resolved: list[int] | None,
-										single_run: SingleRun, test_sim_data_source:IndexDataset ) -> None:
-	"""Run a trading simulation for the given epoch and update per-epoch scores.
-
-	This function wraps :func:`simulate_trading.simulate` to:
-
-	* decide whether we are simulating an individual repeat or an ensemble,
-	* normalise database connection parameters, and
-	* after the per-day CSV is written and renamed to include the epoch
-	  suffix, append a summary row into ``per_epoch_scores.csv`` within the
-	  same directory.
-	"""
-	try:
-		import simulate_trading as _sim
-		if model_type_to_use is AIType.ENSEMBLE:
-			print(f"Simulating with ensemble model at epoch {epoch}")
-		elif model_type_to_use is AIType.SINGLE:
-			print(f"Simulating with single model at epoch {epoch}")
-		else:
-			raise ValueError(f"Unknown model_type_to_use: {model_type_to_use}")
-		dates_to_handle = test_sim_data_source
-		print(f"simulating dates for epoch {epoch} {dates_to_handle}")
-		first_output = _sim.simulate(
-			recommenders,
-			top_k=sim_topks_resolved,
-			dates_to_handle=dates_to_handle,
-			dbinfo_file=dbinfo_file,
-			out_filename_suffix=f"_epoch_{epoch}",
-			#ensemble_logic=(model_type_to_use == AIType.ENSEMBLE),
-		)
-		# out_path = os.path.join(recommenders[0].output_directory)
-		# print(f"Periodic simulation complete. Raw results written to: {out_path}")
-		# final_path = out_path
-		# try:
-		# 	orig_name = os.path.basename(out_path)
-		# 	m = re.match(r"stock_simulation_(\d+)(days|percent)?\.csv$", orig_name)
-		# 	if m:
-		# 		sim_set_size = int(m.group(1))
-		# 		variant_suffix = m.group(2) or ""
-		# 	else:
-		# 		# Fallback when filename does not match the standard pattern
-		# 		variant_suffix = ""
-		# 	new_name = f"stock_simulation_{sim_set_size}{variant_suffix}_epoch_{epoch}.csv"
-		# 	new_path = os.path.join(os.path.dirname(out_path), new_name)
-		# 	os.replace(out_path, new_path)
-		# 	final_path = new_path
-		# 	print(f"Renamed {out_path} periodic simulation output to: {new_path}")
-		# except Exception as rename_e:
-		# 	print(f"Warning: failed to rename periodic simulation output '{out_path}': {rename_e}")
-		# Update per-epoch summary scores for this simulation.
-		if sim_topks_resolved:
-			_update_per_epoch_scores(first_output, epoch, sim_topks_resolved)
-	except Exception as sim_e:
-		traceback.print_exception(sim_e)
-
-
-def backprop_loss_non_amp(xb=None, yb=None, model : nn.Module=None, family_run:FamilyRun=None, optimizer:Optimizer=None,
-                          batch_idx=None):
-	xb = torch.nan_to_num(xb, nan=0.0, posinf=0.0, neginf=0.0)
-	yb = torch.nan_to_num(yb, nan=0.0, posinf=0.0, neginf=0.0)
-	pred = model(xb)
-	pred = torch.nan_to_num(pred, nan=0.0, posinf=0.0, neginf=0.0)
+def backprop_loss_non_amp(xb=None, yb=None, model: nn.Module = None, family_run: FamilyRun = None,
+                          optimizer: Optimizer = None,
+                          batch_idx=None) -> Tuple[torch.Tensor, torch.Tensor, int | None]:
+	xb, yb = prep_vars(xb, yb)
+	pred = model_and_clean(model, xb)
+	#criterion = nn.L1Loss()
 	criterion = nn.MSELoss()
+
+	loss = set_loss_method(criterion, family_run, pred, yb)
+	#		loss = torch.mean((pred - yb.to(pred.dtype)) ** 2)
+
+	if not torch.isfinite(loss):
+		batch_idx = opt_zero_grad(batch_idx, optimizer)
+		return pred, loss, batch_idx
+	do_the_back_prop(loss)
+
+	# Optional: log gradient norm if pred was all zeros or periodically
+	# if torch.all(pred == 0):
+	# 	total_norm = 0.0
+	# 	for p in model.parameters():
+	# 		if p.grad is not None:
+	# 			param_norm = p.grad.data.norm(2)
+	# 			total_norm += param_norm.item() ** 2
+	# 	total_norm = total_norm ** 0.5
+	# 	print(f"  DEBUG: grad_norm={total_norm:.8f}")
+	#
+	back_non_amp_optim(optimizer)
+	return pred, loss, None
+
+
+def do_the_back_prop(loss: Tensor):
+	loss.backward()
+
+
+def opt_zero_grad(batch_idx, optimizer: Optimizer | None) -> Any:
+	optimizer.zero_grad(set_to_none=True)
+	batch_idx += 1
+	return batch_idx
+
+
+def set_loss_method(criterion: MSELoss, family_run: FamilyRun | None, pred: Tensor, yb: Tensor) -> Tensor:
 	if bool(family_run.use_ranking_error_loss):
 		loss = ranking_surrogate_loss(pred, yb.to(pred.dtype), temperature=float(family_run.rank_temperature))
 	else:
 		loss = criterion(pred, yb.to(pred.dtype))
-#		loss = torch.mean((pred - yb.to(pred.dtype)) ** 2)
-	if not torch.isfinite(loss):
-		optimizer.zero_grad(set_to_none=True)
-		batch_idx += 1
-		return pred,loss,batch_idx
-	loss.backward()
+	return loss
+
+
+def model_and_clean(model: Module | None, xb: Tensor) -> Tensor:
+	pred = model(xb)
+	pred = torch.nan_to_num(pred, nan=0.0, posinf=0.0, neginf=0.0)
+	return pred
+
+
+def prep_vars(xb, yb) -> tuple[Tensor, Tensor]:
+	xb = torch.nan_to_num(xb, nan=0.0, posinf=0.0, neginf=0.0)
+	yb = torch.nan_to_num(yb, nan=0.0, posinf=0.0, neginf=0.0)
+	return xb, yb
+
+
+def back_non_amp_optim(optimizer: Optimizer | None):
 	optimizer.step()
-	return pred,loss,None
+	optimizer.zero_grad(set_to_none=True)
 
 
 def _maybe_save_checkpoint(
@@ -256,43 +150,62 @@ def _maybe_save_checkpoint(
 			except Exception as save_single_e:
 				print(f"Warning: failed to save SingleRun JSON at epoch {epoch}: {save_single_e}")
 		except Exception as ckpt_e:
-			print(f"Warning: failed to write training_state or checkpoint in {one_file_structure.run_group_dir}: {ckpt_e}")
+			print(
+				f"Warning: failed to write training_state or checkpoint in {one_file_structure.run_group_dir}: {ckpt_e}")
 			traceback.print_exception(ckpt_e)
 
 
-def _maybe_simulate_trading_for_rep(
+def _maybe_generate_scores_for_rep(
 	*,
 	family_run: FamilyRun,
 	single_run: SingleRun,
 	rep_index: int,
-	model: nn.Module,
-	one_file_structure: FileStructureSingleRunHandler,
+	model: nn.Module | str,
 	epoch: int,
-	sim_topks_resolved: Optional[List[int]],
 	test_sim_data_source: IndexDataset,
+	input_size: int,
+	output_size: int,
 ) -> None:
 	trading_interval = family_run.trading_interval
-	handle_trading_sim = trading_interval > 0 and epoch % trading_interval == 0
-	if handle_trading_sim:
+	if trading_interval > 0 and epoch % trading_interval == 0:
 		# Use the same device as the model's current location if possible, or auto
 		# But we know the model was just moved TO device before this call in the main loop
-		device_to_use = str(model.parameters().__next__().device)
-		stock_recommender = StockRecommenderFromModel([model], single_run.file_structure.get_directory_for_rep(rep_index), device=device_to_use)
-		print(
-			f"Running periodic simulate_trading at epoch {epoch} "
-			f"(interval={trading_interval}) on run_dir={one_file_structure.get_directory_for_rep(rep_index)} ..."
-		)
-		simulate_trading_with_trained_model(
-			AIType.SINGLE,
-			family_run.dbinfo_file,
-			epoch,
-			family_run,
-			[stock_recommender],
-			rep_index,
-			sim_topks_resolved,
+		device_to_use = str(model.parameters().__next__().device) if not isinstance(model, str) else "auto"
+		stock_recommender = StockRecommenderFromModel(
 			single_run,
-			test_sim_data_source
+			[model],
+			single_run.file_structure.get_directory_for_rep(rep_index),
+			model_dict={"input_size": int(input_size), "output_size": int(output_size),
+			            "prior_days": int(single_run.prior_days),
+			            "day_change_centered": single_run.day_change_centered},
+			device=device_to_use,
 		)
+		print(
+			f"Running periodic score generation at epoch {epoch} "
+			f"(interval={trading_interval}) for rep {rep_index} ..."
+		)
+
+		feature_label_date_gen = test_sim_data_source.get_next_feature_label_date()
+		# We use the internal model of stock_recommender to ensure it's loaded if it was a path
+		network = stock_recommender._models[0]
+		for feat_vec, _, feature_date_id in feature_label_date_gen:
+			input_tensor = feat_vec.unsqueeze(0).to(device_to_use)
+			stock_recommender.generateStockScoresForNetwork(
+				network=network,
+				inputs=input_tensor,
+				save_to_file=True,
+				epoch_name=str(epoch),
+				date_id=feature_date_id,
+				network_index=rep_index - 1
+			)
+			del input_tensor
+		del feature_label_date_gen
+		del network
+		stock_recommender.to_cpu()
+		del stock_recommender
+		gc.collect()
+		if str(device_to_use).startswith("cuda"):
+			torch.cuda.empty_cache()
 
 
 def _prepare_data(provider: TrainingInstanceProvider) -> tuple[int, int]:
@@ -355,7 +268,24 @@ def _resolve_train_window_and_split(
 		f"Datasets: train={len(train_ds)} val={len(val_ds)} test={len(test_ds)}  "
 		f"train start date_id={single_run.train_validation_test_sets_start_date_id} train end date_id={single_run.train_validation_test_sets_end_date_id}"
 	)
-	return train_ds, val_ds, test_ds, (int(single_run.train_validation_test_sets_start_date_id) if single_run.train_validation_test_sets_start_date_id is not None else 0), (int(single_run.train_validation_test_sets_end_date_id) if single_run.train_validation_test_sets_end_date_id is not None else 0)
+	return train_ds, val_ds, test_ds, (
+		int(single_run.train_validation_test_sets_start_date_id) if single_run.train_validation_test_sets_start_date_id is not None else 0), (
+		int(single_run.train_validation_test_sets_end_date_id) if single_run.train_validation_test_sets_end_date_id is not None else 0)
+
+
+def _save_bundle_to_cache(bundle: TrainingBundle, m, opt, sc, cache_path: str):
+	"""Background task to save model/optimizer/scaler to disk."""
+	checkpoint = {
+		'model_state_dict': m.state_dict(),
+		'optimizer_state_dict': opt.state_dict(),
+		'scaler_state_dict': sc.state_dict() if sc is not None else None,
+	}
+	torch.save(checkpoint, cache_path)
+
+
+# After saving, we can't easily null out the bundle fields here because
+# it might be currently in use or the main thread might want to do it.
+# We'll let the main thread handle the reference clearing.
 
 
 def _build_training_bundles_and_loaders(
@@ -367,31 +297,98 @@ def _build_training_bundles_and_loaders(
 	val_ds,
 	test_ds,
 	device,
-) -> tuple[List[TrainingBundle], List[FileStructureSingleRunHandler], bool, Optional[torch.dtype], int]:
+) -> tuple[List[TrainingBundle], List[FileStructureSingleRunHandler], bool, Optional[torch.dtype], int, bool]:
 	"""Create models/optimizers/loaders for each repeat and return bookkeeping."""
+
+	# Pre-build loaders to share them across all bundles if they are identical
+	train_loader_shared = build_dataloaders(family_run, train_ds)
+	val_loader_shared = build_dataloaders(family_run, val_ds)
+
 	training_bundle_list: List[TrainingBundle] = []
 	param_count = 0
 	use_amp = False
 	amp_dtype = None
 	repeat_count_cfg = family_run.run_repeats
-	for _ in range(repeat_count_cfg):
+
+	# Determine if we should use caching based on memory usage
+	total_mem = psutil.virtual_memory().total
+	use_caching = True
+
+	for run_idx in range(repeat_count_cfg):
 		m, opt, sc, inner_use_amp, inner_amp_dtype = create_model_and_optimizer(
-			family_run, input_size, output_size, single_run.mlp_layers, single_run.activation, device, single_run.lr, to_device=False
+			family_run,
+			input_size,
+			output_size,
+			single_run.mlp_layers,
+			single_run.activation,
+			device,
+			single_run.lr,
+			to_device=False,
+			prior_days=single_run.prior_days,
+			optimizer_name=single_run.optimizer,
+			final_activation=single_run.final_activation,
 		)
 		use_amp = inner_use_amp
 		amp_dtype = inner_amp_dtype
-		one_training_bundle = TrainingBundle(model=m, optimizer=opt, scaler=sc, use_amp=inner_use_amp, amp_dtype=inner_amp_dtype)
+		one_training_bundle = TrainingBundle(model=m, optimizer=opt, scaler=sc, use_amp=inner_use_amp,
+		                                     amp_dtype=inner_amp_dtype)
 		training_bundle_list.append(one_training_bundle)
 		param_count = sum(p.numel() for p in m.parameters())
+
+		# Check memory after creation
+		current_rss = psutil.Process(os.getpid()).memory_info().rss
+		percent_of_memory_to_allow = 0.2
+		print(f"\n\n\nMemory check for caching switch {current_rss / (1024 ** 3):.2f}GB\n\n\n")
+		if not use_caching and current_rss > total_mem * percent_of_memory_to_allow:
+			print(
+				f"Memory usage {current_rss / (1024 ** 3):.2f}GB exceeds {percent_of_memory_to_allow * 100:.0f}% of total memory {total_mem / (1024 ** 3):.2f}GB. Switching to model caching.")
+			use_caching = True
+			# Retroactively cache prior models
+			cache_dir = os.path.join(family_run.file_structure.family_dir, "cache", "models")
+			os.makedirs(cache_dir, exist_ok=True)
+			for prev_idx in range(len(training_bundle_list) - 1):  # All except the one we just added
+				prev_bundle = training_bundle_list[prev_idx]
+				if prev_bundle.model is not None:
+					prev_cache_path = os.path.join(cache_dir, f"model_rep_{prev_idx + 1}.pt")
+					prev_bundle.cache_path = prev_cache_path
+					# Capture current state for background saving
+					_save_bundle_to_cache(prev_bundle, prev_bundle.model, prev_bundle.optimizer, prev_bundle.scaler,
+					                      prev_cache_path)
+					# Clear references in main thread
+					prev_bundle.model = None
+					prev_bundle.optimizer = None
+					prev_bundle.scaler = None
+
+		if use_caching:
+			cache_dir = os.path.join(family_run.file_structure.family_dir, "cache", "models")
+			os.makedirs(cache_dir, exist_ok=True)
+			cache_path = os.path.join(cache_dir, f"model_rep_{run_idx + 1}.pt")
+			one_training_bundle.cache_path = cache_path
+
+			# Submit background save
+			_save_bundle_to_cache(one_training_bundle, m, opt, sc, cache_path)
+
+			# Clear references to save memory immediately in main thread
+			one_training_bundle.model = None
+			one_training_bundle.optimizer = None
+			one_training_bundle.scaler = None
+			del m, opt, sc
+			gc.collect()
+
 		# Build batch providers (DataLoader or simple generator).
-		train_loader_temp= build_dataloaders(family_run, train_ds)
-		val_loader_temp=build_dataloaders(family_run, val_ds)
-		one_training_bundle.training_instance_provider = train_loader_temp
-		one_training_bundle.validation_instance_provider = val_loader_temp
+		one_training_bundle.training_instance_provider = train_loader_shared
+		one_training_bundle.validation_instance_provider = val_loader_shared
 		one_training_bundle.testing_instance_provider = test_ds
+
 		# Use per-run learning rate adjustment parameter (scheduler gamma), defaulting to 0.998
 		gamma: float = getattr(single_run, "learning_rate_adjustment_parameter", 0.998)
-		one_training_bundle.scheduler = ExponentialLR(one_training_bundle.optimizer, gamma=float(gamma))
+
+		# If cached, we'll need to instantiate optimizer later or handle scheduler carefully.
+		if one_training_bundle.optimizer is not None:
+			one_training_bundle.scheduler = ExponentialLR(one_training_bundle.optimizer, gamma=float(gamma))
+		else:
+			one_training_bundle.scheduler = None  # Will be created on load
+
 	if use_amp and amp_dtype == torch.float16:
 		print("Precision runtime: autocast=float16 with GradScaler")
 	elif use_amp and amp_dtype == torch.bfloat16:
@@ -405,13 +402,14 @@ def _build_training_bundles_and_loaders(
 		fs = single_run.file_structure
 		training_bundle_list[run_idx].suffix = fs.suffix
 		rep_files_list.append(fs)
-	return training_bundle_list, rep_files_list, use_amp, amp_dtype, param_count
+	return training_bundle_list, rep_files_list, use_amp, amp_dtype, param_count, use_caching
 
 
 def _maybe_resume_checkpoints(
 	training_bundle_list: List[TrainingBundle],
 	rep_files_list: List[FileStructureSingleRunHandler],
 	family_run: FamilyRun,
+	single_run: SingleRun,
 	device,
 	family_dir: str,
 ) -> int:
@@ -433,11 +431,27 @@ def _maybe_resume_checkpoints(
 			last_completed = int(state.get("last_completed_epoch", 0))
 			if 1 <= last_completed < family_run.total_epochs_to_train:
 				if (run_idx == 0) and resume_from_current_epoch:
-					print(f"Resuming training from epoch {last_completed + 1} (previously completed {last_completed}) in {family_dir}")
+					print(
+						f"Resuming training from epoch {last_completed + 1} (previously completed {last_completed}) in {family_dir}")
 				start_epoch = last_completed + 1
 
-				training_bundle_list[run_idx].model.load_state_dict(torch.load(ckpt_model, map_location="cpu"))
-				training_bundle_list[run_idx].optimizer.load_state_dict(torch.load(ckpt_optim, map_location="cpu"))
+				model_state, optimizer_state, _ = load_model_from_checkpoint(
+					ckpt_model,
+					family_run,
+					int(training_bundle_list[run_idx].model.input_size),
+					int(training_bundle_list[run_idx].model.output_size),
+					int(single_run.mlp_layers),
+					str(single_run.activation),
+					int(single_run.prior_days),
+					device=torch.device("cpu"),
+					map_location="cpu"
+				)
+				training_bundle_list[run_idx].model.load_state_dict(model_state.state_dict())
+				if optimizer_state:
+					training_bundle_list[run_idx].optimizer.load_state_dict(optimizer_state)
+				else:
+					# Fallback for old separate files
+					training_bundle_list[run_idx].optimizer.load_state_dict(torch.load(ckpt_optim, map_location="cpu"))
 		except Exception as resume_e:
 			print(f"Warning: failed to load training_state or checkpoint for resume in {fs.run_group_dir}: {resume_e}")
 			start_epoch = 1
@@ -448,7 +462,7 @@ def _log_gpu_usage(device, epoch: int, single_run: SingleRun) -> None:
 	try:
 		if torch.cuda.is_available():
 			free_mem, total_mem = torch.cuda.mem_get_info(device)
-			used_mem = total_mem - free_mem
+			used_mem = torch.cuda.memory_allocated(device)
 
 			run_dir_log = getattr(single_run.file_structure, "run_directory", None)
 			if not run_dir_log:
@@ -466,7 +480,8 @@ def _log_gpu_usage(device, epoch: int, single_run: SingleRun) -> None:
 		print(f"Warning: GPU logging failed: {log_e}")
 
 
-def backprop_loss_for_amp(xb=None, yb=None, model : nn.Module=None, family_run:FamilyRun=None, optimizer:Optimizer=None,
+def backprop_loss_for_amp(xb=None, yb=None, model: nn.Module = None, family_run: FamilyRun = None,
+                          optimizer: Optimizer = None,
                           batch_idx=None, amp_dtype=None, scaler=None):
 	with torch.amp.autocast("cuda", dtype=amp_dtype):  # type: ignore[attr-defined]
 		xb = torch.nan_to_num(xb, nan=0.0, posinf=0.0, neginf=0.0)
@@ -476,19 +491,24 @@ def backprop_loss_for_amp(xb=None, yb=None, model : nn.Module=None, family_run:F
 		if bool(family_run.use_ranking_error_loss):
 			loss = ranking_surrogate_loss(pred, yb.to(pred.dtype), temperature=float(family_run.rank_temperature))
 		else:
-			loss = torch.mean((pred - yb.to(pred.dtype)) ** 2)
+			loss = torch.nn.functional.l1_loss(pred, yb.to(pred.dtype))
+
 	if not torch.isfinite(loss):
 		optimizer.zero_grad(set_to_none=True)
 		batch_idx += 1
-		return pred,loss,batch_idx
+		return pred, loss, batch_idx
 	elif amp_dtype == torch.float16:
 		scaler.scale(loss).backward()
+
 		scaler.step(optimizer)
 		scaler.update()
+		optimizer.zero_grad(set_to_none=True)
 	else:
 		loss.backward()
+
 		optimizer.step()
-	return pred,loss,None
+		optimizer.zero_grad(set_to_none=True)
+	return pred, loss, None
 
 
 def _train_one_epoch_for_rep(
@@ -513,32 +533,75 @@ def _train_one_epoch_for_rep(
 	train_iter = train_loader
 	total_batches = len(train_loader) if hasattr(train_loader, "__len__") else 0
 	non_blocking = bool(family_run.pin_GPU_memory)
+	batch_size = None
+
+	executor = ThreadPoolExecutor(max_workers=1)
+	futures = []
+	running_loss_sum = [0.0]
+
 	for xb, yb in train_iter:
-		xb, yb = tensorize_and_sanitize(xb, yb, device=device, non_blocking=non_blocking)
-		optimizer.zero_grad(set_to_none=True)
+		xb, yb = prepare_training_inputs(device, non_blocking, xb, yb)
+		if batch_size is None:
+			batch_size = xb.size(0)
+		# optimizer.zero_grad(set_to_none=True) # Moved to after step()
 		if use_amp:
-			pred,loss,batch_index_update = backprop_loss_for_amp(xb=xb, yb=yb, model=model, family_run=family_run, optimizer=optimizer, batch_idx=batch_idx, amp_dtype=amp_dtype, scaler=scaler)
+			pred, loss, batch_index_update = backprop_loss_for_amp(xb=xb, yb=yb, model=model, family_run=family_run,
+			                                                       optimizer=optimizer, batch_idx=batch_idx,
+			                                                       amp_dtype=amp_dtype, scaler=scaler)
 			if batch_index_update is not None:
 				batch_idx = batch_index_update
+				# Explicitly clear tensors to help GC
+				#del xb, yb, pred, loss
 				continue
 		else:
-			pred,loss,batch_index_update = backprop_loss_non_amp(xb=xb, yb=yb, model=model, family_run=family_run, optimizer=optimizer, batch_idx=batch_idx)
+			pred, loss, batch_index_update = backprop_loss_non_amp(xb=xb, yb=yb, model=model, family_run=family_run,
+			                                                       optimizer=optimizer, batch_idx=batch_idx)
 			if batch_index_update is not None:
 				batch_idx = batch_index_update
+				# Explicitly clear tensors to help GC
+				#del xb, yb, pred, loss
 				continue
-		bs = xb.size(0)
-		total += bs
-		train_loss_sum += loss.item() * bs
-		train_top10_sum += mse_restricted(pred.detach(), yb.to(pred.dtype), mode="top", k=10).item() * bs
 
+		# Detach and move to CPU to avoid keeping GPU memory or causing issues in thread
+		loss_detached = loss.detach().cpu()
+		pred_detached = pred.detach().cpu()
+		yb_detached = yb.detach().cpu()
+
+		future = executor.submit(calculate_training_statistics, batch_size, batch_idx + 1, epoch,
+		                         family_run, loss_detached, pred_detached, total_batches, yb_detached,
+		                         total, running_loss_sum)
+		futures.append(future)
+
+		total += batch_size
 		batch_idx += 1
-		if family_run.log_interval and family_run.log_interval > 0 and (epoch % family_run.log_interval == 0 or epoch == family_run.total_epochs_to_train):
-			avg_loss_so_far = train_loss_sum / max(1, total)
-			print(f"Epoch {epoch}/{family_run.total_epochs_to_train} | batch {batch_idx}/{total_batches} | curr_loss={loss.item():.6f} | avg_loss={avg_loss_so_far:.6f}")
+
+		if family_run.log_interval and family_run.log_interval > 0 and (
+			epoch % family_run.log_interval == 0 or epoch == family_run.total_epochs_to_train):
+			# Note: this log might be slightly behind if we use futures, but for simplicity we'll just log here
+			# or we could log inside the thread. The requirement was to avoid blocking.
+			pass
+
+	for future in futures:
+		l_contrib, t_contrib = future.result()
+		train_loss_sum += l_contrib
+		train_top10_sum += t_contrib
+
+	executor.shutdown(wait=True)
+
+	# Explicitly clear tensors to help GC
+	#del xb, yb, pred, loss
 
 	train_mse = train_loss_sum / max(1, total)
 	train_top10 = train_top10_sum / max(1, total)
 
+	# Force GC and clear CUDA cache at the end of the epoch
+	#	if torch.cuda.is_available():
+	#		torch.cuda.empty_cache()
+	#	gc.collect()
+	#time.sleep(0.1) # Small sleep to let OS/drivers catch up
+
+	val_mse = 0.0
+	val_top10 = 0.0
 	if val_loader is not None:
 		val_mse, val_top10, _val_rde_unused = eval_epoch(
 			model,
@@ -554,6 +617,120 @@ def _train_one_epoch_for_rep(
 		)
 	else:
 		val_mse, val_top10 = 0.0, 0.0
+	return train_mse, val_mse, train_top10, val_top10
+
+
+def calculate_training_statistics(batch_size: float, batch_idx: int, epoch: int, family_run: FamilyRun,
+                                  loss_tensor: Tensor, pred: Tensor, total_batches: int,
+                                  yb: Tensor, current_total: int, running_loss_sum: list[float]) -> tuple[float, float]:
+	bs = batch_size
+	loss_val = loss_tensor.item()
+	loss_contribution = loss_val * bs
+	top10_contribution = mse_restricted(pred, yb.to(pred.dtype), mode="top", k=10).item() * bs
+
+	if family_run.log_interval and family_run.log_interval > 0 and (
+		epoch % family_run.log_interval == 0 or epoch == family_run.total_epochs_to_train):
+		avg_loss_so_far = (running_loss_sum[0] + loss_contribution) / max(1, current_total + bs)
+		print(
+			f"Epoch {epoch}/{family_run.total_epochs_to_train} | batch {batch_idx}/{total_batches} | curr_loss={loss_val:.6f} | avg_loss={avg_loss_so_far:.6f}")
+
+	running_loss_sum[0] += loss_contribution
+	return loss_contribution, top10_contribution
+
+
+
+
+def prepare_training_inputs(device, non_blocking: bool, xb, yb) -> tuple[Tensor, Tensor]:
+	if not isinstance(xb, torch.Tensor):
+		xb = torch.as_tensor(xb, dtype=torch.float32, device=device)
+	else:
+		xb = xb.to(device=device, dtype=torch.float32, non_blocking=non_blocking)
+	if not isinstance(yb, torch.Tensor):
+		yb = torch.as_tensor(yb, dtype=torch.float32, device=device)
+	else:
+		yb = yb.to(device=device, dtype=torch.float32, non_blocking=non_blocking)
+	return xb, yb
+
+
+def _train_and_log_epoch(
+	model,
+	optimizer,
+	scaler,
+	use_amp,
+	amp_dtype,
+	train_loader,
+	val_loader,
+	device,
+	family_run,
+	single_run,
+	epoch,
+	run_start_time,
+	cumulative_total_epochs_across_reps,
+	current_epochs_across_reps,
+	one_file_structure,
+	rep_index,
+	save_interval,
+	input_size,
+	output_size,
+):
+	should_print_message = False
+	if family_run.log_interval and family_run.log_interval > 0 and (
+		epoch % family_run.log_interval == 0 or epoch == family_run.total_epochs_to_train):
+		should_print_message = epoch % family_run.log_interval == 0 and epoch != 0
+
+	epoch_start = time.time()
+
+	train_mse, val_mse, train_top10, val_top10 = _train_one_epoch_for_rep(
+		model=model,
+		optimizer=optimizer,
+		scaler=scaler,
+		use_amp=use_amp,
+		amp_dtype=amp_dtype,
+		train_loader=train_loader,
+		val_loader=val_loader,
+		device=device,
+		family_run=family_run,
+		epoch=epoch,
+	)
+
+	train_mse = float(train_mse)
+	val_mse = float(val_mse)
+	train_top10 = float(train_top10)
+	val_top10 = float(val_top10)
+
+	epoch_dur = time.time() - epoch_start
+	if should_print_message:
+		current_time = time.time()
+		elapsed_time = current_time - run_start_time
+		epochs_remaining = cumulative_total_epochs_across_reps - current_epochs_across_reps
+		time_remaining = (
+				                 elapsed_time / current_epochs_across_reps) * epochs_remaining if current_epochs_across_reps > 0 else 0
+		rem_h = int(time_remaining // 3600)
+		rem_m = int((time_remaining % 3600) // 60)
+		rem_s = int(time_remaining % 60)
+		msg = (
+			f"Epoch {epoch:03d} | train_mse={train_mse:.6f} val_mse={val_mse:.6f} "
+			f"train_top10={train_top10:.6f} val_top10={val_top10:.6f} "
+			+ (" [rank_err:on]" if family_run.enable_rank_error_loss_in_training else "")
+			+ f" | time={epoch_dur:.2f}s"
+			+ f" | time remaining={rem_h:02d}:{rem_m:02d}:{rem_s:02d}"
+		)
+		print(msg)
+
+	row = [epoch, train_mse, val_mse, train_top10, val_top10, optimizer.param_groups[0]["lr"]]
+	one_file_structure.get_metrics_file_handler_for_rep(rep_index).write_row(row)
+	_maybe_save_checkpoint(
+		single_run=single_run,
+		one_file_structure=one_file_structure,
+		rep_index=rep_index,
+		model=model,
+		optimizer=optimizer,
+		input_size=input_size,
+		output_size=output_size,
+		epoch=epoch,
+		family_run=family_run,
+		save_interval=save_interval,
+	)
 	return train_mse, val_mse, train_top10, val_top10
 
 
@@ -608,6 +785,8 @@ class TrainSingleRun:
 			single_run.mlp_layers,
 			"lr ",
 			single_run.lr,
+			"optimizer ",
+			single_run.optimizer,
 			"activation ",
 			single_run.activation,
 			"final_activation ",
@@ -628,9 +807,10 @@ class TrainSingleRun:
 
 		# Determine input/output sizes from the first instance
 		input_size, output_size = _prepare_data(provider)
+		single_run.input_size = input_size
+		single_run.output_size = output_size
 
 		# Build datasets (train/val/test) and determine train window
-		print(f" train percent 4 {single_run.family_run.train_percent} val percent 4 {single_run.family_run.val_percent}")
 
 		train_ds, val_ds, test_ds, train_start_date_id, train_end_date_id = _resolve_train_window_and_split(
 			provider, max_training_instances, single_run
@@ -655,13 +835,14 @@ class TrainSingleRun:
 		print(
 			f"Config: prior_days={single_run.prior_days} epochs={family_run.total_epochs_to_train} "
 			f"batch_size={family_run.batch_of_instances_to_train_on_at_once} lr={single_run.lr} "
+			f"optimizer={single_run.optimizer} "
 			f"activation={single_run.activation} mlp_layers={single_run.mlp_layers} "
 			f"split_mode={family_run.split_mode} seed={family_run.random_seed_splits} "
 			f"dont_use_dataloader={family_run.dont_use_dataloader} "
-			f"pin_memory={bool(getattr(family_run,'pin_memory', False))} "
-			f"shuffle_instances_in_training_set={bool(getattr(family_run,'shuffle_instances_in_training_set', False))} "
-			f"number_of_GPU_workers={getattr(family_run,'number_of_GPU_workers', 0)} "
-			f"pin_GPU_memory={bool(getattr(family_run,'pin_GPU_memory', False))}"
+			f"pin_memory={bool(getattr(family_run, 'pin_memory', False))} "
+			f"shuffle_instances_in_training_set={bool(getattr(family_run, 'shuffle_instances_in_training_set', False))} "
+			f"number_of_GPU_workers={getattr(family_run, 'number_of_GPU_workers', 0)} "
+			f"pin_GPU_memory={bool(getattr(family_run, 'pin_GPU_memory', False))}"
 		)
 		print(
 			f"Instances: total={max_training_instances} | splits -> train={len(train_ds)} "
@@ -669,166 +850,331 @@ class TrainSingleRun:
 		)
 		print(f"Tensor sizes: input_size={input_size} output_size={output_size}")
 
-		training_bundle_list,rep_files_list, use_amp,amp_dtype, param_count = _build_training_bundles_and_loaders(family_run, single_run,input_size, output_size, train_ds, val_ds, test_ds,  device)
+		training_bundle_list, rep_files_list, use_amp, amp_dtype, param_count, use_caching = _build_training_bundles_and_loaders(
+			family_run, single_run, input_size, output_size, train_ds, val_ds, test_ds, device)
 		repeat_count_cfg = family_run.run_repeats
 		#start_epoch = 1
 		last_epoch_encountered = 0
 		#resume_from_current_epoch = True
-		start_epoch = _maybe_resume_checkpoints(training_bundle_list,rep_files_list,family_run,device,family_dir)
+		start_epoch = _maybe_resume_checkpoints(training_bundle_list, rep_files_list, family_run, single_run, device,
+		                                        family_dir)
+		cumulative_total_epochs_across_reps = family_run.total_epochs_to_train * repeat_count_cfg
+		current_epochs_across_reps = 0
 		run_start_time = time.time()
-		ensemble_interval = family_run.ensemble_interval
-		if ensemble_interval > 0:
-			total_outer_epochs = int((family_run.total_epochs_to_train - start_epoch)/ensemble_interval )
+		trading_interval = family_run.trading_interval
+		if trading_interval > 0:
+			total_outer_epochs = int((family_run.total_epochs_to_train - start_epoch) / trading_interval)
 			#if this isn't a multiple of ensemble interval then we need to run one more outer epoch
-			if (family_run.total_epochs_to_train - start_epoch) % ensemble_interval != 0:
+			if (family_run.total_epochs_to_train - start_epoch) % trading_interval != 0:
 				total_outer_epochs += 1
 		else:
 			total_outer_epochs = 1
-		for outer_epoch_index in range(0 , total_outer_epochs) :
+		for outer_epoch_index in range(0, total_outer_epochs):
 			# GPU Memory Logging
-			_log_gpu_usage(device, outer_epoch_index, single_run)
 			print(f"\n=== Starting outer epoch {outer_epoch_index}/{total_outer_epochs} ===")
 			ensemble_parts: List[nn.Module] = []
 			for run_idx in range(repeat_count_cfg):
 				rep_index = run_idx + 1
-
 				one_file_structure = rep_files_list[run_idx]
-				model = training_bundle_list[run_idx].model
-				model.to(device)
-				optimizer = training_bundle_list[run_idx].optimizer
-				# Move optimizer state to device
-				for state in optimizer.state.values():
-					for k, v in state.items():
-						if isinstance(v, torch.Tensor):
-							state[k] = v.to(device)
-				scaler = training_bundle_list[run_idx].scaler
-				use_amp = training_bundle_list[run_idx].use_amp
-				amp_dtype = training_bundle_list[run_idx].amp_dtype
-				train_loader = training_bundle_list[run_idx].training_instance_provider
-				val_loader = training_bundle_list[run_idx].validation_instance_provider
+				bundle = training_bundle_list[run_idx]
+
+				# Load from cache if needed
+				if bundle.cache_path and bundle.model is None:
+					m, opt_state, sc_state = load_model_from_checkpoint(
+						bundle.cache_path,
+						family_run,
+						input_size,
+						output_size,
+						single_run.mlp_layers,
+						single_run.activation,
+						single_run.prior_days,
+						device=torch.device("cpu"),
+						map_location="cpu"
+					)
+
+					# We still need to create the optimizer and scaler to load the states into
+					# but wait, load_model_from_checkpoint returns the model.
+					# To get the optimizer with the right parameters, we can use create_model_and_optimizer
+					_, opt, sc, _, _ = create_model_and_optimizer(
+						family_run,
+						input_size,
+						output_size,
+						single_run.mlp_layers,
+						single_run.activation,
+						torch.device("cpu"),
+						single_run.lr,
+						to_device=False,
+						prior_days=single_run.prior_days,
+						optimizer_name=single_run.optimizer,
+						final_activation=single_run.final_activation,
+					)
+
+					if opt_state:
+						opt.load_state_dict(opt_state)
+					if sc and sc_state:
+						sc.load_state_dict(sc_state)
+
+					bundle.model = m
+					bundle.optimizer = opt
+					bundle.scaler = sc
+					# Re-create scheduler
+					gamma: float = getattr(single_run, "learning_rate_adjustment_parameter", 0.998)
+					bundle.scheduler = ExponentialLR(bundle.optimizer, gamma=float(gamma))
+
+				model = bundle.model
+				if model is not None:
+					model.to(device)
+				optimizer = bundle.optimizer
+				if optimizer is not None:
+					# Move optimizer state to device
+					for state in optimizer.state.values():
+						for k, v in state.items():
+							if isinstance(v, torch.Tensor):
+								state[k] = v.to(device)
+				scaler = bundle.scaler
+				use_amp = bundle.use_amp
+				amp_dtype = bundle.amp_dtype
+				train_loader = bundle.training_instance_provider
+				val_loader = bundle.validation_instance_provider
 				if use_amp and amp_dtype == torch.float16:
 					print("Precision runtime: autocast=float16 with GradScaler")
 				elif use_amp and amp_dtype == torch.bfloat16:
 					print("Precision runtime: autocast=bfloat16 (no GradScaler)")
-				if ensemble_interval > 0:
-					inner_epoch_range = range(ensemble_interval)
-					if outer_epoch_index * ensemble_interval > family_run.total_epochs_to_train:
+				if trading_interval > 0:
+					inner_epoch_range = range(trading_interval)
+					if outer_epoch_index * trading_interval > family_run.total_epochs_to_train:
 						#we are on the last epoch so we need to run the last inner epoch only
-						inner_epoch_range = range(family_run.total_epochs_to_train % ensemble_interval)
+						inner_epoch_range = range(family_run.total_epochs_to_train % trading_interval)
 				else:
 					inner_epoch_range = range(family_run.total_epochs_to_train)
 				scheduler = training_bundle_list[run_idx].scheduler
-				for inner_epoch_index in inner_epoch_range:
-					epoch = start_epoch + outer_epoch_index * family_run.ensemble_interval + inner_epoch_index
-					last_epoch_encountered = epoch
-					should_print_message = False
-					if family_run.log_interval and family_run.log_interval > 0 and (
-						epoch % family_run.log_interval == 0 or epoch == family_run.total_epochs_to_train):
-						should_print_message = epoch % family_run.log_interval == 0 and epoch != 0
 
-					epoch_start = time.time()
+				if use_caching:
+					# In cached mode, we train this model through all epochs before moving to next rep.
+					# Note: original nested loops were (outer epochs, reps, inner epochs).
+					# Here we do (reps, all epochs) to keep model in memory.
+					for epoch in range(start_epoch, family_run.total_epochs_to_train + 1):
+						current_epochs_across_reps += 1
+						last_epoch_encountered = epoch
 
-					train_mse, val_mse, train_top10, val_top10= _train_one_epoch_for_rep(
-						model=model,
-						optimizer=optimizer,
-						scaler=scaler,
-						use_amp=use_amp,
-						amp_dtype=amp_dtype,
-						train_loader=train_loader,
-						val_loader=val_loader,
-						device=device,
-						family_run=family_run,
-						epoch=epoch,
-					)
-
-					epoch_dur = time.time() - epoch_start
-					if should_print_message:
-						current_time = time.time()
-						elapsed_time = current_time - run_start_time
-						epochs_completed = (epoch - start_epoch) + (run_idx + 1) / repeat_count_cfg
-						epochs_remaining = family_run.total_epochs_to_train - epochs_completed
-						time_remaining = (elapsed_time / epochs_completed) * epochs_remaining
-						rem_h = int(time_remaining // 3600)
-						rem_m = int((time_remaining % 3600) // 60)
-						rem_s = int(time_remaining % 60)
-						msg = (
-							f"Epoch {epoch:03d} | train_mse={train_mse:.6f} val_mse={val_mse:.6f} "
-							f"train_top10={train_top10:.6f} val_top10={val_top10:.6f} "
-							+ (" [rank_err:on]" if family_run.enable_rank_error_loss_in_training else "")
-							+ f" | time={epoch_dur:.2f}s"
-							+ f" | time remaining={rem_h:02d}:{rem_m:02d}:{rem_s:02d}"
+						_train_and_log_epoch(
+							model=model,
+							optimizer=optimizer,
+							scaler=scaler,
+							use_amp=use_amp,
+							amp_dtype=amp_dtype,
+							train_loader=train_loader,
+							val_loader=val_loader,
+							device=device,
+							family_run=family_run,
+							single_run=single_run,
+							epoch=epoch,
+							run_start_time=run_start_time,
+							cumulative_total_epochs_across_reps=cumulative_total_epochs_across_reps,
+							current_epochs_across_reps=current_epochs_across_reps,
+							one_file_structure=one_file_structure,
+							rep_index=rep_index,
+							save_interval=save_interval,
+							input_size=input_size,
+							output_size=output_size,
 						)
-						print(msg)
 
-					row = [epoch, train_mse, val_mse, train_top10, val_top10, optimizer.param_groups[0]["lr"]]
-					one_file_structure.get_metrics_file_handler_for_rep(rep_index).write_row(row)
-					#create a stock recommender
+						# Calculate scores at trading intervals
+						if family_run.trading_interval > 0 and epoch % family_run.trading_interval == 0:
+							rec = StockRecommenderFromModel(
+								single_run,
+								[model],
+								device=str(device),
+								model_dict={"input_size": int(input_size), "output_size": int(output_size),
+								            "prior_days": int(single_run.prior_days),
+								            "day_change_centered": single_run.day_change_centered},
+							)
+							print(f"Running periodic score generation for rep {rep_index} at epoch {epoch}...")
+							with torch.no_grad():
+								feature_label_date_gen = bundle.testing_instance_provider.get_next_feature_label_date()
+								# Use the model directly from the recommender (it might have been wrapped/moved)
+								for feat_vec, _, feature_date_id in feature_label_date_gen:
+									input_tensor = feat_vec.unsqueeze(0).to(device)
+									rec.generateStockScoresForNetwork(
+										network=rec._models[0],
+										inputs=input_tensor,
+										save_to_file=True,
+										epoch_name=str(epoch),
+										date_id=feature_date_id,
+										network_index=rep_index - 1
+									)
+									del input_tensor
+								del feature_label_date_gen
+							del rec
+							if str(device).startswith("cuda"):
+								torch.cuda.empty_cache()
 
-					# Optionally throttle how often we persist heavy artifacts to speed up training.
-					_maybe_save_checkpoint(
-						single_run=single_run,
-						one_file_structure=one_file_structure,
-						rep_index=rep_index,
-						model=model,
-						optimizer=optimizer,
-						input_size=input_size,
-						output_size=output_size,
-						epoch=epoch,
-						family_run=family_run,
-						save_interval=save_interval,
-					)
+						if scheduler is not None:
+							scheduler.step()
 
-					_maybe_simulate_trading_for_rep(
-						family_run=family_run,
-						single_run=single_run,
-						rep_index=rep_index,
-						model=model,
-						one_file_structure=one_file_structure,
-						epoch=epoch,
-						sim_topks_resolved=sim_topks_resolved,
-						test_sim_data_source=training_bundle_list[run_idx].testing_instance_provider
-					)
-					if scheduler is not None:
-						scheduler.step()
-				model.to("cpu")
+						# Periodic GC and memory diagnostic
+						if epoch % 5 == 0:
+							gc.collect()
+							if str(device).startswith("cuda"):
+								torch.cuda.empty_cache()
+
+					if str(device).startswith("cuda"):
+						torch.cuda.empty_cache()
+
+				else:
+					for inner_epoch_index in inner_epoch_range:
+						epoch = start_epoch + outer_epoch_index * family_run.trading_interval + inner_epoch_index
+						current_epochs_across_reps += 1
+						last_epoch_encountered = epoch
+
+						_train_and_log_epoch(
+							model=model,
+							optimizer=optimizer,
+							scaler=scaler,
+							use_amp=use_amp,
+							amp_dtype=amp_dtype,
+							train_loader=train_loader,
+							val_loader=val_loader,
+							device=device,
+							family_run=family_run,
+							single_run=single_run,
+							epoch=epoch,
+							run_start_time=run_start_time,
+							cumulative_total_epochs_across_reps=cumulative_total_epochs_across_reps,
+							current_epochs_across_reps=current_epochs_across_reps,
+							one_file_structure=one_file_structure,
+							rep_index=rep_index,
+							save_interval=save_interval,
+							input_size=input_size,
+							output_size=output_size,
+						)
+						if scheduler is not None:
+							scheduler.step()
+
+						# Periodic GC and memory diagnostic
+						if epoch % 5 == 0:
+							gc.collect()
+							if str(device).startswith("cuda"):
+								torch.cuda.empty_cache()
+
+						_maybe_generate_scores_for_rep(
+							family_run=family_run,
+							single_run=single_run,
+							rep_index=rep_index,
+							model=bundle.cache_path if bundle.cache_path else model,
+							epoch=epoch,
+							test_sim_data_source=training_bundle_list[run_idx].testing_instance_provider,
+							input_size=input_size,
+							output_size=output_size,
+						)
+					if str(device).startswith("cuda"):
+						torch.cuda.empty_cache()
+				_log_gpu_usage(device, outer_epoch_index, single_run)
+
+				if model is not None:
+					model.to("cpu")
 				# Move optimizer state to CPU
-				for state in optimizer.state.values():
-					for k, v in state.items():
-						if isinstance(v, torch.Tensor):
-							state[k] = v.to("cpu")
-				ensemble_parts.append(model)
+				if optimizer is not None:
+					for state in optimizer.state.values():
+						for k, v in state.items():
+							if isinstance(v, torch.Tensor):
+								state[k] = v.to("cpu")
 
-			handle_ensemble_sim = ensemble_interval > 0 and repeat_count_cfg > 1
-			#print(f"Running periodic ensemble {handle_ensemble_sim} at epoch {epoch} (interval={ensemble_interval})...")
-			if handle_ensemble_sim:
-				import gc
-				gc.collect()
-				if str(device).startswith("cuda"):
-					torch.cuda.empty_cache()
+				# If caching is enabled, save back to disk and clear memory
+				if bundle.cache_path:
+					checkpoint = {
+						'model_state_dict': model.state_dict(),
+						'optimizer_state_dict': optimizer.state_dict(),
+						'scaler_state_dict': scaler.state_dict() if scaler is not None else None,
+					}
+					torch.save(checkpoint, bundle.cache_path)
+					bundle.model = None
+					bundle.optimizer = None
+					bundle.scaler = None
+					bundle.scheduler = None
+					del model, optimizer, scaler, checkpoint
+					gc.collect()
+				else:
+					ensemble_parts.append(model)
 
-				ensemble_recommender = StockRecommenderFromModel(ensemble_parts, single_run.file_structure.run_group_dir, device=str(device))
-				#make sure we have saved the existing models
-				simulate_trading_with_trained_model(AIType.ENSEMBLE, family_run.dbinfo_file , last_epoch_encountered, family_run,[ensemble_recommender], -1,sim_topks_resolved, single_run, training_bundle_list[0].testing_instance_provider)
-				for part in ensemble_parts:
-					part.to("cpu")
-				del ensemble_recommender
-				gc.collect()
-				if str(device).startswith("cuda"):
-					torch.cuda.empty_cache()
+			handle_ensemble_sim = repeat_count_cfg > 1
+			#print(f"Running periodic ensemble {handle_ensemble_sim} at epoch {epoch} (interval={trading_interval})...")
+			# Cleanup GPU memory after each outer epoch
+			for part in ensemble_parts:
+				part.to("cpu")
+
+			del ensemble_parts  # Clear this to avoid holding references twice
+
+			gc.collect()
+			if str(device).startswith("cuda"):
+				torch.cuda.empty_cache()
+			# if handle_ensemble_sim and not use_caching:
+			# 	# Use a new name to avoid confusing with deleted 'ensemble_parts' if we choose not to enter this block
+			# 	final_ensemble_list: List[nn.Module | str] = []
+			# 	# If models were cached, we need to load them for ensemble
+			# 	if any(b.cache_path for b in training_bundle_list):
+			# 		for b in training_bundle_list:
+			# 			if b.cache_path:
+			# 				final_ensemble_list.append(b.cache_path)
+			# 			elif b.model is not None:
+			# 				final_ensemble_list.append(b.model)
+			# 	else:
+			# 		# Use a small placeholder to satisfy the logic if needed,
+			# 		# but since we deleted ensemble_models_in_memory, we can't use it.
+			# 		# The logic below 'del final_ensemble_list' suggests it's safe to skip or use empty.
+			# 		final_ensemble_list = []
+			#
+			# 	# We don't actually use final_ensemble_list here in the current logic
+			# 	# (the original code just built it but didn't pass it anywhere
+			# 	# in the provided snippet, likely for future use or it was used
+			# 	# in a deleted section).
+			# 	# Given we just need to free memory, let's ensure it's cleared if not used.
+			# 	del final_ensemble_list
+
+			_log_gpu_usage(device, outer_epoch_index, single_run)
+
+			if use_caching:
+				# Break out of outer_epoch loop after one pass
+				break
 
 		for run_idx in range(repeat_count_cfg):
 			rep_index = run_idx + 1
 			fs = rep_files_list[run_idx]
-			metrics_file = fs.get_metrics_file_for_rep( rep_index)
+			bundle = training_bundle_list[run_idx]
+
+			# Load from cache if needed for final evaluation
+			if bundle.cache_path and bundle.model is None:
+				m, _, _ = load_model_from_checkpoint(
+					bundle.cache_path,
+					family_run,
+					input_size,
+					output_size,
+					single_run.mlp_layers,
+					single_run.activation,
+					single_run.prior_days,
+					device=torch.device("cpu"),
+					map_location="cpu"
+				)
+				bundle.model = m
+
+			# Cleanup cache files if they exist
+			if bundle.cache_path and os.path.exists(bundle.cache_path):
+				try:
+					os.remove(bundle.cache_path)
+				except Exception as e:
+					print(f"Warning: Failed to remove cache file {bundle.cache_path}: {e}")
+
+			metrics_file = fs.get_metrics_file_for_rep(rep_index)
 			#suffix = fs.suffix
-			model = training_bundle_list[run_idx].model
-			#optimizer = training_bundle_list[run_idx].optimizer
-			use_amp = training_bundle_list[run_idx].use_amp
-			amp_dtype = training_bundle_list[run_idx].amp_dtype
+			model = bundle.model
+			#optimizer = bundle.optimizer
+			use_amp = bundle.use_amp
+			amp_dtype = bundle.amp_dtype
 			test_iter = build_dataloaders(family_run, training_bundle_list[run_idx].testing_instance_provider)
 			# Build a fresh iterator for test as well when not using DataLoader
 			if test_iter is not None:
-				model.to(device)
+				if model is not None:
+					model.to(device)
 				test_mse, test_top10, test_rde = eval_epoch(
 					model,
 					test_iter,
@@ -839,7 +1185,8 @@ class TrainSingleRun:
 					rank_upper=int(family_run.rank_error_upper_bound),
 					compute_rank_err=bool(family_run.enable_rank_error_loss_in_training),
 				)
-				model.to("cpu")
+				if model is not None:
+					model.to("cpu")
 			else:
 				test_mse, test_top10, test_rde = 0.0, 0.0, 0.0
 			print("Final Test Metrics:")
@@ -858,28 +1205,58 @@ class TrainSingleRun:
 			print(f"Wrote final test metrics to: {test_metrics_path}")
 
 			try:
-				# manifest_path = save_model_and_manifest(
-				# 	single_run,
-				# 	model,
-				# 	optimizer,
-				# 	rep_dir,
-				# 	suffix,
-				# 	metrics_file,
-				# 	test_metrics_path,
-				# 	input_size,
-				# 	output_size,
-				# 	single_run.mlp_layers,
-				# 	single_run.activation,
-				# 	single_run.final_activation,
-				# 	single_run.prior_days,
-				# )
-				#
 				if bool(family_run.simulate_after_training):
-					after_recommender = StockRecommenderFromModel([model], single_run.file_structure.run_group_dir, device=str(device))
-					simulate_trading_with_trained_model( AIType.SINGLE,family_run.dbinfo_file,  family_run.total_epochs_to_train, family_run, [after_recommender], rep_index, sim_topks_resolved, single_run, test_iter)
-					model.to("cpu")
+					after_recommender = StockRecommenderFromModel(
+						single_run,
+						[bundle.cache_path if bundle.cache_path else model],
+						single_run.file_structure.get_directory_for_rep(rep_index),
+						device=str(device),
+						model_dict={"input_size": int(input_size), "output_size": int(output_size),
+						            "prior_days": int(single_run.prior_days),
+						            "day_change_centered": single_run.day_change_centered},
+					)
+					print(
+						f"Running final score generation for rep {rep_index} at epoch {family_run.total_epochs_to_train}...")
+					feature_label_date_gen = training_bundle_list[
+						run_idx].testing_instance_provider.get_next_feature_label_date()
+					# Use the model directly from the recommender
+					network = after_recommender._models[0]
+					for feat_vec, _, feature_date_id in feature_label_date_gen:
+						input_tensor = feat_vec.unsqueeze(0).to(device)
+						after_recommender.generateStockScoresForNetwork(
+							network=network,
+							inputs=input_tensor,
+							save_to_file=True,
+							epoch_name=str(family_run.total_epochs_to_train),
+							date_id=feature_date_id,
+							network_index=rep_index - 1
+						)
+						del input_tensor
+					if model is not None:
+						model.to("cpu")
+
+					# Explicitly cleanup recommender and its models
+					after_recommender.to_cpu()
+					del after_recommender
+					del network
+					del feature_label_date_gen
 			except Exception as save_e:
 				traceback.print_exception(save_e)
+
+			# Cleanup this rep's bundle and models to free memory
+			training_bundle_list[run_idx].model = None
+			training_bundle_list[run_idx].optimizer = None
+			training_bundle_list[run_idx].scheduler = None
+			training_bundle_list[run_idx].training_instance_provider = None
+			training_bundle_list[run_idx].validation_instance_provider = None
+			training_bundle_list[run_idx].testing_instance_provider = None
+
+			del model
+			del test_iter
+
+			gc.collect()
+			if str(device).startswith("cuda"):
+				torch.cuda.empty_cache()
 
 	@staticmethod
 	def load_from_file(path: str) -> SingleRun:
@@ -946,6 +1323,5 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 if __name__ == "__main__":  # pragma: no cover - script entry point
 	raise SystemExit(main())
-
 
 __all__ = ["TrainSingleRun", "main"]

@@ -213,11 +213,14 @@ def process_file(
 				cursor.execute(
 					insert_symbol_sql, (ticker_v, exchange_v, type_v, market_v)
 				)
-				last_id = getattr(cursor, "lastrowid", None)
-				if not last_id:
-					# Fallback: read id
+				# With ON DUPLICATE KEY UPDATE and LAST_INSERT_ID(id),
+				# lastrowid should contain the id of the row (inserted or updated).
+				ticker_id = getattr(cursor, "lastrowid", 0)
+
+				if not ticker_id:
+					# Fallback for drivers/cases where lastrowid is not set
 					cursor.execute(
-						"SELECT id FROM ticker_symbol WHERE ticker_symbol=%s", (ticker_v,)
+						"SELECT id FROM ticker_symbol WHERE label=%s", (ticker_v,)
 					)
 					row = cursor.fetchone()
 					if not row:
@@ -225,13 +228,18 @@ def process_file(
 					ticker_id = row[0]
 					updated_symbols += 1
 				else:
-					ticker_id = int(last_id)
-					# We can't differentiate insert vs update perfectly across drivers here.
-					# If an existing row caused duplicate key, lastrowid becomes the matched id.
-					updated_symbols += 0  # no-op; we'll count upserts via extended table
-					inserted_symbols += 0  # conservative
-			except Exception:
-				print(f"Error inserting ticker symbol: {ticker_v} error is {str(Exception)}")
+					# If rowcount is 1, it was an insert. If 2, it was an update.
+					# (This is MySQL specific behavior for INSERT ... ON DUPLICATE KEY UPDATE)
+					rc = getattr(cursor, "rowcount", 0)
+					if rc == 1:
+						inserted_symbols += 1
+					elif rc == 2:
+						updated_symbols += 1
+					else:
+						# could be 0 if no changes were made to an existing row
+						updated_symbols += 1
+			except Exception as e:
+				print(f"Error inserting ticker symbol: {ticker_v} error is {e}")
 				errors += 1
 				if skip_bad_lines:
 					continue
@@ -263,8 +271,8 @@ def process_file(
 					),
 				)
 				upserted_extended += 1
-			except Exception:
-				print(f"Error inserting ticker extended info: {ticker_v} error is {str(Exception)}")
+			except Exception as e:
+				print(f"Error inserting ticker extended info: {ticker_v} error is {e}")
 				errors += 1
 				if skip_bad_lines:
 					continue

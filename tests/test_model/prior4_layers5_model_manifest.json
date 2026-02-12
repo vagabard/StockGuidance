@@ -1,0 +1,16 @@
+{
+  "timestamp": "2025-11-18 23:30:44",
+  "arch": "mlp",
+  "input_size": 15475,
+  "output_size": 3095,
+  "hidden_layers": 8000,
+  "mlp_layers": 5,
+  "activation": "sigmoid",
+  "prior_days": 4,
+  "close_ratio_only": true,
+  "precision": "auto",
+  "state_dict_path": "prior4_layers5_model_state.pt",
+  "optimizer_state_path": "prior4_layers5_optimizer_state.pt",
+  "metrics_csv": "prior4_layers5_training_metrics.csv",
+  "test_metrics_csv": "prior4_layers5_training_metrics_test.csv"
+}

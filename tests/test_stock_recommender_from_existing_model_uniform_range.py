@@ -25,8 +25,44 @@ def test_existing_model_random_uniform_inputs_vary_top_id():
     this_dir = os.path.dirname(__file__)
     model_dir = os.path.join(this_dir, "test_model")
 
+    # Load SingleRun if available, otherwise mock it
+    from trainer.state.single_run import SingleRun
+    sr_path = os.path.join(model_dir, "single_run_epoch.json")
+    if os.path.exists(sr_path):
+        single_run = SingleRun.load(sr_path)
+    else:
+        # Mocking SingleRun/FamilyRun for tests that use old pre-committed models
+        from trainer.state.family_run import FamilyRun
+        from trainer.file_structure_single_run_handler import FileStructureSingleRunHandler
+        import json
+        from models.utils import resolve_manifest_path
+        with open(resolve_manifest_path(model_dir), "r") as f:
+            manifest = json.load(f)
+
+        fr = FamilyRun.from_dict({
+            "initial_run_id": "test",
+            "neural_network_type": manifest.get("arch", "mlp"),
+            "hidden_layer_size": manifest.get("hidden_layers", []),
+            "current_day_change": manifest.get("current_day_change", False),
+            "volume_ratio": manifest.get("volume_ratio", False),
+            "vwap_ratio": manifest.get("vwap_ratio", False),
+            "transaction_ratio": manifest.get("transaction_ratio", False),
+        })
+        single_run = SingleRun(
+            timestamp_id="test",
+            family_run=fr,
+            day_change_centered=manifest.get("day_change_centered", "zero"),
+            prior_days=manifest.get("prior_days", 0),
+            mlp_layers=manifest.get("mlp_layers", 3),
+            lr=0.001,
+            activation=manifest.get("activation", "relu"),
+            final_activation=manifest.get("final_activation", ""),
+            file_structure=FileStructureSingleRunHandler.from_dict({"run_directory": model_dir, "suffix": ""}),
+            ticker_ids=manifest.get("ticker_ids")
+        )
+
     # Instantiate recommender from directory (it contains *model_manifest.json)
-    rec = StockRecommenderFromModel(model_dir, device="cpu")
+    rec = StockRecommenderFromModel(single_run, model_dir, device="cpu")
 
     # Get required input size from the loaded manifest
     input_size = rec.get_input_size()

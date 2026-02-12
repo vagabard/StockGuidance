@@ -25,6 +25,7 @@ class FeatureVectorBuilder:
         dbinfo_file: str = "dbinfo.id",
         start_date_id: Optional[int] = None,
         end_date_id: Optional[int] = None,
+	    ticker_pool_start_date_id: Optional[int] = None,
         ticker_pool_end_date_id: Optional[int] = None,
     ) -> FeatureVectorBuilder:
         """
@@ -56,6 +57,7 @@ class FeatureVectorBuilder:
             tranaction_ratio=transaction_ratio,
             start_date_id=start_date_id,
             end_date_id=end_date_id,
+	        ticker_pool_start_date_id=ticker_pool_start_date_id,
             ticker_pool_end_date_id=ticker_pool_end_date_id,
         )
 

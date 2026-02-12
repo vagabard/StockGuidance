@@ -116,6 +116,7 @@ def create_manifest_dictionary( single_run: SingleRun|None, model_state_path:str
 		"learning_rate": float(
 			getattr(single_run, 'lr', 0.0) if isinstance(getattr(single_run, 'lr', None), (int, float)) else 0.0),
 		"prior_days": int(single_run.prior_days),
+		"sequence_length": int(single_run.prior_days) + 1,
 		# Canonical feature flags (used by loaders)
 		"current_day_change": bool(getattr(single_run.family_run, "current_day_change", False)),
 		"include_features": str(single_run.include_features),
@@ -126,7 +127,7 @@ def create_manifest_dictionary( single_run: SingleRun|None, model_state_path:str
 		# "current_day_change_used": bool(getattr(single_run.single_run, "change_in_price_today", False)),
 		"day_change_centered": single_run.day_change_centered,
 		"precision": str((single_run.family_run.precision or "auto").lower()),
-		"ticker_ids": list(single_run.ticker_ids) if single_run.ticker_ids is not None else None,
+		"ticker_ids": [int(tid) for tid in single_run.ticker_ids] if single_run.ticker_ids is not None else None,
 	}
 	if model_state_path is not None and model_state_path != "":
 		manifest["state_dict_path"] = os.path.basename(model_state_path)

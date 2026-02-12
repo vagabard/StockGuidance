@@ -29,6 +29,7 @@ VALID_ACTIVATIONS = {
 	"gelu",
 	"tanh",
 	"sigmoid",
+	"sigmoid_range",
 	"silu",
 	"swish",
 	"leaky_relu",
@@ -49,6 +50,7 @@ VALID_DAY_CENTERS = {
 	"gappednegpos",
 	"binary_negpos",
 	"top_100_binary_negpos",
+	"stock_change_ratio_ranked",
 }
 
 
@@ -77,6 +79,7 @@ class FamilyRun:
 	lr_list: List[float]
 	activation_list: List[str]
 	final_activation_list: List[str]
+	optimizer_list: List[str]
 	include_one_feature_list: Optional[Sequence[str]]
 	base_optional_features: Set[str]
 	base_args_list: List[str] | None = None
@@ -97,6 +100,7 @@ class FamilyRun:
 	random_seed_splits : Optional[int] = None
 	train_percent : Optional[float] = None
 	val_percent : Optional[float] = None
+	test_percent : Optional[float] = None
 	simulate_top_k : Optional[List[int]] = None
 	simulate_prior_only: Optional[bool] = None
 	device : Optional[str] = None
@@ -112,6 +116,7 @@ class FamilyRun:
 	hidden_layer_size : Optional[List[int]] = None
 	drop_last : Optional[bool] = False
 	persistent_workers : Optional[bool] = None
+	layer_types : Optional[List[str]] = None
 
 
 	use_ranking_error_loss : bool = False
@@ -124,7 +129,6 @@ class FamilyRun:
 
 	log_interval : int = 50
 	trading_interval : int = 0
-	ensemble_interval : int = 0
 	simulate_after_training : bool = False
 
 	ticker_ids : List[int] = None
@@ -165,6 +169,7 @@ class FamilyRun:
 				activation_list,
 				final_activation_list,
 				day_change_centered_list,
+				optimizer_list,
 			) = parse_sweep_lists(
 				args,
 				valid_activations=VALID_ACTIVATIONS,
@@ -212,6 +217,8 @@ class FamilyRun:
 			hidden_layer_size = [int(x) for x in general_arg_parser_understands_lists(str(hidden_layers_raw), "hidden_layers")]
 			drop_last = getattr(args, "drop_last", False)
 			persistent_workers = getattr(args, "persistent_workers", None)
+			layer_types_raw = getattr(args, "layer_types", "linear")
+			layer_types = [x.strip() for x in general_arg_parser_understands_lists(str(layer_types_raw), "layer_types")]
 
 			dont_use_dataloader = getattr(args, "dont_use_dataloader", False)
 
@@ -249,6 +256,7 @@ class FamilyRun:
 				lr_list=list(lr_list),
 				activation_list=list(activation_list),
 				final_activation_list=list(final_activation_list),
+				optimizer_list=list(optimizer_list),
 				include_one_feature_list=list(include_one_feature_list) if include_one_feature_list else None,
 				base_optional_features=set(base_optional_features),
 				base_args_list=list(base_args_list),
@@ -283,6 +291,7 @@ class FamilyRun:
 				hidden_layer_size=hidden_layer_size,
 				drop_last=drop_last,
 				persistent_workers=persistent_workers,
+				layer_types=layer_types,
 				log_interval=args.log_interval,
 				use_ranking_error_loss=args.use_ranking_error_loss,
 				rank_temperature=args.rank_temp,
@@ -290,7 +299,6 @@ class FamilyRun:
 				rank_error_lower_bound=args.rank_lower,
 				rank_error_upper_bound=args.rank_upper,
 				trading_interval=args.trading_interval,
-				ensemble_interval=args.ensemble_interval,
 				simulate_after_training=args.simulate_after,
 				file_structure=file_structure,
 				ticker_ids=getattr(args, "ticker_ids", None)
@@ -316,6 +324,7 @@ class FamilyRun:
 
 		single_runs_for_all_combinations: List[SingleRun] = []
 		combo_id = 0
+		base_timestamp = time.strftime("%Y%m%d_%H%M%S", time.localtime())
 
 		for dc in self.day_change_centered_list:
 			for pd in self.prior_days_list:
@@ -323,29 +332,31 @@ class FamilyRun:
 					for lr in self.lr_list:
 						for final_act in self.final_activation_list:
 							for act in self.activation_list:
-								for one_feat in one_feature_values:
-									selected_features = set(self.base_optional_features)
-									if one_feat is not None:
-										selected_features.add(str(one_feat))
-									set_feature_flags(args, selected_features)
-									current_timestamp_id = str(time.strftime("%Y%m%d_%H%M%S", time.localtime()))
-									lrap = float(getattr(self.args, "learning_rate_adjustment_parameter", 0.998))
-									run_state = SingleRun(
-										timestamp_id=current_timestamp_id,
-										family_run=self,
-										day_change_centered=str(dc),
-										prior_days=int(pd),
-										mlp_layers=int(ml),
-										lr=float(lr),
-										learning_rate_adjustment_parameter=lrap,
-										activation=str(act),
-										final_activation=str(final_act),
-										include_features=selected_features or None,
-										train_start_date_id=None,
-										train_end_date_id=None,
-									)
-									single_runs_for_all_combinations.append(run_state)
-									combo_id += 1
+								for opt in self.optimizer_list:
+									for one_feat in one_feature_values:
+										selected_features = set(self.base_optional_features)
+										if one_feat is not None:
+											selected_features.add(str(one_feat))
+										set_feature_flags(args, selected_features)
+										current_timestamp_id = f"{base_timestamp}_{combo_id:02d}"
+										lrap = float(getattr(self.args, "learning_rate_adjustment_parameter", 0.998))
+										run_state = SingleRun(
+											timestamp_id=current_timestamp_id,
+											family_run=self,
+											day_change_centered=str(dc),
+											prior_days=int(pd),
+											mlp_layers=int(ml),
+											lr=float(lr),
+											learning_rate_adjustment_parameter=lrap,
+											activation=str(act),
+											final_activation=str(final_act),
+											optimizer=str(opt),
+											include_features=selected_features or None,
+											train_start_date_id=None,
+											train_end_date_id=None,
+										)
+										single_runs_for_all_combinations.append(run_state)
+										combo_id += 1
 
 		self.single_runs_for_all_combinations = single_runs_for_all_combinations
 
@@ -387,6 +398,7 @@ class FamilyRun:
 		data["lr_list"] = [float(v) for v in self.lr_list]
 		data["activation_list"] = [str(v) for v in self.activation_list]
 		data["final_activation_list"] = [str(v) for v in self.final_activation_list]
+		data["optimizer_list"] = [str(v) for v in self.optimizer_list]
 		# ``include_one_feature_list`` may be a sequence or ``None``; normalise to
 		# a plain list for JSON.
 		if self.include_one_feature_list is not None:
@@ -396,7 +408,18 @@ class FamilyRun:
 		data["base_optional_features"] = sorted(str(v) for v in self.base_optional_features)
 		data["base_args"] = list(self.base_args_list or [])
 		data["hidden_layer_size"] = [int(v) for v in self.hidden_layer_size] if self.hidden_layer_size is not None else None
-		data["ticker_ids"] = list(self.ticker_ids) if self.ticker_ids is not None else None
+		data["layer_types"] = [str(v) for v in self.layer_types] if self.layer_types is not None else None
+
+		def _normalize_to_list(val: Any) -> Any:
+			if hasattr(val, "tolist"):  # Handle numpy arrays
+				return val.tolist()
+			if isinstance(val, (list, tuple, set)):
+				return [_normalize_to_list(v) for v in val]
+			return val
+
+		data["ticker_ids"] = _normalize_to_list(self.ticker_ids)
+		data["simulate_top_k"] = _normalize_to_list(self.simulate_top_k)
+
 		# Normalise the combinations list to plain dictionaries so that
 		# back-references from SingleRun -> FamilyRun are not embedded.
 		serialised_single_runs: List[Dict[str, Any]] = []
@@ -478,6 +501,9 @@ class FamilyRun:
 		lr_list = _as_float_list(data.get("lr_list"))
 		activation_list = _as_str_list(data.get("activation_list"))
 		final_activation_list = _as_str_list(data.get("final_activation_list"))
+		optimizer_list = _as_str_list(data.get("optimizer_list"))
+		if not optimizer_list:
+			optimizer_list = ["adam"]
 		include_one_feature_raw = data.get("include_one_feature_list")
 		include_one_feature_list = (
 			_as_str_list(include_one_feature_raw) if include_one_feature_raw is not None else None
@@ -541,8 +567,13 @@ class FamilyRun:
 		if val_percent is None:
 			val_percent = 0.0
 		if test_percent is None:
-			test_percent = 1.0-train_percent
-		assert 0.999 <= train_percent + val_percent + test_percent <= 1.001, "train_percent + val_percent + test_percent must sum to = 1"
+			test_percent = 1.0 - train_percent - val_percent
+
+		# Validation: ensure percentages are sane if they were explicitly provided.
+		# If we're loading an old state where they don't quite sum to 1, we relax
+		# the check to avoid breaking the viewer.
+		total_p = train_percent + val_percent + test_percent
+		assert 0.9 <= total_p <= 1.1, f"train_percent ({train_percent}) + val_percent ({val_percent}) + test_percent ({test_percent}) must sum to approximately 1 (got {total_p})"
 
 		simulate_top_k =  _as_int_list(data.get("simulate_top_k"))
 		simulate_prior_only = _get_bool("simulate_prior_only")
@@ -557,6 +588,7 @@ class FamilyRun:
 		run_repeats = _get_int("run_repeats") or 1
 		neural_network_type = _get_str("neural_network_type") or "mlp"
 		hidden_layer_size = _as_int_list(data.get("hidden_layer_size"))
+		layer_types = _as_str_list(data.get("layer_types"))
 		if not hidden_layer_size: # Fallback for old states that might have a single int
 			old_val = _get_int("hidden_layer_size")
 			if old_val is not None:
@@ -573,7 +605,6 @@ class FamilyRun:
 		rank_error_lower_bound = _get_int("rank_error_lower_bound")
 		rank_error_upper_bound = _get_int("rank_error_upper_bound")
 		trading_interval = _get_int("trading_interval")
-		ensemble_interval = _get_int("ensemble_interval")
 		simulate_after_training = _get_bool("simulate_after_training") or _get_bool("simulate_after")
 		current_day_change = _get_bool("current_day_change") or _get_bool("change_in_price_today")
 		ticker_ids = _as_int_list(data.get("ticker_ids")) if data.get("ticker_ids") is not None else None
@@ -617,6 +648,7 @@ class FamilyRun:
 			lr_list=lr_list,
 			activation_list=activation_list,
 			final_activation_list=final_activation_list,
+			optimizer_list=optimizer_list,
 			include_one_feature_list=include_one_feature_list,
 			base_optional_features=base_optional_features,
 			base_args_list=base_args_list,
@@ -634,6 +666,7 @@ class FamilyRun:
 			random_seed_splits=random_seed_splits,
 			train_percent=train_percent,
 			val_percent=val_percent,
+			test_percent=test_percent,
 			simulate_top_k=simulate_top_k,
 			simulate_prior_only=simulate_prior_only,
 			precision=precision,
@@ -651,6 +684,7 @@ class FamilyRun:
 			hidden_layer_size=hidden_layer_size,
 			drop_last=drop_last,
 			persistent_workers=persistent_workers,
+			layer_types=layer_types,
 			log_interval=log_interval,
 			use_ranking_error_loss=use_ranking_error_loss,
 			rank_temperature=rank_temperature,
@@ -658,7 +692,6 @@ class FamilyRun:
 			rank_error_lower_bound=rank_error_lower_bound,
 			rank_error_upper_bound=rank_error_upper_bound,
 			trading_interval=trading_interval,
-			ensemble_interval=ensemble_interval,
 			simulate_after_training=simulate_after_training,
 			current_day_change=current_day_change,
 			ticker_ids=ticker_ids,
@@ -672,28 +705,8 @@ class FamilyRun:
 
 		if not self.file_structure.family_state_path:
 			raise RuntimeError("FamilyRun.family_state_path is not set")
-		# ``single_runs_for_all_combinations`` contains ``SingleRun`` instances,
-		# which are not directly JSON-serialisable. Persist them as plain
-		# dictionaries using ``SingleRun.to_dict()`` so that the controller state
-		# file remains simple JSON.
-		from trainer.state.single_run import SingleRun  # local import to avoid cycles
 
-		serialised_single_runs: List[Dict[str, Any]] = []
-		for sr in self.single_runs_for_all_combinations or []:
-			if isinstance(sr, SingleRun):
-				serialised_single_runs.append(sr.to_dict())
-			else:
-				# If entries are already plain dictionaries (e.g. after load),
-				# keep them as-is.
-				serialised_single_runs.append(sr)  # type: ignore[arg-type]
-
-		state: Dict[str, Any] = {
-			"initial_run_id": str(self.initial_run_id),
-			"single_runs_for_all_combinations": serialised_single_runs,
-			"current_index": int(self.current_index),
-			"completed": bool(self.completed),
-			"base_args": list(self.base_args_list or []),
-		}
+		state = self.to_dict()
 		os.makedirs(os.path.dirname(self.file_structure.family_state_path), exist_ok=True)
 		with open(self.file_structure.family_state_path, "w", encoding="utf-8") as sf:
 			import json

@@ -12,7 +12,12 @@ if str(root_path) not in sys.path:
 
 #import pandas as pd  # type: ignore
 import streamlit as st  # type: ignore
-from pandas import read_csv, DataFrame
+from pandas import read_csv, DataFrame, concat
+
+import plotly.express as px  # type: ignore
+import plotly.graph_objects as go  # type: ignore
+
+from simulate_trading import run_simulation_from_saved_scores
 
 
 from viewers.compare_runs_shared import (
@@ -29,6 +34,7 @@ from viewers.compare_runs_shared import (
     has_any_simulation_files,
     load_preferences,
     save_preference,
+    render_run_grid,
 )
 
 
@@ -53,7 +59,8 @@ def _discover_best_run_dir(base_dir: str, ts_name: str, run_list: List[Tuple[str
     # Start with the obvious timestamp directory
     ts_path = os.path.normpath(os.path.join(base_dir, ts_name))
 
-    # Some pipelines store _dir like "20251215_211039/rep1". Use its parent
+    # Some pipelines store _dir like "20251215_211039/rep1" or
+    # "run_family_.../run_single_.../rep1". Use its parent
     # to refine ts_path if it exists on disk.
     dname_0 = (run_list[0][1] or {}).get("_dir") if run_list else None
     if dname_0:
@@ -64,10 +71,9 @@ def _discover_best_run_dir(base_dir: str, ts_name: str, run_list: List[Tuple[str
 
     # 1) Prefer the timestamp directory itself
     if _has_any_simulation_files(ts_path):
-        print(f"[crsv] Using timestamp dir for stats: {ts_path}")
         return ts_path
 
-    # 2) Search rep* subdirectories beneath the timestamp directory
+    # 2) Search subdirectories beneath the timestamp directory
     if os.path.isdir(ts_path):
         try:
             for fname in sorted(os.listdir(ts_path)):
@@ -75,11 +81,8 @@ def _discover_best_run_dir(base_dir: str, ts_name: str, run_list: List[Tuple[str
                 sub_path = os.path.join(ts_path, fname)
                 if not os.path.isdir(sub_path):
                     continue
-                if not re.match(r"rep\d+", fname):
-                    # allow non-matching names as well if they contain files
-                    pass
+                # For run_single_... directories, the reps are usually inside.
                 if _has_any_simulation_files(sub_path):
-                    print(f"[crsv] Using subdir for stats: {sub_path}")
                     return os.path.normpath(sub_path)
         except Exception as e:
             print(f"[crsv] Error scanning subdirs of {ts_path}: {e}")
@@ -88,10 +91,8 @@ def _discover_best_run_dir(base_dir: str, ts_name: str, run_list: List[Tuple[str
     if dname_0:
         alt_path = os.path.normpath(os.path.join(base_dir, dname_0))
         if _has_any_simulation_files(alt_path):
-            print(f"[crsv] Using _dir for stats: {alt_path}")
             return alt_path
 
-    print(f"[crsv] No simulation files for timestamp {ts_name} under base {base_dir}")
     return None
 
 
@@ -120,6 +121,7 @@ def _discover_all_run_dirs(base_dir: str, ts_name: str, run_list: List[Tuple[str
     # Try to refine timestamp directory using parent of first run's _dir
     dname_0 = (run_list[0][1] or {}).get("_dir") if run_list else None
     if dname_0:
+        # dname_0 might be "run_family_X/run_single_Y/repZ" or "ts/repZ"
         parent_rel = os.path.dirname(dname_0)
         candidate = os.path.normpath(os.path.join(base_dir, parent_rel))
         if os.path.isdir(candidate):
@@ -127,7 +129,6 @@ def _discover_all_run_dirs(base_dir: str, ts_name: str, run_list: List[Tuple[str
 
     # 1) Timestamp directory as ensemble
     if os.path.isdir(ts_path) and _has_any_simulation_files(ts_path):
-        print(f"[crsv] Using timestamp dir for stats: {ts_path}")
         results.append((ts_path, "ensemble"))
 
     # 2) Subdirectories beneath timestamp directory
@@ -138,7 +139,6 @@ def _discover_all_run_dirs(base_dir: str, ts_name: str, run_list: List[Tuple[str
                 if not os.path.isdir(sub_path):
                     continue
                 if _has_any_simulation_files(sub_path):
-                    print(f"[crsv] Using subdir for stats: {sub_path}")
                     results.append((os.path.normpath(sub_path), fname))
         except Exception as e:
             print(f"[crsv] Error scanning subdirs of {ts_path}: {e}")
@@ -147,12 +147,8 @@ def _discover_all_run_dirs(base_dir: str, ts_name: str, run_list: List[Tuple[str
     if not results and dname_0:
         alt_path = os.path.normpath(os.path.join(base_dir, dname_0))
         if _has_any_simulation_files(alt_path):
-            print(f"[crsv] Using _dir for stats: {alt_path}")
             # Label derived from last component
             results.append((alt_path, os.path.basename(alt_path) or "_dir"))
-
-    if not results:
-        print(f"[crsv] No simulation files for timestamp {ts_name} under base {base_dir}")
 
     return results
 
@@ -191,7 +187,7 @@ def _find_epoch_files(run_path: str) -> List[Tuple[int, int, str]]:
         results.append((set_size, epoch, full_path))
 
     # Sort by set_size then epoch for deterministic processing
-    results.sort(key=lambda t: (t[0], t[1]))
+    results.sort(key=lambda t: (t[0], t[1], t[2]))
     return results
 
 
@@ -227,24 +223,40 @@ def _load_end_csv(run_path: str) -> Dict[int, str]:
     return mapping
 
 
+import time
+import json
+import ast
+from viewers.populate_statistics_viewer import build_run_epoch_series
+
 def _compute_run_statistics_for_path(run_path: str) -> Dict[str, Any]:
     """Compute summary statistics for a single run directory.
 
-    The statistics correspond to the description in the previous task:
-
-    * ``endX`` — ending value from ``stock_simulation_X.csv`` (last row).
-    * ``maxX`` / ``max_epochX`` — maximum final value across all
-      ``stock_simulation_X_epoch_*.csv`` files and the epoch where that
-      maximum occurs.
-    * ``first5_maxX`` / ``first5_epochX`` — for each epoch file we look at
-      the first five rows, take the maximum value, and then find the best of
-      those maxima across all epochs, recording both the value and the epoch.
-
-    ``X`` here is the trading set size (1, 3, 5, ...).  The code is written to
-    be generic over ``X`` so it will automatically pick up additional
-    ``stock_simulation_*`` files if the training harness is extended later.
+    Prefer reading pre-calculated stats from run_summary_stats.json if available.
     """
+    summary_file = os.path.join(run_path, "run_summary_stats.json")
+    if os.path.exists(summary_file):
+        try:
+            with open(summary_file, 'r') as f:
+                summary = json.load(f)
 
+            stats = {}
+            # Flatten summary for the grid
+            for key, val in summary.get("end_stats", {}).items():
+                stats[f"end{key}"] = val
+
+            for n_str, mstats in summary.get("max_stats", {}).items():
+                # n_str is like "0" or "[1, 'Rank']" (string representation of key)
+                # We need to clean it up for the grid columns
+                clean_n = n_str.replace("[", "").replace("]", "").replace("'", "").replace(", ", "")
+                stats[f"max{clean_n}"] = mstats["max_val"]
+                stats[f"max_epoch{clean_n}"] = mstats["max_epoch"]
+                stats[f"first5_max{clean_n}"] = mstats["first5_max"]
+                stats[f"first5_epoch{clean_n}"] = mstats["first5_epoch"]
+            return stats
+        except Exception as e:
+            print(f"[crsv] Error reading summary file {summary_file}: {e}")
+
+    # Fallback to manual computation if JSON missing or failed
     stats: Dict[str, Any] = {}
 
     # --- End-of-training values from stock_simulation_<set_size>.csv ---------
@@ -254,9 +266,7 @@ def _compute_run_statistics_for_path(run_path: str) -> Dict[str, Any]:
     #   - New single:  portfolio_value
     #   - Recent CSVs: "Portfolio return top<N>" or "Portfolio value top<N>"
     # Handle case/space/underscore variations robustly.
-    print(f"[crsv] computing statistics for run_path={run_path}")
     end_files = _load_end_csv(run_path)
-    print(f"[crsv] end_files discovered: {list(end_files.values())}")
     for _set_size, fpath in end_files.items():
         try:
             df = read_csv(fpath)
@@ -268,7 +278,7 @@ def _compute_run_statistics_for_path(run_path: str) -> Dict[str, Any]:
             continue
 
         # Find any portfolio-like columns and map them to N indices.
-        n_to_col: Dict[int, str] = {}
+        n_to_col: Dict[Any, str] = {}
         # Normalise helper: collapse to lowercase and drop spaces/underscores.
         def _norm(s: str) -> str:
             return s.lower().replace(" ", "").replace("_", "")
@@ -281,15 +291,20 @@ def _compute_run_statistics_for_path(run_path: str) -> Dict[str, Any]:
             if cn == "portfoliovalue":
                 n_to_col[0] = c
                 continue
-            # portfolio_top<N>
+
+            # portfolio_top<K> (Method)
+            m = _re.match(r"^portfolio(?:return|value)top(\d+)(?:\((sum|norm|rank)\))?$", cn)
+            if m:
+                k_val = int(m.group(1))
+                method_val = m.group(2).capitalize() if m.group(2) else ""
+                n_to_col[(k_val, method_val)] = c
+                continue
+
+            # Legacy portfolio_top<N>
             m = _re.match(r"^portfoliotop(\d+)$", cn)
             if m:
-                n_to_col[int(m.group(1))] = c
+                n_to_col[(int(m.group(1)), "")] = c
                 continue
-            # portfolio(return|value)top<N>
-            m = _re.match(r"^portfolio(?:return|value)top(\d+)$", cn)
-            if m:
-                n_to_col[int(m.group(1))] = c
 
         if not n_to_col and "portfolio_value" in df.columns:
             n_to_col[0] = "portfolio_value"
@@ -300,15 +315,15 @@ def _compute_run_statistics_for_path(run_path: str) -> Dict[str, Any]:
             except Exception as e:
                 print(f"[crsv] Error extracting end value for {col} in {_set_size}: {e}")
                 continue
-            stats[f"end{n}"] = end_val
+
+            if isinstance(n, tuple):
+                k, m = n
+                stats[f"end{k}{m}"] = end_val
+            else:
+                stats[f"end{n}"] = end_val
 
     # --- Per‑epoch statistics from stock_simulation_<set_size>_epoch_*.csv ---
     epoch_files = _find_epoch_files(run_path)
-    if epoch_files:
-        sample = [p for _, _, p in epoch_files[:3]]
-        print(f"[crsv] epoch_files discovered: {len(epoch_files)} files. Sample: {sample}")
-    else:
-        print("[crsv] epoch_files discovered: []")
 
     if not epoch_files:
         return stats
@@ -318,10 +333,10 @@ def _compute_run_statistics_for_path(run_path: str) -> Dict[str, Any]:
     # expose metrics for N = 1, 3, 5, ... as separate columns (max1, max3,
     # max5, etc.). When no N exists (single series), we use index 0.
 
-    max_val: Dict[int, float] = {}
-    max_epoch: Dict[int, int] = {}
-    first5_best: Dict[int, float] = {}
-    first5_best_epoch: Dict[int, int] = {}
+    max_val: Dict[Any, float] = {}
+    max_epoch: Dict[Any, int] = {}
+    first5_best: Dict[Any, float] = {}
+    first5_best_epoch: Dict[Any, int] = {}
 
     for _set_size, epoch, fpath in epoch_files:
         try:
@@ -333,7 +348,7 @@ def _compute_run_statistics_for_path(run_path: str) -> Dict[str, Any]:
             print(f"[crsv] epoch CSV empty: {fpath}")
             continue
         # Build mapping N -> column name using the same robust detection as above.
-        n_to_col: Dict[int, str] = {}
+        n_to_col: Dict[Any, str] = {}
         def _norm(s: str) -> str:
             return s.lower().replace(" ", "").replace("_", "")
         for c in df.columns:
@@ -343,13 +358,20 @@ def _compute_run_statistics_for_path(run_path: str) -> Dict[str, Any]:
             if cn == "portfoliovalue":
                 n_to_col[0] = c
                 continue
+
+            # portfolio_top<K> (Method)
+            m = _re.match(r"^portfolio(?:return|value)top(\d+)(?:\((sum|norm|rank)\))?$", cn)
+            if m:
+                k_val = int(m.group(1))
+                method_val = m.group(2).capitalize() if m.group(2) else ""
+                n_to_col[(k_val, method_val)] = c
+                continue
+
+            # Legacy portfolio_top<K>
             m = _re.match(r"^portfoliotop(\d+)$", cn)
             if m:
-                n_to_col[int(m.group(1))] = c
+                n_to_col[(int(m.group(1)), "")] = c
                 continue
-            m = _re.match(r"^portfolio(?:return|value)top(\d+)$", cn)
-            if m:
-                n_to_col[int(m.group(1))] = c
 
         if not n_to_col and "portfolio_value" in df.columns:
             n_to_col[0] = "portfolio_value"
@@ -392,13 +414,29 @@ def _compute_run_statistics_for_path(run_path: str) -> Dict[str, Any]:
                     first5_best_epoch[n] = epoch
 
     for n, value in max_val.items():
-        stats[f"max{n}"] = value
+        if isinstance(n, tuple):
+            k, m = n
+            stats[f"max{k}{m}"] = value
+        else:
+            stats[f"max{n}"] = value
     for n, epoch in max_epoch.items():
-        stats[f"max_epoch{n}"] = epoch
+        if isinstance(n, tuple):
+            k, m = n
+            stats[f"max_epoch{k}{m}"] = epoch
+        else:
+            stats[f"max_epoch{n}"] = epoch
     for n, value in first5_best.items():
-        stats[f"first5_max{n}"] = value
+        if isinstance(n, tuple):
+            k, m = n
+            stats[f"first5_max{k}{m}"] = value
+        else:
+            stats[f"first5_max{n}"] = value
     for n, epoch in first5_best_epoch.items():
-        stats[f"first5_epoch{n}"] = epoch
+        if isinstance(n, tuple):
+            k, m = n
+            stats[f"first5_epoch{k}{m}"] = epoch
+        else:
+            stats[f"first5_epoch{n}"] = epoch
 
     return stats
 
@@ -447,6 +485,13 @@ def _build_statistics_rows(base_dir: str, ts_to_runs: Dict[str, List[Tuple[str, 
             rows.append(row)
 
     return rows
+
+
+@st.cache_data(show_spinner=False)
+def _cached_build_statistics_rows(
+    base_dir: str, ts_to_runs: Dict[str, List[Tuple[str, Dict[str, Any]]]]
+) -> List[Dict[str, Any]]:
+    return _build_statistics_rows(base_dir, ts_to_runs)
 
 
 def _run_as_script() -> None:
@@ -545,146 +590,236 @@ def _run_as_script() -> None:
         return
     selected_builds_set = set(selected_builds)
 
-    # Build per‑timestamp statistics rows
-    stat_rows = _build_statistics_rows(base_dir, ts_to_runs)
-    common = compute_common_params(stat_rows)
+    # Prepare rows for the grid
+    # Instructions: "the run grid... should look the same and use the same underlying code."
+    # If "display extending info" is checked, show all variants. Otherwise show collapsed/ensemble.
+    show_extended_key = "display_extending_info"
+    if show_extended_key not in st.session_state:
+        st.session_state[show_extended_key] = prefs.get(show_extended_key, False)
+    show_extended = st.session_state[show_extended_key]
+
+    # --- Performance profiling ---
+    start_time = time.perf_counter()
+
+    all_stat_rows = _cached_build_statistics_rows(base_dir, ts_to_runs)
+
+    load_time = time.perf_counter() - start_time
+    st.sidebar.write(f"Data load time: {load_time:.2f}s")
+
+    display_rows: List[Dict[str, Any]] = []
+    if show_extended:
+        display_rows = all_stat_rows
+    else:
+        # Filter to only ensemble variants if they exist, else use whatever is there for that TS
+        ts_groups: Dict[str, List[Dict[str, Any]]] = {}
+        for row in all_stat_rows:
+            ts_groups.setdefault(row["_ts"], []).append(row)
+
+        for ts_name, group in ts_groups.items():
+            ensemble_rows = [r for r in group if r.get("_variant") == "ensemble"]
+            if ensemble_rows:
+                display_rows.extend(ensemble_rows)
+            else:
+                # If no ensemble, just take the first one?
+                display_rows.append(group[0])
+
+    # Filter by selected builds from sidebar
+    if selected_builds_set:
+        display_rows = [r for r in display_rows if r.get("_ts") in selected_builds_set]
+
+    if not display_rows:
+        st.info("No runs found for the current selection.")
+        return
+
+    common = compute_common_params(display_rows)
     common_keys = sorted(common.keys())
 
     # Shared common-params display
     render_common_params(common, title="Common parameters across runs", expanded=False)
 
-    # Construct DataFrame using the shared helper so that identifying
-    # columns (``run`` / ``run_timestamp``) show up consistently.
+    # Construct DataFrame
     exclude_keys = ["_dir"] + common_keys
-    table_rows = runs_to_dataframe_dicts(stat_rows, exclude_keys)
+    table_rows = runs_to_dataframe_dicts(display_rows, exclude_keys)
     df = DataFrame(table_rows)
-
-    # Apply the family/build selection from the sidebar to the grid so
-    # that only the chosen builds are visible (and included in downloads).
-    if selected_builds_set and "run" in df.columns:
-        df = df[df["run"].astype(str).isin(selected_builds_set)]
-
-    # Simple substring filter (applied on top of the Start/End range).
-    with st.expander("Filter runs", expanded=False):
-        if "crsv_search_text" not in st.session_state:
-            st.session_state["crsv_search_text"] = prefs.get("crsv_search_text", "")
-        search = st.text_input(
-            "Substring filter (any column)",
-            value=st.session_state["crsv_search_text"],
-            key="crsv_search_text",
-            on_change=lambda: save_preference("crsv_search_text", st.session_state["crsv_search_text"]),
-        )
-
-    # Hide rep rows by default in the main table; keep them available below
-    # in a separate expander. We still compute charts for all variants.
-    fdf = df.copy()
-    if "_variant" in fdf.columns:
-        # Prefer ensemble rows if present, else leave as-is.
-        has_ensemble = (fdf["_variant"].astype(str) == "ensemble").any()
-        if has_ensemble:
-            fdf = fdf[fdf["_variant"].astype(str) == "ensemble"]
-    if search:
-        s = str(search).lower()
-        mask = fdf.astype(str).agg(" ".join, axis=1).str.lower().str.contains(s)
-        fdf = fdf[mask]
-
-    # After filtering, reset the index so that the positional row indices
-    # reported by ``st.dataframe`` selection correspond directly to the
-    # DataFrame's index labels.  Without this, selecting a row after a
-    # filter could yield indices (0..N-1) that no longer match the
-    # underlying index (e.g. [5, 7, 9]), causing our lookup via
-    # ``grid_df.loc[i, "run"]`` to fail and resulting in no charts being
-    # shown for the selected rows.
-    fdf = fdf.reset_index(drop=True)
 
     st.subheader("Run selection and statistics")
 
-    # Column visibility selector so that the new metric columns can be
-    # enabled/disabled easily, mirroring compare_runs_viewer.
-    all_cols = list(fdf.columns)
-    vis_key = "crsv_visible_cols"
-    if vis_key not in st.session_state:
-        st.session_state[vis_key] = prefs.get(vis_key, all_cols)
-
-    vis_default = [c for c in st.session_state[vis_key] if c in all_cols]
-    if not vis_default:
-        vis_default = all_cols
-
-    visible_cols = st.multiselect(
-        "Visible columns",
-        options=all_cols,
-        default=vis_default,
-        key=vis_key,
-        on_change=lambda: save_preference(vis_key, st.session_state[vis_key]),
+    # Standard grid rendering
+    selected_run_ids = render_run_grid(
+        df=df,
+        key_prefix="crsv",
+        prefs=prefs,
+        default_visible_cols=["run"] + [c for c in df.columns if c not in ["run", "_variant", "_ts", "run_id", "activation", "final_activation", "optimizer", "optimizer_list"]],
+        return_all_if_none=False
     )
 
-    # Determine which columns to *display* in the grid. Internally we always
-    # keep the full ``fdf`` (including the ``run`` identifier column) so that
-    # selection works even if the user hides ``run`` via the Visible columns
-    # control.
-    grid_cols = [c for c in visible_cols if c in fdf.columns]
-    if not grid_cols:
-        grid_cols = all_cols
+    if st.button("Populate Graphs", key="crsv_populate_graphs"):
+        st.session_state["crsv_graphs_populated"] = True
 
-    # Ensure the identifying "run" column is present in the DataFrame passed
-    # to ``st.dataframe`` so that we can reliably map selected rows back to
-    # timestamp identifiers regardless of the user's column visibility
-    # choices.
-    if "run" not in grid_cols and "run" in fdf.columns:
-        grid_cols = ["run"] + grid_cols
+    # Map selected_run_ids back to timestamps for charts
+    selected_ts: List[str] = []
+    for rid in selected_run_ids:
+        # rid could be "TS [variant]" or just TS depending on what's in 'run' column
+        # runs_to_dataframe_dicts sets 'run' to _ts or _dir.
+        # In CRSV, display_rows has _ts.
+        # Actually selected_run_ids are what we need to use to filter which rows to show in charts.
+        for r in display_rows:
+            if (r.get("_ts") or r.get("_dir")) == rid:
+                if r["_ts"] not in selected_ts:
+                    selected_ts.append(r["_ts"])
+                break
 
-    grid_df = fdf.copy()
-    grid_display_df = grid_df[grid_cols]
+    if not selected_ts and selected_run_ids:
+         # fallback if matching fails, should not happen if grid is consistent
+         selected_ts = list(set(selected_run_ids))
 
-    dataframe_viewer_return = st.dataframe(
-        grid_display_df,
-        on_select="rerun",
-        width="stretch",
-        selection_mode="multi-row",
-    )
-
-    # Determine which runs are selected from the grid
-    try:
-        selection = (dataframe_viewer_return or {}).get("selection") or {}
-        selected_rows = selection.get("rows") or []
-    except Exception:
-        selected_rows = []
-
-    if selected_rows:
-        try:
-            selected_ts = [
-                str(grid_df.loc[i, "run"])
-                for i in selected_rows
-                if i in grid_df.index and "run" in grid_df.columns
-            ]
-        except Exception:
-            selected_ts = []
-    else:
-        # Fallback: nothing selected in the grid. Default to all visible
-        # runs from the filtered table, already constrained by the
-        # family/build selection in the sidebar.
-        visible_runs = [str(r) for r in fdf.get("run", [])]
-        selected_ts = visible_runs
-
-    # Persist last selection so navigation within the app feels stable
+    # Persist last selection
     st.session_state["crsv_last_selection"] = selected_ts
 
-    # Provide a separate view for rep rows so the user can expand to them
-    # without cluttering the main table.
-    if "_variant" in df.columns:
+    # --- New Section: Multi-run averages (Epoch vs Avg Epoch Return) ---
+    # We now look for rep_averages.csv in each selected run directory and aggregate them.
+    aggregated_data = []
+
+    # Map selected timestamps to their corresponding directories
+    selected_dirs_full = []
+    for r in all_stat_rows:
+        if r.get("_ts") in selected_ts:
+            dname = r.get("_dir")
+            if dname:
+                # If _dir is a rep directory, we want the parent which is the run_single directory
+                # Actually, in this project structure, it seems:
+                # data/run_family_.../run_single_.../repN
+                # AND rep_averages.csv is in run_single_...
+                # So we try the directory itself and its parent.
+                full_p = os.path.normpath(os.path.join(base_dir, dname))
+                if full_p not in selected_dirs_full:
+                    selected_dirs_full.append(full_p)
+
+                parent_p = os.path.dirname(full_p)
+                if parent_p and parent_p != base_dir and parent_p not in selected_dirs_full:
+                    selected_dirs_full.append(parent_p)
+
+    for run_dir in selected_dirs_full:
+        rep_avg_csv = os.path.join(run_dir, "rep_averages.csv")
+        if os.path.exists(rep_avg_csv):
+            try:
+                run_mdf = read_csv(rep_avg_csv)
+                # Ensure run_directory column is present for plotting color
+                if "run_directory" not in run_mdf.columns:
+                    run_mdf["run_directory"] = os.path.basename(run_dir)
+                aggregated_data.append(run_mdf)
+            except Exception as e:
+                st.error(f"Error loading {rep_avg_csv}: {e}")
+
+    if aggregated_data:
+        try:
+            mdf = concat(aggregated_data, ignore_index=True)
+            if not mdf.empty:
+                st.subheader("Multi-run averages: Epoch vs Avg Epoch Return")
+
+                # Plotly graph
+                fig = px.line(
+                    mdf,
+                    x="epoch",
+                    y="epoch_avg_return",
+                    color="run_directory",
+                    markers=True,
+                    title="Epoch vs Average Epoch Return",
+                    labels={"epoch_avg_return": "Avg Epoch Return", "epoch": "Epoch", "run_directory": "Run"}
+                )
+                fig.update_layout(height=400)
+                st.plotly_chart(fig, width='stretch')
+        except Exception as e:
+            st.error(f"Error aggregating rep averages: {e}")
+
+    # Provide a separate view for rep rows if not showing them in the main grid
+    if not st.session_state[show_extended_key] and "_variant" in df.columns:
         rep_df = df[df["_variant"].astype(str) != "ensemble"].copy()
         if not rep_df.empty:
             with st.expander("Show rep rows (read-only)", expanded=False):
-                st.dataframe(rep_df.reset_index(drop=True), use_container_width=True)
+                st.dataframe(rep_df.reset_index(drop=True), width='stretch')
 
-    # Download button for the (filtered) statistics table
-    csv_buf = fdf.to_csv(index=False)
-    st.download_button(
-        "Download statistics CSV",
-        data=csv_buf,
-        file_name="run_statistics_comparison.csv",
-        mime="text/csv",
-    )
+    # Download button for the statistics table
+    csv_buf = df.to_csv(index=False)
+    col_dl, col_gen = st.columns([1, 1])
+    with col_dl:
+        st.download_button(
+            "Download statistics CSV",
+            data=csv_buf,
+            file_name="run_statistics_comparison.csv",
+            mime="text/csv",
+        )
+    with col_gen:
+        if st.button("Generate statistics (Pre-calculate)", help="Run the generation script to pre-calculate statistics for selected runs, which makes the viewer much faster."):
+            if not selected_ts:
+                st.warning("Please select at least one run.")
+            else:
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+
+                # Collect all run directories (including reps) that belong to selected timestamps
+                paths_to_process = []
+                for r in all_stat_rows:
+                    if r.get("_ts") in selected_ts:
+                        dname = r.get("_dir")
+                        if dname:
+                            p = os.path.normpath(os.path.join(base_dir, dname))
+                            if os.path.isdir(p) and p not in paths_to_process:
+                                paths_to_process.append(p)
+                                # Also include parent
+                                parent_p = os.path.dirname(p)
+                                if parent_p and parent_p != base_dir and parent_p not in paths_to_process:
+                                    paths_to_process.append(parent_p)
+
+                import subprocess
+                script_path = os.path.join(root_path, "scripts", "generate_simulation_stats.py")
+
+                total = len(paths_to_process)
+                for i, p in enumerate(paths_to_process):
+                    status_text.text(f"Pre-calculating {os.path.basename(p)} ({i+1}/{total})...")
+                    try:
+                        # Call our new script
+                        subprocess.run([sys.executable, script_path, p, "--summary-only"], check=True)
+                    except Exception as e:
+                        st.error(f"Error pre-calculating {p}: {e}")
+                    progress_bar.progress((i + 1) / total)
+
+                status_text.text("Done! Refreshing...")
+                st.rerun()
+
+        if st.button("Generate simulations from saved scores", help="For selected runs, look for saved scores and generate stock_simulation_*.csv files"):
+            if not selected_ts:
+                st.warning("Please select at least one run in the table above.")
+            else:
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+
+                # We need the full paths for selected runs.
+                # In display_rows, we have _ts and _dir.
+                ts_to_process = set(selected_ts)
+
+                # Collect all run directories (including reps) that belong to selected timestamps
+                paths_to_process = []
+                for r in all_stat_rows:
+                    if r.get("_ts") in ts_to_process:
+                        # Find the actual directory path
+                        dname = r.get("_dir")
+                        if dname:
+                            p = os.path.normpath(os.path.join(base_dir, dname))
+                            if os.path.isdir(p) and p not in paths_to_process:
+                                paths_to_process.append(p)
+
+                total = len(paths_to_process)
+                for i, p in enumerate(paths_to_process):
+                    status_text.text(f"Processing {os.path.basename(p)} ({i+1}/{total})...")
+                    try:
+                        run_simulation_from_saved_scores(p, top_k=[1, 3, 5, 10])
+                    except Exception as e:
+                        st.error(f"Error processing {p}: {e}")
+                    progress_bar.progress((i + 1) / total)
+
+                status_text.text("Done! Refreshing statistics...")
+                st.rerun()
 
     # ------------------------------------------------------------------
     # Charts: for each selected timestamp we build two plots:
@@ -696,7 +831,7 @@ def _run_as_script() -> None:
 
     # Checkboxes for graph visibility
     st.markdown("##### Graph visibility")
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
 
     if "crsv_show_final" not in st.session_state:
         st.session_state["crsv_show_final"] = prefs.get("crsv_show_final", True)
@@ -704,6 +839,8 @@ def _run_as_script() -> None:
         st.session_state["crsv_show_first5"] = prefs.get("crsv_show_first5", True)
     if "crsv_show_avgcdf" not in st.session_state:
         st.session_state["crsv_show_avgcdf"] = prefs.get("crsv_show_avgcdf", True)
+    if "crsv_show_reps" not in st.session_state:
+        st.session_state["crsv_show_reps"] = prefs.get("crsv_show_reps", True)
 
     with col1:
         show_final = st.checkbox(
@@ -726,9 +863,28 @@ def _run_as_script() -> None:
             key="crsv_show_avgcdf",
             on_change=lambda: save_preference("crsv_show_avgcdf", st.session_state["crsv_show_avgcdf"]),
         )
+    with col4:
+        show_reps = st.checkbox(
+            "Show reps",
+            value=st.session_state["crsv_show_reps"],
+            key="crsv_show_reps",
+            help="When unchecked, only the ensemble graph is shown for each run configuration.",
+            on_change=lambda: save_preference("crsv_show_reps", st.session_state["crsv_show_reps"]),
+        )
 
     # Toggle for grouping mode
     grouping_key = "crsv_chart_grouping"
+
+    # Ensemble method visibility controls
+    st.markdown("##### Ensemble methods to show")
+    meth_col1, meth_col2, meth_col3, _ = st.columns(4)
+    with meth_col1:
+        st.checkbox("Sum", value=st.session_state.get("crsv_method_sum", True), key="crsv_method_sum", on_change=lambda: save_preference("crsv_method_sum", st.session_state["crsv_method_sum"]))
+    with meth_col2:
+        st.checkbox("Norm", value=st.session_state.get("crsv_method_norm", True), key="crsv_method_norm", on_change=lambda: save_preference("crsv_method_norm", st.session_state["crsv_method_norm"]))
+    with meth_col3:
+        st.checkbox("Rank", value=st.session_state.get("crsv_method_rank", True), key="crsv_method_rank", on_change=lambda: save_preference("crsv_method_rank", st.session_state["crsv_method_rank"]))
+
     grouping_options = [
         "Per run (overlay N lines)",
         "Across runs (overlay runs)",
@@ -766,10 +922,14 @@ def _run_as_script() -> None:
         st.info("Select one or more runs in the table above to view charts.")
         return
 
+    if not st.session_state.get("crsv_graphs_populated"):
+        st.info("Click 'Populate Graphs' to view charts.")
+        return
+
     # Collectors used for the "Across runs" grouping mode
-    acc_final: Dict[int, Dict[str, Dict[int, float]]] = {}
-    acc_first5: Dict[int, Dict[str, Dict[int, float]]] = {}
-    acc_avgcdf: Dict[int, Dict[str, Dict[int, float]]] = {}
+    acc_final: Dict[Any, Dict[str, Dict[int, float]]] = {}
+    acc_first5: Dict[Any, Dict[str, Dict[int, float]]] = {}
+    acc_avgcdf: Dict[Any, Dict[str, Dict[int, float]]] = {}
 
     for ts_name in selected_ts:
         run_list = ts_to_runs.get(ts_name)
@@ -781,6 +941,8 @@ def _run_as_script() -> None:
         if run_list:
             dname = run_list[0][1].get("_dir")
             if dname:
+                # dname could be "run_family_X/run_single_Y/repZ"
+                # parent_rel would be "run_family_X/run_single_Y"
                 parent_rel = os.path.dirname(dname)
                 candidate = os.path.join(base_dir, parent_rel)
                 if os.path.isdir(candidate):
@@ -793,25 +955,36 @@ def _run_as_script() -> None:
             run_paths.append(("ensemble", ts_path))
 
         # Rep sub-runs
-        for _run_name, params in run_list:
-            dname = params.get("_dir")
-            if not dname:
-                continue
-            parts = re.split(r'[\\/]', str(dname))
-            if len(parts) < 2:
-                continue
-            rep_name = parts[-1]
-            ts_part = parts[-2]
-            if ts_part != ts_name:
-                continue
-            rep_path = str(os.path.join(base_dir, dname))
-            if not os.path.isdir(rep_path):
-                continue
-            if not _find_epoch_files(rep_path):
-                continue
-            if any(existing_path == rep_path for _label, existing_path in run_paths):
-                continue
-            run_paths.append((rep_name, rep_path))
+        if show_reps:
+            for _run_name, params in run_list:
+                dname = params.get("_dir")
+                if not dname:
+                    continue
+                parts = re.split(r'[\\/]', str(dname))
+                if len(parts) < 2:
+                    continue
+                rep_name = parts[-1]
+                # In new structure, ts_part might be run_single_... which matches the end of ts_name or id
+                # We trust dname is relative to base_dir and points to the rep.
+                rep_path = str(os.path.join(base_dir, dname))
+                if not os.path.isdir(rep_path):
+                    continue
+                if not _find_epoch_files(rep_path):
+                    continue
+                if any(existing_path == rep_path for _label, existing_path in run_paths):
+                    continue
+                run_paths.append((rep_name, rep_path))
+
+        if not run_paths and not show_reps:
+            # If show_reps is off and there's no ensemble, fall back to the first rep
+            # so the user sees *something* for their selection.
+            for _run_name, params in run_list:
+                dname = params.get("_dir")
+                if not dname: continue
+                rep_path = str(os.path.join(base_dir, dname))
+                if os.path.isdir(rep_path) and _find_epoch_files(rep_path):
+                    run_paths.append((os.path.basename(rep_path), rep_path))
+                    break
 
         if not run_paths:
             continue
@@ -820,80 +993,13 @@ def _run_as_script() -> None:
             st.markdown(f"### Run {ts_name}")
 
         for label, run_path in run_paths:
-            epoch_files = _find_epoch_files(run_path)
-
-            # per-run collections
-            by_topn: Dict[int, Dict[int, float]] = {}
-            by_topn_first5: Dict[int, Dict[int, float]] = {}
-            by_topn_avgcdf: Dict[int, Dict[int, float]] = {}
-
-            for _set_size, epoch, fpath in (epoch_files or []):
-                try:
-                    df_ep = read_csv(fpath)
-                except Exception as e:
-                    print(f"Error reading csv {fpath}: {e}")
-                    continue
-                if df_ep.empty:
-                    continue
-
-                def _norm(s: str) -> str:
-                    return s.lower().replace(" ", "").replace("_", "")
-
-                n_to_col: Dict[int, str] = {}
-                for c in df_ep.columns:
-                    if not isinstance(c, str):
-                        continue
-                    cn = _norm(c)
-                    if cn == "portfoliovalue":
-                        n_to_col[0] = c
-                        continue
-                    m1 = _re.match(r"^portfoliotop(\d+)$", cn)
-                    if m1:
-                        n_to_col[int(m1.group(1))] = c
-                        continue
-                    m2 = _re.match(r"^portfolio(?:return|value)top(\d+)$", cn)
-                    if m2:
-                        n_to_col[int(m2.group(1))] = c
-
-                if not n_to_col and "portfolio_value" in df_ep.columns:
-                    n_to_col[0] = "portfolio_value"
-
-                for n, col in n_to_col.items():
-                    series = df_ep[col]
-
-                    # Final value (last row)
-                    try:
-                        final_val = float(series.iloc[-1])
-                    except Exception as e:
-                        print(f"Error extracting final value for {col}: {e}")
-                        final_val = None
-                    if final_val is not None:
-                        by_topn.setdefault(n, {})[epoch] = final_val
-
-                    # Best of first five days
-                    try:
-                        head = series.iloc[:5]
-                        first5_val = float(head.max()) if not head.empty else None
-                    except Exception as e:
-                        print(f"Error extracting first 5 value for {col}: {e}")
-                        first5_val = None
-                    if first5_val is not None:
-                        by_topn_first5.setdefault(n, {})[epoch] = first5_val
-
-                    # Average CDF per epoch (mean of the series values)
-                    try:
-                        avgcdf_val = float(series.mean()) if len(series) > 0 else None
-                    except Exception as e:
-                        print(f"Error computing avg CDF for {col}: {e}")
-                        avgcdf_val = None
-                    if avgcdf_val is not None:
-                        by_topn_avgcdf.setdefault(n, {})[epoch] = avgcdf_val
+            # Build data only (no plotting) using the helper for profiling and reuse
+            by_topn, by_topn_first5, by_topn_avgcdf = build_run_epoch_series(run_path)
 
             # Placeholders if nothing collected
             used_placeholder = False
             if not by_topn and not by_topn_first5 and not by_topn_avgcdf:
                 used_placeholder = True
-                print(f"[crsv] Using placeholder data for chart: ts={ts_name}, label={label}")
                 placeholder_epochs = [0, 1, 2, 3, 4]
                 base = 1000.0
                 for n, step in [(1, 2.0), (3, 1.2), (5, 0.8)]:
@@ -913,66 +1019,133 @@ def _run_as_script() -> None:
                     # Build a unified epoch set
                     all_epochs = sorted({e for m in by_topn.values() for e in m.keys()})
                     plot_df = DataFrame({"epoch": all_epochs})
+
+                    # Determine which columns to show based on ensemble method and top_k selections
+                    ensemble_methods_enabled = []
+                    for m in ["Sum", "Norm", "Rank"]:
+                        if st.session_state.get(f"crsv_method_{m.lower()}", True):
+                            ensemble_methods_enabled.append(m)
+
+                    # Top-k selection (numeric)
+                    # Use all if nothing selected in a theoretical top_k filter
+
+                    displayed_any = False
                     for n, epoch_map in sorted(by_topn.items()):
-                        plot_df[f"final_top{n}" if n != 0 else "final_value"] = [epoch_map.get(e) for e in all_epochs]
+                        # If n is a tuple (k, method), check if method is enabled
+                        col_label = None
+                        if isinstance(n, tuple):
+                            k_val, method_val = n
+                            if method_val and method_val not in ensemble_methods_enabled:
+                                continue
+                            col_label = f"final_top{k_val} ({method_val})" if method_val else f"final_top{k_val}"
+                        else:
+                            col_label = f"final_top{n}" if n != 0 else "final_value"
+
+                        plot_df[col_label] = [epoch_map.get(e) for e in all_epochs]
+                        displayed_any = True
+
                     # Badge for placeholder data
                     if used_placeholder:
                         st.markdown("**Final value by epoch** — `FAKE`")
-                        try:
-                            import plotly.io as pio  # type: ignore
-                        except Exception:
-                            pass
+                    elif not displayed_any:
+                        st.markdown("**Final value by epoch** — `Hidden by filters`")
                     else:
                         st.markdown("**Final value by epoch**")
-                    plot_lines(
-                        plot_df,
-                        "epoch",
-                        height=260,
-                        y_ref=1000.0,
-                        log_y=log_y,
-                        watermark_text=("FAKE" if used_placeholder else None),
-                        key=f"crsv_perrun_final__{ts_name}__{label}",
-                    )
+
+                    if displayed_any:
+                        plot_lines(
+                            plot_df,
+                            "epoch",
+                            height=260,
+                            y_ref=1000.0,
+                            log_y=log_y,
+                            watermark_text=("FAKE" if used_placeholder else None),
+                            key=f"crsv_perrun_final__{ts_name}__{label}",
+                        )
 
                 # First5 by epoch (overlay N)
                 if show_first5 and by_topn_first5:
                     all_epochs = sorted({e for m in by_topn_first5.values() for e in m.keys()})
                     plot_df = DataFrame({"epoch": all_epochs})
+
+                    ensemble_methods_enabled = []
+                    for m in ["Sum", "Norm", "Rank"]:
+                        if st.session_state.get(f"crsv_method_{m.lower()}", True):
+                            ensemble_methods_enabled.append(m)
+
+                    displayed_any = False
                     for n, epoch_map in sorted(by_topn_first5.items()):
-                        plot_df[f"first5_best_top{n}" if n != 0 else "first5_best_value"] = [epoch_map.get(e) for e in all_epochs]
+                        col_label = None
+                        if isinstance(n, tuple):
+                            k_val, method_val = n
+                            if method_val and method_val not in ensemble_methods_enabled:
+                                continue
+                            col_label = f"first5_best_top{k_val} ({method_val})" if method_val else f"first5_best_top{k_val}"
+                        else:
+                            col_label = f"first5_best_top{n}" if n != 0 else "first5_best_value"
+
+                        plot_df[col_label] = [epoch_map.get(e) for e in all_epochs]
+                        displayed_any = True
+
                     if used_placeholder:
                         st.markdown("**Best first‑5‑day value by epoch** — `FAKE`")
+                    elif not displayed_any:
+                        st.markdown("**Best first‑5‑day value by epoch** — `Hidden by filters`")
                     else:
                         st.markdown("**Best first‑5‑day value by epoch**")
-                    plot_lines(
-                        plot_df,
-                        "epoch",
-                        height=260,
-                        y_ref=1000.0,
-                        log_y=log_y,
-                        watermark_text=("FAKE" if used_placeholder else None),
-                        key=f"crsv_perrun_first5__{ts_name}__{label}",
-                    )
+
+                    if displayed_any:
+                        plot_lines(
+                            plot_df,
+                            "epoch",
+                            height=260,
+                            y_ref=1000.0,
+                            log_y=log_y,
+                            watermark_text=("FAKE" if used_placeholder else None),
+                            key=f"crsv_perrun_first5__{ts_name}__{label}",
+                        )
 
                 # Avg CDF by epoch (overlay N)
                 if show_avgcdf and by_topn_avgcdf:
                     all_epochs = sorted({e for m in by_topn_avgcdf.values() for e in m.keys()})
                     plot_df = DataFrame({"epoch": all_epochs})
+
+                    ensemble_methods_enabled = []
+                    for m in ["Sum", "Norm", "Rank"]:
+                        if st.session_state.get(f"crsv_method_{m.lower()}", True):
+                            ensemble_methods_enabled.append(m)
+
+                    displayed_any = False
                     for n, epoch_map in sorted(by_topn_avgcdf.items()):
-                        plot_df[f"avg_cdf_top{n}" if n != 0 else "avg_cdf_value"] = [epoch_map.get(e) for e in all_epochs]
+                        col_label = None
+                        if isinstance(n, tuple):
+                            k_val, method_val = n
+                            if method_val and method_val not in ensemble_methods_enabled:
+                                continue
+                            col_label = f"avg_cdf_top{k_val} ({method_val})" if method_val else f"avg_cdf_top{k_val}"
+                        else:
+                            col_label = f"avg_cdf_top{n}" if n != 0 else "avg_cdf_value"
+
+                        plot_df[col_label] = [epoch_map.get(e) for e in all_epochs]
+                        displayed_any = True
+
                     if used_placeholder:
                         st.markdown("**Average CDF by epoch** — `FAKE`")
+                    elif not displayed_any:
+                        st.markdown("**Average CDF by epoch** — `Hidden by filters`")
                     else:
                         st.markdown("**Average CDF by epoch**")
-                    plot_lines(
-                        plot_df,
-                        "epoch",
-                        height=260,
-                        y_ref=1000.0,
-                        log_y=log_y,
-                        watermark_text=("FAKE" if used_placeholder else None),
-                        key=f"crsv_perrun_avgcdf__{ts_name}__{label}",
-                    )
+
+                    if displayed_any:
+                        plot_lines(
+                            plot_df,
+                            "epoch",
+                            height=260,
+                            y_ref=1000.0,
+                            log_y=log_y,
+                            watermark_text=("FAKE" if used_placeholder else None),
+                            key=f"crsv_perrun_avgcdf__{ts_name}__{label}",
+                        )
 
             else:
                 # Accumulate for Across-runs mode
@@ -985,42 +1158,72 @@ def _run_as_script() -> None:
 
     # Render Across-runs charts if that mode is selected
     if grouping_mode == "Across runs (overlay runs)":
+        # Determine which methods are enabled
+        ensemble_methods_enabled = []
+        for m in ["Sum", "Norm", "Rank"]:
+            if st.session_state.get(f"crsv_method_{m.lower()}", True):
+                ensemble_methods_enabled.append(m)
+
         # Final
         if show_final:
-            for n in sorted(acc_final.keys()):
+            for n in sorted(acc_final.keys(), key=lambda x: (x if isinstance(x, int) else x[0], "" if isinstance(x, int) else x[1])):
+                if isinstance(n, tuple):
+                    k_val, method_val = n
+                    if method_val and method_val not in ensemble_methods_enabled:
+                        continue
+                    title_suffix = f"top{k_val} ({method_val})" if method_val else f"top{k_val}"
+                else:
+                    title_suffix = f"top{n}" if n != 0 else "total"
+
                 series_dict = acc_final[n]
                 # Union of all epochs across runs
                 all_epochs = sorted({e for m in series_dict.values() for e in m.keys()})
                 plot_df = DataFrame({"epoch": all_epochs})
                 for series_label, epoch_map in sorted(series_dict.items()):
                     plot_df[series_label] = [epoch_map.get(e) for e in all_epochs]
-                title = f"Final value by epoch — top{n}" if n != 0 else "Final value by epoch"
-                st.markdown(f"**{title}**")
-                plot_lines(plot_df, "epoch", height=300, y_ref=1000.0, log_y=log_y, key=f"crsv_across_final__top{n}")
+
+                st.markdown(f"**Final value by epoch — {title_suffix}**")
+                plot_lines(plot_df, "epoch", height=300, y_ref=1000.0, log_y=log_y, key=f"crsv_across_final__{n}")
 
         # First5
         if show_first5:
-            for n in sorted(acc_first5.keys()):
+            for n in sorted(acc_first5.keys(), key=lambda x: (x if isinstance(x, int) else x[0], "" if isinstance(x, int) else x[1])):
+                if isinstance(n, tuple):
+                    k_val, method_val = n
+                    if method_val and method_val not in ensemble_methods_enabled:
+                        continue
+                    title_suffix = f"top{k_val} ({method_val})" if method_val else f"top{k_val}"
+                else:
+                    title_suffix = f"top{n}" if n != 0 else "total"
+
                 series_dict = acc_first5[n]
                 all_epochs = sorted({e for m in series_dict.values() for e in m.keys()})
                 plot_df = DataFrame({"epoch": all_epochs})
                 for series_label, epoch_map in sorted(series_dict.items()):
                     plot_df[series_label] = [epoch_map.get(e) for e in all_epochs]
-                title = f"Best first‑5‑day by epoch — top{n}" if n != 0 else "Best first‑5‑day by epoch"
-                st.markdown(f"**{title}**")
-                plot_lines(plot_df, "epoch", height=300, y_ref=1000.0, log_y=log_y, key=f"crsv_across_first5__top{n}")
+
+                st.markdown(f"**Best first‑5‑day by epoch — {title_suffix}**")
+                plot_lines(plot_df, "epoch", height=300, y_ref=1000.0, log_y=log_y, key=f"crsv_across_first5__{n}")
 
         # Avg CDF
         if show_avgcdf:
-            for n in sorted(acc_avgcdf.keys()):
+            for n in sorted(acc_avgcdf.keys(), key=lambda x: (x if isinstance(x, int) else x[0], "" if isinstance(x, int) else x[1])):
+                if isinstance(n, tuple):
+                    k_val, method_val = n
+                    if method_val and method_val not in ensemble_methods_enabled:
+                        continue
+                    title_suffix = f"top{k_val} ({method_val})" if method_val else f"top{k_val}"
+                else:
+                    title_suffix = f"top{n}" if n != 0 else "total"
+
                 series_dict = acc_avgcdf[n]
                 all_epochs = sorted({e for m in series_dict.values() for e in m.keys()})
                 plot_df = DataFrame({"epoch": all_epochs})
                 for series_label, epoch_map in sorted(series_dict.items()):
                     plot_df[series_label] = [epoch_map.get(e) for e in all_epochs]
-                title = f"Average CDF by epoch — top{n}" if n != 0 else "Average CDF by epoch"
-                st.markdown(f"**{title}**")
-                plot_lines(plot_df, "epoch", height=300, y_ref=1000.0, log_y=log_y, key=f"crsv_across_avgcdf__top{n}")
+
+                st.markdown(f"**Average CDF by epoch — {title_suffix}**")
+                plot_lines(plot_df, "epoch", height=300, y_ref=1000.0, log_y=log_y, key=f"crsv_across_avgcdf__{n}")
 
 
 if __name__ == "__main__":  # pragma: no cover - manual invocation only

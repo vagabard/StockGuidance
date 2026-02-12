@@ -21,11 +21,12 @@ Notes
 from __future__ import annotations
 
 import os
+import json
 import traceback
 import smtplib
 from email.mime.text import MIMEText
 from pathlib import Path
-from typing import Iterable, List, Tuple, Union, Optional
+from typing import Iterable, List, Tuple, Union, Optional, Dict
 
 import numpy as np
 import torch  # type: ignore
@@ -35,8 +36,15 @@ from trainer import torch_interface
 
 TORCH_AVAILABLE = True
 
+try:
+	import psutil  # type: ignore
+except Exception:  # pragma: no cover - optional dependency
+	psutil = None  # type: ignore
+
 from models import load_model_from_manifest  # type: ignore
 from models.utils import resolve_manifest_path  # type: ignore
+from trainer.model_loader import load_model_from_checkpoint
+from trainer.state.family_run import FamilyRun
 from database.db_connect import get_connection  # type: ignore
 
 
@@ -50,15 +58,155 @@ print_recommendation_type = False
 MIN_TRADES_FOR_RECOMMENDATION = 200
 
 
-class StockRecommenderFromModel:
+class StockRecommender:
+	"""Base class for stock recommenders."""
+	def __init__(self, single_run: "SingleRun"):
+		self._single_run = single_run
+		self.input_size = single_run.input_size
+		self.output_size = single_run.output_size
+		self.ticker_ids = single_run.ticker_ids
+		self._ticker_id_map = self.ticker_ids
+
+	def get_output_directory(self) -> Optional[str]:
+		return None
+
+	def getBuyRecommendations(
+		self,
+		feature_vector: Optional[ArrayLike] = None,
+		top_k: int = 10,
+		index_base: int = 1,
+		*,
+		current_date_id: Optional[int] = None,
+		dbinfo_file: Optional[str] = None,
+		transactions_per_ticker: Optional[Union[np.ndarray, Iterable[float]]] = None,
+		clear_gpu_cache: bool = False,
+		save_scores: bool = False,
+		epoch_name: str = "",
+		precalculated_scores: Optional[torch.Tensor] = None,
+		precalculated_transactions: Optional[Dict[int, float]] = None,
+		provider: Optional["TrainingInstanceProvider"] = None,
+	) -> Tuple[np.ndarray, List[int]]:
+		raise NotImplementedError
+
+	def get_required_previous_days(self) -> int:
+		return int(self._single_run.prior_days)
+
+	def get_day_change_centered(self) -> str:
+		return str(self._single_run.day_change_centered or "zero")
+
+	def get_current_day_change_used(self) -> bool:
+		return bool(self._single_run.family_run.current_day_change)
+
+	def get_volume_ratio_used(self) -> bool:
+		return bool(self._single_run.family_run.volume_ratio)
+
+	def get_vwap_ratio_used(self) -> bool:
+		return bool(self._single_run.family_run.vwap_ratio)
+
+	def get_tranaction_ratio_used(self) -> bool:
+		return bool(self._single_run.family_run.transaction_ratio)
+
+
+class StockRecommenderFromSavedScores(StockRecommender):
+	"""Recommender that only uses precalculated scores and transactions."""
+	def __init__(self, single_run: "SingleRun", output_directory: Optional[str] = None):
+		super().__init__(single_run)
+		self.output_directory = output_directory
+
+	def get_output_directory(self) -> Optional[str]:
+		return self.output_directory
+
+	def getBuyRecommendations(
+		self,
+		feature_vector: Optional[ArrayLike] = None,
+		top_k: int = 10,
+		index_base: int = 1,
+		*,
+		current_date_id: Optional[int] = None,
+		dbinfo_file: Optional[str] = None,
+		transactions_per_ticker: Optional[Union[np.ndarray, Iterable[float]]] = None,
+		clear_gpu_cache: bool = False,
+		save_scores: bool = False,
+		epoch_name: str = "",
+		precalculated_scores: Optional[torch.Tensor] = None,
+		precalculated_transactions: Optional[Dict[int, float]] = None,
+		provider: Optional["TrainingInstanceProvider"] = None,
+	) -> Tuple[np.ndarray, List[int]]:
+		"""Return recommendations using precalculated scores and transactions."""
+		if precalculated_scores is None:
+			raise ValueError("precalculated_scores must be provided to StockRecommenderFromSavedScores.")
+
+		if top_k <= 0:
+			top_k = 1
+
+		if self.output_size is None and precalculated_scores is not None:
+			self.output_size = precalculated_scores.numel()
+
+		if self.output_size is not None:
+			top_k = int(min(top_k, self.output_size))
+
+		out_from_model_flat_cpu = precalculated_scores.detach().cpu()
+		T = int(self.output_size)
+
+		# Build transactions vector
+		transactions_vec_tensor = None
+		if precalculated_transactions is not None:
+			arr = np.zeros((T,), dtype=np.float32)
+			if self.ticker_ids is not None and len(self.ticker_ids) > 0:
+				for i, tid in enumerate(self.ticker_ids):
+					val = precalculated_transactions.get(int(tid))
+					if val is not None:
+						arr[i] = float(val)
+			else:
+				for tid, val in precalculated_transactions.items():
+					if 1 <= int(tid) <= T:
+						arr[int(tid) - 1] = float(val)
+			transactions_vec_tensor = torch.from_numpy(arr)
+		elif transactions_per_ticker is not None:
+			if isinstance(transactions_per_ticker, np.ndarray):
+				arr = transactions_per_ticker.astype(np.float32, copy=False)
+			else:
+				arr = np.asarray(list(transactions_per_ticker), dtype=np.float32)
+			transactions_vec_tensor = torch.from_numpy(arr)
+
+		if transactions_vec_tensor is None:
+			raise ValueError("Transactions must be provided to StockRecommenderFromSavedScores.")
+
+		# Build mask
+		mask_allowed = torch.isfinite(transactions_vec_tensor) & (transactions_vec_tensor >= float(MIN_TRADES_FOR_RECOMMENDATION))
+
+		# Apply mask
+		masked_scores = out_from_model_flat_cpu.clone()
+		masked_scores[~mask_allowed] = -float("inf")
+
+		# Get top-k
+		topk_vals, topk_idx = torch.topk(masked_scores, k=top_k, largest=True, sorted=True)
+		idx_list = topk_idx.tolist()
+
+		# Map to ticker ids
+		top_scoring_ticker_ids: List[int] = []
+		if self.ticker_ids is not None and len(self.ticker_ids) > 0 and len(self.ticker_ids) == T:
+			for i in idx_list:
+				if masked_scores[i] > -float("inf"):
+					top_scoring_ticker_ids.append(int(self.ticker_ids[i]))
+		else:
+			offset = 1 if int(index_base) == 1 else 0
+			for i in idx_list:
+				if masked_scores[i] > -float("inf"):
+					top_scoring_ticker_ids.append(int(i + offset))
+
+		return masked_scores.numpy(), top_scoring_ticker_ids
+
+
+class StockRecommenderFromModel(StockRecommender):
 	def __init__(
 		self,
-		model_or_path: "List[torch_interface.nn.Module]| str",  # type: ignore[name-defined]
+		single_run: "SingleRun",
+		model_or_path: "List[torch_interface.nn.Module | str] | str",  # type: ignore[name-defined]
 		output_directory: Optional[str] = None,
 		model_dict: Optional[dict] = None,
 		device: str = "auto",
 		*,
-#		manifest: Optional[dict] = None,
 		ensemble_normalize: bool = False,
 	) -> None:
 		"""Create a recommender from either a saved model path or existing models.
@@ -70,12 +218,14 @@ class StockRecommenderFromModel:
 		  from that list via a common method.
 
 		Args:
+			single_run: A SingleRun object containing the configuration and family run.
 			model_or_path: Path/dir to load models from, or a list of models. A single
 				model instance is accepted for backward compatibility and wrapped into a list.
 			device: "auto" (cuda if available else cpu), "cpu", or "cuda".
+			load_models: If False, models will not be loaded from disk if model_or_path is a string.
+			             Only metadata (input/output size) will be initialized.
 		"""
-		self._output_size = None
-		self.input_size = None
+		super().__init__(single_run)
 		if not TORCH_AVAILABLE:
 			raise RuntimeError("PyTorch is required to use StockRecommenderFromModel.")
 		global print_recommendation_type
@@ -87,45 +237,107 @@ class StockRecommenderFromModel:
 			dev = device
 		self._device = torch.device(dev)  # type: ignore[call-arg]
 		self._ensemble_normalize: bool = bool(ensemble_normalize)
-		self._ensemble_models: List["torch_interface.nn.Module"] = []  # type: ignore[name-defined]
+		self._models: List["torch_interface.nn.Module"] = []  # type: ignore[name-defined]
 		self._is_ensemble: bool = False
-		self._manifest: dict = {}
+		self._restricted_memory_mode: bool = False
+		# Disk-caching for memory management
+		self._cached_to_disk: bool = False
+		self._ensemble_cache_paths: list[str] = []
 		self.output_directory = output_directory
 
 		# Unified path: either load from string source, or build from provided models
 		if isinstance(model_or_path, str):
-			models, loaded_manifest = self._load_models_from_source(model_or_path)
-			self.output_directory = model_or_path
-			# Merge overrides
-			final_manifest = dict(loaded_manifest)
-			if model_dict:
-				final_manifest.update(model_dict)
-			self._construct_from_models(models, manifest=final_manifest)
-		elif isinstance(model_or_path, List) and isinstance(model_or_path[0], nn.Module) :
+			models, _ = self._load_models_from_source(model_or_path)
+			self.output_directory = model_path = model_or_path
+			self._construct_from_models(models)
+		elif isinstance(model_or_path, List) and len(model_or_path) > 0 and (isinstance(model_or_path[0], nn.Module) or isinstance(model_or_path[0], str)):
 			self._construct_from_models(model_or_path)
 		else:
 			raise ValueError("Must provide either a model path or a list of models.")
 
 	def _construct_from_models(
 		self,
-		models: List["torch_interface.nn.Module"],  # type: ignore[name-defined]
-		*,
-		manifest: Optional[dict] = None,
+		models_or_paths: List[Union["torch_interface.nn.Module", str]],  # type: ignore[name-defined]
 	) -> None:
-		"""Finalize construction from a list of models, ensuring unified manifest."""
-		self._ensemble_models = [m.to(self._device).eval() for m in models]
-		self._is_ensemble = len(self._ensemble_models) > 1
+		"""Finalize construction from a list of models or paths, ensuring unified manifest.
+		Also decides whether to offload ensemble models to disk to reduce RAM usage.
+		"""
+		in_memory_models = [m for m in models_or_paths if not isinstance(m, str)]
+		provided_paths = [m for m in models_or_paths if isinstance(m, str)]
 
-		self._manifest = dict(manifest or {})
+		if in_memory_models:
+			try:
+				self._models = [m.to(self._device).eval() for m in in_memory_models]
+			except torch.OutOfMemoryError:
+				if str(self._device).startswith("cuda"):
+					self._restricted_memory_mode = True
+					self._models = [m.to("cpu").eval() for m in in_memory_models]
+					if torch.cuda.is_available():
+						torch.cuda.empty_cache()
+				else:
+					raise
+		else:
+			self._models = []
+
+		self._ensemble_cache_paths = provided_paths
+		self._cached_to_disk = len(self._ensemble_cache_paths) > 0
+		self._is_ensemble = (len(self._models) + len(self._ensemble_cache_paths)) > 1
+
+		# Use SingleRun instead of _manifest
+		self.input_size = self._single_run.input_size
+		self.output_size = self._single_run.output_size
+
 		# Cache common dims
-		self.input_size: int = self._ensemble_models[0].input_size
-		self._input_size: int = self.input_size
-		self.output_size: int = self._ensemble_models[0].output_size
-		self._output_size: int = self.output_size
-		self.ticker_ids: List[int] | None = self._manifest.get("ticker_ids")
+		if self._models:
+			# Prefer attributes from the first model instance if not set in single_run
+			if not self.input_size:
+				self.input_size = getattr(self._models[0], "input_size", None)
+			if not self.output_size:
+				self.output_size = getattr(self._models[0], "output_size", None)
+		elif self._ensemble_cache_paths:
+			# Load first model to get dims if not set in single_run
+			if not self.input_size or not self.output_size:
+				first_path = self._ensemble_cache_paths[0]
+				try:
+					# Try to load just the manifest if it's a directory, or load model on CPU
+					if os.path.isdir(first_path) or first_path.endswith(".json"):
+						from models.utils import resolve_manifest_path
+						m_path = resolve_manifest_path(first_path)
+						with open(m_path, "r") as f:
+							m_data = json.load(f)
+						if not self.input_size:
+							self.input_size = int(m_data.get("input_size", 0))
+						if not self.output_size:
+							self.output_size = int(m_data.get("output_size", 0))
+					else:
+						loaded = torch.load(first_path, map_location="cpu", weights_only=False)
+						if isinstance(loaded, dict) and "model_state_dict" in loaded:
+							# Dimensions must come from SingleRun/FamilyRun if not in checkpoint
+							pass
+						else:
+							if not self.input_size:
+								self.input_size = getattr(loaded, "input_size", None)
+							if not self.output_size:
+								self.output_size = getattr(loaded, "output_size", None)
+						del loaded
+				except Exception as e:
+					print(f"Warning: could not extract dimensions from cached model {first_path}: {e}")
+
+		if not self.output_size and self.ticker_ids is not None and len(self.ticker_ids) > 0:
+			self.output_size = len(self.ticker_ids)
+
+		# If still not found, we might need to rely on what was passed in _load_models_from_source
+		# but _load_models_from_source currently returns a manifest.
+
+		self._input_size = self.input_size
+		self._output_size = self.output_size
+
+		self.ticker_ids = self._single_run.ticker_ids
 		self._ticker_id_map = self.ticker_ids  # Alias for backward compatibility
-		if self.input_size <= 0 or self.output_size <= 0:
-			raise ValueError("Invalid model manifest: missing input_size/output_size")
+
+		# We need input_size and output_size to be set.
+		# If they weren't found in models, we'll have to use them from the manifest we loaded.
+
 
 	def _load_models_from_source(self, source: str) -> Tuple[List["torch_interface.nn.Module"], dict]:  # type: ignore[name-defined]
 		"""Load models from a path or directory and return (models, manifest)."""
@@ -208,6 +420,48 @@ class StockRecommenderFromModel:
 
 		return models, dict(base_manifest)
 
+	def _get_rss(self) -> int | None:
+		if psutil is None:
+			return None
+		try:
+			return psutil.Process(os.getpid()).memory_info().rss
+		except Exception:
+			return None
+
+	def _maybe_cache_ensemble_to_disk(self) -> None:
+		"""If process RSS exceeds 50% of physical memory, offload ensemble to disk.
+		We serialize each model to a temporary file and drop in-memory references.
+		"""
+		try:
+			if not self._models:
+				return
+			if psutil is None:
+				return
+			total_mem = psutil.virtual_memory().total
+			current_rss = self._get_rss() or 0
+			if current_rss <= int(total_mem * 0.5):
+				return
+			# Ensure cache dir
+			base_dir = self.output_directory or os.getcwd()
+			cache_dir = os.path.join(base_dir, "cache", "recommender_models")
+			os.makedirs(cache_dir, exist_ok=True)
+			# Save and clear
+			self._ensemble_cache_paths = []
+			for i, m in enumerate(self._models, start=1):
+				path = os.path.join(cache_dir, f"ensemble_{i}.pt")
+				try:
+					torch.save(m, path)
+					self._ensemble_cache_paths.append(path)
+				except Exception as e:
+					print(f"Warning: failed to cache ensemble member {i} to disk: {e}")
+			# Drop in-memory models
+			self._models = []
+			self._cached_to_disk = len(self._ensemble_cache_paths) > 0
+			if torch.cuda.is_available():
+				torch.cuda.empty_cache()
+		except Exception as e:
+			print(f"Warning: _maybe_cache_ensemble_to_disk failed: {e}")
+
 	def get_manifest(self) -> dict:
 		"""Return a shallow copy of the underlying manifest metadata.
 
@@ -215,11 +469,25 @@ class StockRecommenderFromModel:
 		training-time configuration such as ``prior_days`` or feature flags.
 		Callers should treat the returned dict as read-only.
 		"""
-
-		return dict(self._manifest)
+		# We don't have _manifest anymore. We can reconstruct it from _single_run if needed,
+		# or just return the single_run dict.
+		from trainer.io_run import create_manifest_dictionary
+		return create_manifest_dictionary(
+			self._single_run,
+			None, None, "",
+			int(self.input_size or 0),
+			int(self.output_size or 0)
+		)
 
 	def get_model_number(self):
-		return len(self._ensemble_models)
+		return len(self._models)
+
+	def to_cpu(self) -> None:
+		"""Move all models in the ensemble to CPU and clear GPU cache."""
+		for m in self._models:
+			m.to("cpu")
+		if torch.cuda.is_available():
+			torch.cuda.empty_cache()
 
 	def get_output_directory(self):
 		return self.output_directory
@@ -232,7 +500,7 @@ class StockRecommenderFromModel:
 
 	def get_required_previous_days(self) -> int:
 		"""Return how many prior days the model expects as context."""
-		return int(self._manifest.get("prior_days", 0))
+		return super().get_required_previous_days()
 
 	def get_day_change_centered(self) -> str:
 		"""Return the day-change centering mode used when training the model.
@@ -240,48 +508,25 @@ class StockRecommenderFromModel:
 		If not present in the manifest, this falls back to "zero", which matches
 		the historical default used in training scripts.
 		"""
-
-		value = self._manifest.get("day_change_centered")
-		if isinstance(value, str) and value:
-			return value
-		return "zero"
+		return super().get_day_change_centered()
 
 	def get_current_day_change_used(self) -> bool:
 		"""Return whether current-day price change features were used.
-
-		Prefers the canonical manifest key "current_day_change", but also
-		accepts older aliases such as "current_day_change_used" or even the
-		original CLI argument name "change_in_price_today" if present in the
-		manifest for backward compatibility.
 		"""
-		if "current_day_change" in self._manifest:
-			return bool(self._manifest.get("current_day_change"))
-		# Legacy alias from earlier manifests
-		if "current_day_change_used" in self._manifest:
-			return bool(self._manifest.get("current_day_change_used"))
-		# Fallback to raw arg name if ever serialized directly
-		if "change_in_price_today" in self._manifest:
-			return bool(self._manifest.get("change_in_price_today"))
-		return False
+		return super().get_current_day_change_used()
 
 	def get_volume_ratio_used(self) -> bool:
 		"""Return the type of volume ratio used in the model."""
-		return self._manifest.get("volume_ratio", False)
+		return super().get_volume_ratio_used()
 
 	def get_vwap_ratio_used(self) -> bool:
 		"""Return the type of vwap ratio used in the model."""
-		return self._manifest.get("vwap_ratio", False)
+		return super().get_vwap_ratio_used()
 
 	def get_tranaction_ratio_used(self) -> bool:
 		"""Return whether transaction-ratio features were used.
-
-		The manifest historically stored this under the misspelled key
-		"tranaction_ratio". New manifests use the correctly spelled
-		"transaction_ratio" key. For robustness, we check both.
 		"""
-		if "transaction_ratio" in self._manifest:
-			return bool(self._manifest.get("transaction_ratio"))
-		return bool(self._manifest.get("tranaction_ratio", False))
+		return super().get_tranaction_ratio_used()
 
 	def get_num_features_per_ticker(self) -> int:
 		"""Return the number of features per ticker for a single day."""
@@ -312,15 +557,91 @@ class StockRecommenderFromModel:
 			)
 		return t
 
+	def generateStockScoresForNetwork(
+		self,
+		network: nn.Module,
+		inputs: "torch_interface.Tensor",
+		save_to_file: bool = False,
+		epoch_name: str = "",
+		date_id: Optional[int] = None,
+		network_index: Optional[int] = None,
+	) -> "torch_interface.Tensor":
+		"""Run a single network and return the scores.
+
+		If save_to_file is True, the scores are saved to a file.
+		Prefer saving to the individual rep directory if network_index is provided.
+		The filename includes the epoch_name, date_id and network_index if provided.
+		"""
+		with torch.no_grad():
+			if self._restricted_memory_mode and str(self._device).startswith("cuda"):
+				network = network.to(self._device)
+
+			raw_output = network(inputs)
+			raw_output = torch.nan_to_num(raw_output, nan=0.0, posinf=0.0, neginf=0.0)  # type: ignore[attr-defined]
+			out_flat = raw_output.reshape(-1).to(torch.float32)  # type: ignore[attr-defined]
+
+			if self._ensemble_normalize:
+				global print_recommendation_type
+				if not print_recommendation_type:
+					print(
+						"StockRecommenderFromModel: applying per-model normalization before ensemble aggregation.",
+					)
+					print_recommendation_type = True
+				total = float(out_flat.sum().item())
+				if total > 0.0:
+					out_flat = out_flat / total
+
+			if save_to_file:
+				save_dir = None
+				if network_index is not None:
+					# Try to get the specific rep directory (network_index is 0-based, rep_index is 1-based)
+					save_dir = self._single_run.file_structure.get_directory_for_rep(network_index + 1)
+
+				if not save_dir:
+					save_dir = self._single_run.file_structure.run_group_dir
+
+				if save_dir:
+					os.makedirs(save_dir, exist_ok=True)
+					# Use a fixed net_0 suffix when saving from a specific recommender's context.
+					# This ensures that even in an ensemble where we have multiple rep directories,
+					# each rep's own score file is named net_0 within its own directory.
+					filename = f"stock_scores_epoch_{epoch_name}"
+					if date_id is not None:
+						filename += f"_date_{date_id}"
+					filename += "_net_0.csv"
+					save_path = os.path.join(save_dir, filename)
+					# Save as CSV instead of .pt
+					scores_np = out_flat.detach().cpu().numpy()
+					np.savetxt(save_path, scores_np, delimiter=",")
+					# print(f"Saved stock scores to {save_path}")
+				else:
+					print("DEBUG: save_dir is None or empty!")
+
+			if self._restricted_memory_mode and str(self._device).startswith("cuda"):
+				network.to("cpu")
+				if torch.cuda.is_available():
+					torch.cuda.empty_cache()
+
+			res = out_flat.detach()
+			# Explicitly delete temporary tensors to help GC
+			del raw_output, out_flat
+			return res
+
 	def getBuyRecommendations(
 		self,
-		feature_vector: ArrayLike,
+		feature_vector: Optional[ArrayLike] = None,
 		top_k: int = 10,
 		index_base: int = 1,
 		*,
 		current_date_id: Optional[int] = None,
 		dbinfo_file: Optional[str] = None,
 		transactions_per_ticker: Optional[Union[np.ndarray, Iterable[float]]] = None,
+		clear_gpu_cache: bool = False,
+		save_scores: bool = False,
+		epoch_name: str = "",
+		precalculated_scores: Optional[torch.Tensor] = None,
+		precalculated_transactions: Optional[Dict[int, float]] = None,
+		provider: Optional["TrainingInstanceProvider"] = None,
 	) -> Tuple[np.ndarray, List[int]]:
 		"""Run the model and produce recommendations.
 
@@ -328,21 +649,13 @@ class StockRecommenderFromModel:
 		top_k: How many top outputs to return as ticker ids.
 		return_scores: If True, return the full output scores as a NumPy array as first item.
 		index_base: 1 to return ticker ids as 1..T, 0 to return 0..T-1.
-
-		Always-on transactions filter:
-		- The list of recommended tickers is filtered to include only those with
-		  current-day transactions >= MIN_TRADES_FOR_RECOMMENDATION.
-		- Provide one of the following so the filter can be applied:
-		  (a) transactions_per_ticker: iterable/array of length T with counts
-		  (b) current_date_id + dbinfo_file: function will query raw_stock_data
-		  (c) If the feature vector includes a transactions column (from the
-		      transaction feature flag), it will be used as a fallback.
-		If none of the above are available, a ValueError is raised to enforce
-		the always-on filter.
-
-		Returns: (scores, top_ticker_ids)
-		  - scores: NumPy array of shape (T,) with model outputs.
-		  - top_ticker_ids: list[int] of length min(top_k, T) mapping to ticker ids.
+		precalculated_scores: If provided, use these scores instead of running the model.
+		                      feature_vector can be None if precalculated_scores is provided.
+		provider: If provided and feature_vector is None, use this provider to load the feature vector
+		          for current_date_id.
+		precalculated_transactions: If provided, use these transaction counts instead of fetching from DB.
+		                             Mapping: ticker_id -> transactions
+		...
 		"""
 
 		global print_recommendation_type
@@ -351,60 +664,131 @@ class StockRecommenderFromModel:
 			top_k = 1
 		top_k = int(min(top_k, self._output_size))
 
-		feature_tensor = self._to_tensor(feature_vector)
-		# print(f"DEBUG: feature_tensor mean={feature_tensor.mean().item():.6f}, std={feature_tensor.std().item():.6f}")
-		with torch.no_grad():  # type: ignore[attr-defined]
-			feature_tensor = torch.nan_to_num(feature_tensor, nan=0.0, posinf=0.0, neginf=0.0)  # type: ignore[attr-defined]
-			input_to_model = feature_tensor.reshape(1, -1)
+		if precalculated_scores is not None:
+			out_from_model_flat_cpu = precalculated_scores.detach().cpu()
+		else:
+			if feature_vector is None:
+				if provider is not None and current_date_id is not None:
+					# Find the instance index for this date_id
+					try:
+						# IndexDataset or similar can help, but we might have to search in provider
+						# cumulative_dates_for_train_validation_and_test_sets.
+						# Note: TrainingInstanceProvider.get_feature_and_label_pair(instance_index)
+						# where instance_index is 1-based.
+						dates = provider.cumulative_dates_for_train_validation_and_test_sets
+						if hasattr(dates, "numpy"):
+							dates = dates.numpy()
 
-			# If this instance represents an ensemble of models (e.g. rep1/rep2
-			# directories under a common run directory), aggregate their outputs.
-			# model_count = len(self._ensemble_models)  # type: ignore[attr-defined]
-			# Log how many models are being used for this recommendation call.
-			# print(
-			# 	f"StockRecommenderFromModel: using {model_count} model(s) "
-			# 	"for ensemble recommendations.",
-			# )
-			agg: Optional["torch_interface.Tensor"] = None  # type: ignore[name-defined]
-			for one_model in self._ensemble_models:  # type: ignore[attr-defined]
-				raw_output_from_model = one_model(input_to_model)
-				# print(f"DEBUG: raw_output mean={raw_output_from_model.mean().item():.6f}, std={raw_output_from_model.std().item():.6f}, max={raw_output_from_model.max().item():.6f}, argmax={raw_output_from_model.argmax().item()}")
-				raw_output_from_model = torch.nan_to_num(raw_output_from_model, nan=0.0, posinf=0.0, neginf=0.0)  # type: ignore[attr-defined]
-				out_from_model_flat = raw_output_from_model.reshape(-1).to(torch.float32)  # type: ignore[attr-defined]
-				if self._ensemble_normalize:
-					# Normalize this model's scores so they sum to 1. Guard against
-					# degenerate all-zero outputs by leaving them as-is.
-					if not print_recommendation_type:
-						print(
-							"StockRecommenderFromModel: applying per-model "
-							"normalization before ensemble aggregation.",
-						)
-						print_recommendation_type = True
-					total = float(out_from_model_flat.sum().item())
-					if total > 0.0:
-						out_from_model_flat = out_from_model_flat / total
-				if agg is None:
-					agg = out_from_model_flat
+						# Find index in dates
+						matching_indices = np.where(dates == int(current_date_id))[0]
+						if matching_indices.size > 0:
+							abs_idx = int(matching_indices[0])
+							num_prior = provider.number_of_prior_days_to_include_in_feature
+							instance_idx = abs_idx - num_prior + 1
+							if instance_idx >= 1:
+								feature_vector, _, _ = provider.get_feature_and_label_pair(instance_idx)
+							else:
+								raise ValueError(f"date_id {current_date_id} does not have enough prior context.")
+						else:
+							raise ValueError(f"date_id {current_date_id} not found in provider.")
+					except Exception as e:
+						raise ValueError(f"Failed to load feature_vector for date_id {current_date_id} from provider: {e}")
+
+				if feature_vector is None:
+					raise ValueError("feature_vector must be provided if precalculated_scores is None.")
+			feature_tensor = self._to_tensor(feature_vector)
+			# print(f"DEBUG: feature_tensor mean={feature_tensor.mean().item():.6f}, std={feature_tensor.std().item():.6f}")
+			with torch.no_grad():  # type: ignore[attr-defined]
+				feature_tensor = torch.nan_to_num(feature_tensor, nan=0.0, posinf=0.0, neginf=0.0)  # type: ignore[attr-defined]
+				input_to_model = feature_tensor.reshape(1, -1)
+
+				# Aggregate ensemble outputs, supporting both in-memory and disk-cached ensembles
+				agg: Optional["torch_interface.Tensor"] = None  # type: ignore[name-defined]
+
+				def _accumulate_from_model(one_model: nn.Module, net_idx: Optional[int] = None) -> None:
+					nonlocal agg
+					out_from_model_flat = self.generateStockScoresForNetwork(
+						one_model,
+						input_to_model,
+						save_to_file=save_scores,
+						epoch_name=epoch_name,
+						date_id=current_date_id,
+						network_index=net_idx,
+					)
+					if agg is None:
+						agg = out_from_model_flat
+					else:
+						agg = agg + out_from_model_flat
+					# cleanup
+					del out_from_model_flat
+
+				if self._cached_to_disk and self._ensemble_cache_paths:
+					# Load each model from disk, run, then release
+					for idx, path in enumerate(self._ensemble_cache_paths):
+						try:
+							# Use unified loader from trainer.model_loader
+							# Use the family run from the single run directly
+							fr = self._single_run.family_run
+
+							m, _, _ = load_model_from_checkpoint(
+								path,
+								fr,
+								int(self.input_size),
+								int(self.output_size),
+								int(self._single_run.mlp_layers),
+								str(self._single_run.activation),
+								int(self._single_run.prior_days),
+								device=self._device,
+								map_location="cpu"
+							)
+							_accumulate_from_model(m, net_idx=idx)
+							del m
+						finally:
+							if torch.cuda.is_available():
+								torch.cuda.empty_cache()
 				else:
-					agg = agg + out_from_model_flat
-			if agg is None:
-				raise RuntimeError("Model aggregation failed (could be aggregation of a single model).")
-				# Fallback: no ensemble members produced outputs; behave like a
-				# single zero vector to avoid crashes.
-#				agg = torch.zeros(self._output_size, dtype=torch.float32, device=self._device)  # type: ignore[attr-defined]
-			out_from_model_flat = agg.detach().cpu()
+					for idx, one_model in enumerate(self._models):  # type: ignore[attr-defined]
+						_accumulate_from_model(one_model, net_idx=idx)
 
-		# Build the allow-mask to exclude tickers with too-few trades on the current day.
+				if agg is None:
+					raise RuntimeError("Model aggregation failed (could be aggregation of a single model).")
+				out_from_model_flat_cpu = agg.detach().cpu()
+				# Explicitly clear agg from GPU
+				del agg
+				if 'input_to_model' in locals():
+					del input_to_model
+
+				# Explicitly clear feature_tensor from GPU
+				del feature_tensor
+
+		out_from_model_flat = out_from_model_flat_cpu
 		# This filter is ALWAYS enforced; we obtain transactions from, in priority order:
-		# 1) explicit transactions_per_ticker argument
-		# 2) database query using (current_date_id, dbinfo_file)
-		# 3) transactions column present in the feature vector (legacy fallback)
+		# 1) explicit precalculated_transactions argument
+		# 2) explicit transactions_per_ticker argument
+		# 3) database query using (current_date_id, dbinfo_file)
+		# 4) transactions column present in the feature vector (legacy fallback)
 		T = int(self._output_size)
 		mask_allowed: Optional["torch_interface.Tensor"] = None  # type: ignore[name-defined]
 		transactions_vec_tensor: Optional["torch_interface.Tensor"] = None  # type: ignore[name-defined]
 
-		# 1) Explicit vector provided by caller
-		if transactions_per_ticker is not None:
+		# 1) Precalculated map provided (e.g. from bulk pre-fetch)
+		if precalculated_transactions is not None:
+			# Initialize zeros; missing tickers will be treated as 0 transactions
+			arr = np.zeros((T,), dtype=np.float32)
+			if self.ticker_ids is not None and len(self.ticker_ids) > 0:
+				for i, tid in enumerate(self.ticker_ids):
+					val = precalculated_transactions.get(int(tid))
+					if val is not None:
+						arr[i] = float(val)
+			else:
+				# Dense slots
+				for tid, val in precalculated_transactions.items():
+					if 1 <= int(tid) <= T:
+						arr[int(tid) - 1] = float(val)
+			transactions_vec_tensor = torch.from_numpy(arr).to(self._device)
+
+		# 2) Explicit vector provided by caller
+		if transactions_vec_tensor is None and transactions_per_ticker is not None:
 			try:
 				if isinstance(transactions_per_ticker, np.ndarray):
 					arr = transactions_per_ticker.astype(np.float32, copy=False)
@@ -438,10 +822,16 @@ class StockRecommenderFromModel:
 					val = r[1]
 
 					slot_idx = -1
-					if self.ticker_ids:
+					if self.ticker_ids is not None and len(self.ticker_ids) > 0:
 						try:
-							slot_idx = self.ticker_ids.index(tid)
-						except ValueError:
+							if isinstance(self.ticker_ids, list):
+								slot_idx = self.ticker_ids.index(tid)
+							else:
+								# Assume numpy array or similar
+								matching_indices = np.where(self.ticker_ids == tid)[0]
+								if matching_indices.size > 0:
+									slot_idx = int(matching_indices[0])
+						except (ValueError, IndexError):
 							pass
 					else:
 						# Fallback to 1-based indexing if no ticker_ids list
@@ -461,7 +851,7 @@ class StockRecommenderFromModel:
 					pass
 
 		# 3) Fallback to transactions in the feature vector (if present)
-		if transactions_vec_tensor is None:
+		if transactions_vec_tensor is None and feature_vector is not None:
 			try:
 				F = (
 					1
@@ -481,10 +871,13 @@ class StockRecommenderFromModel:
 						transactions_col += 1
 					current_start = 0
 					current_end = current_start + (T * F)
+					# Re-convert to tensor if we don't have it (might have been deleted)
+					feature_tensor = self._to_tensor(feature_vector)
 					fv_current = feature_tensor[current_start:current_end]
 					indices = torch.arange(T, device=fv_current.device, dtype=torch.int64)  # type: ignore[attr-defined]
 					col_idx = indices * F + int(transactions_col)
 					transactions_vec_tensor = fv_current[col_idx].to(torch.float32)  # type: ignore[attr-defined]
+					del feature_tensor
 			except Exception:
 				transactions_vec_tensor = None
 
@@ -513,19 +906,25 @@ class StockRecommenderFromModel:
 		idx_list = topk_idx.tolist()
 
 		# Map to ticker ids if mapping present; else convert to index_base offset
-		top_ids: List[int] = []
-		if self.ticker_ids and len(self.ticker_ids) == self._output_size:
+		top_scoring_ticker_ids: List[int] = []
+		if self.ticker_ids is not None and len(self.ticker_ids) > 0 and len(self.ticker_ids) == self._output_size:
 			for i in idx_list:
 				if masked_scores[i] > -float("inf"):
-					top_ids.append(int(self.ticker_ids[i]))
+					top_scoring_ticker_ids.append(int(self.ticker_ids[i]))
 		else:
 			# Dense slots -> ticker ids 1..T or 0..T-1
 			offset = 1 if int(index_base) == 1 else 0
 			for i in idx_list:
 				if masked_scores[i] > -float("inf"):
-					top_ids.append(int(i + offset))
+					top_scoring_ticker_ids.append(int(i + offset))
 
-		return scores_np, top_ids
+		# Explicitly clear remaining GPU tensors
+		del transactions_vec_tensor, mask_allowed, topk_vals, topk_idx
+
+		if clear_gpu_cache and torch.cuda.is_available():
+			torch.cuda.empty_cache()
+
+		return scores_np, top_scoring_ticker_ids
 
 	@property
 	def output_size(self):

@@ -1,0 +1,37 @@
+Run Timestamp: 20251118_232112
+Parameters:
+  activation: sigmoid
+  arch: mlp
+  batch_size: 128
+  close_ratio_only: True
+  day_change_centered: half
+  device: auto
+  disable_rank_err: True
+  epochs: 300
+  hidden_layers: 8000
+  limit: None
+  log_interval: 50
+  lr: 0.001
+  metrics_file: data\training_metrics.csv
+  mlp_layers: 5
+  mode: train
+  num_workers: 0
+  pin_memory: True
+  precision: auto
+  prior_days: 4
+  rank_lower: 1
+  rank_temp: 1.0
+  rank_upper: 10
+  seed: None
+  shuffle: True
+  simulate_after: True
+  simulate_percent: 10.0
+  simulate_prior_only: False
+  simulate_sp500_id: None
+  simulate_top_k: 1,3,5,10
+  split_mode: sequential
+  use_dataloader: True
+  use_ranking_error_loss: False
+  resolved_prior_days: 4
+  resolved_mlp_layers: 5
+  resolved_simulate_top_k: [1, 3, 5, 10]

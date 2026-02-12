@@ -30,11 +30,13 @@ import numpy as np
 from StockRecommenderFromModel import StockRecommenderFromModel
 from feature_vector_builder import FeatureVectorBuilder
 from load_database_rows_into_tensors import get_recent_date_id_window
+from trainer.state.single_run import SingleRun
 
 from choose_next_day_stocks import (
 	_lookup_transaction_date_for_date_id,
 	_load_ticker_symbols,
 	_score_for_ticker_id,
+	find_single_run_json,
 )
 
 
@@ -98,6 +100,8 @@ def _build_feature_vector_for_latest_date(
 	*,
 	dbinfo_file: str = "dbinfo.id",
 	date_id: Optional[int] = None,
+	ticker_pool_start_date_id: Optional[int] = None,
+	ticker_pool_end_date_id: Optional[int] = None,
 ):
 	"""Fetch grouped features and build a vector for the latest date.
 
@@ -127,6 +131,8 @@ def _build_feature_vector_for_latest_date(
 		rec,
 		dbinfo_file=dbinfo_file,
 		start_date_id=start_date_id,
+		ticker_pool_start_date_id=ticker_pool_start_date_id,
+		ticker_pool_end_date_id=ticker_pool_end_date_id,
 	)
 
 	feat_vec, feature_date_id = builder.build_for_date(
@@ -146,17 +152,44 @@ def main(argv: Optional[list[str]] = None) -> int:
 	if not model_dir_path.exists():
 		parser.error(f"Model path does not exist: {model_path}")
 
+	# Try to load SingleRun
+	try:
+		sr_path = find_single_run_json(model_dir_path)
+	except (FileNotFoundError, RuntimeError):
+		# Fallback for when model_dir_path is a file (e.g. weights or manifest)
+		if model_dir_path.is_file():
+			try:
+				sr_path = find_single_run_json(model_dir_path.parent)
+			except (FileNotFoundError, RuntimeError):
+				# One more try: resolve manifest path and look there
+				from models.utils import resolve_manifest_path
+				try:
+					m_path = Path(resolve_manifest_path(str(model_dir_path)))
+					sr_path = find_single_run_json(m_path.parent)
+				except Exception:
+					# Final attempt failed, raise original problem
+					raise FileNotFoundError(f"Could not find SingleRun state file for model at {model_path}")
+		else:
+			# It was a directory but find_single_run_json failed
+			raise
+
+	single_run = SingleRun.load(str(sr_path))
+
 	rec = StockRecommenderFromModel(
+		single_run,
 		model_path,
 		device=args.device,
 		ensemble_normalize=bool(getattr(args, "ensemble_normalize", False)),
 	)
 
 	try:
+		ticker_pool_end_date_id = single_run.train_validation_test_sets_end_date_id
 		feat_vec, feature_date_id = _build_feature_vector_for_latest_date(
 			rec,
 			dbinfo_file=args.dbinfo_file,
 			date_id=args.date_id,
+			ticker_pool_start_date_id=single_run.train_validation_test_sets_start_date_id,
+			ticker_pool_end_date_id=ticker_pool_end_date_id,
 		)
 	except Exception as e:
 		traceback.print_exc(e)

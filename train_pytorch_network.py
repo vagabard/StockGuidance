@@ -49,15 +49,9 @@ import time
 from train_pytorch_network_cli import parse_args
 from trainer import train_single_run
 # Trainer package imports (split from monolithic script)
-from trainer.state.family_run import FamilyRun
+from trainer.state.family_run import FamilyRun, VALID_ACTIVATIONS, VALID_DAY_CENTERS
 from trainer.train_single_run import TrainSingleRun
 from training_instance_provider import TrainingInstanceProvider
-
-VALID_ACTIVATIONS = {"relu", "gelu", "tanh", "sigmoid", "silu", "swish", "leaky_relu", "elu", "tanshrink", "softmax",
-			  "logsoftmax", "none"}
-
-VALID_DAY_CENTERS = {"one", "half", "zero", "gapped01", "binary_labels", "top_100_binary_labels", "gappednegpos", "binary_negpos", "top_100_binary_negpos"}
-
 
 # Dataset classes, batching, metrics, and other helpers are provided by trainer.* modules
 
@@ -201,7 +195,18 @@ class TrainPytorchNetwork:
 		seconds = int(self.total_runtime_seconds)
 		hours, rem = divmod(seconds, 3600)
 		minutes, secs = divmod(rem, 60)
-		print(f"Total training wall time: {hours:02d}:{minutes:02d}:{secs:02d} ({self.total_runtime_seconds:.2f} s)")
+		runtime_str = f"Total training wall time: {hours:02d}:{minutes:02d}:{secs:02d} ({self.total_runtime_seconds:.2f} s)"
+		print(runtime_str)
+
+		if self._training_directory:
+			try:
+				runtime_file = os.path.join(self._training_directory, "total_runtime.txt")
+				with open(runtime_file, "w") as f:
+					f.write(runtime_str + "\n")
+				print(f"Saved total runtime to {runtime_file}")
+			except Exception as e:
+				print(f"Warning: could not save total runtime to file: {e}")
+
 		return int(self._exit_code or 0)
 
 	@property

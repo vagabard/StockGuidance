@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from typing import Optional
 
 import torch
 from torch.nn import Module
@@ -20,4 +21,5 @@ class TrainingBundle:
 	training_instance_provider: torch.utils.data.DataLoader = None
 	validation_instance_provider: torch.utils.data.DataLoader = None
 	testing_instance_provider: IndexDataset = None
+	cache_path: Optional[str] = None
 

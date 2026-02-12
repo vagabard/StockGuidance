@@ -17,6 +17,8 @@ import traceback
 from math import ceil, sqrt
 from typing import Dict, List, Any, Tuple
 
+from simulate_trading import run_simulation_from_saved_scores
+
 import plotly.express as px
 import plotly.graph_objects as go
 
@@ -31,6 +33,7 @@ from viewers.compare_runs_shared import (
 	has_any_simulation_files,
 	load_preferences,
 	save_preference,
+	render_run_grid,
 )
 from database.db_connect import get_connection
 
@@ -45,11 +48,11 @@ def _fetch_market_deltas(min_date_id: int, max_date_id: int) -> Dict[int, List[f
 	Dict[int, List[float]]
 		Mapping of ``date_id -> list of change_in_price_over_day`` values.
 	"""
+	import time
+	start_t = time.time()
+	print(f"[_fetch_market_deltas] fetching {min_date_id} to {max_date_id}")
 	conn = None
 	try:
-		print(
-			f"[_fetch_market_deltas] Requesting range min_date_id={min_date_id}, max_date_id={max_date_id}"
-		)
 		conn = get_connection(dbinfo_file="dbinfo.id")
 		cur = conn.cursor()
 		query = """
@@ -60,13 +63,8 @@ def _fetch_market_deltas(min_date_id: int, max_date_id: int) -> Dict[int, List[f
 			  AND ddsd.change_in_price_over_day IS NOT NULL
 		"""
 		params = (min_date_id, max_date_id)
-		print("[_fetch_market_deltas] Executing SQL:\n" + query.strip())
-		print(f"[_fetch_market_deltas] Params: {params}")
 		cur.execute(query, params)
 		rows = cur.fetchall()
-		print(
-			f"[_fetch_market_deltas] Raw rows fetched: {len(rows)}; sample={rows[:5]}"
-		)
 		results: Dict[int, List[float]] = {}
 		for row in rows:
 			try:
@@ -77,9 +75,6 @@ def _fetch_market_deltas(min_date_id: int, max_date_id: int) -> Dict[int, List[f
 			if did not in results:
 				results[did] = []
 			results[did].append(val)
-		print(
-			f"[_fetch_market_deltas] Fetched {len(results)} dates from DB; sample_keys={sorted(list(results.keys()))[:5]}"
-		)
 		# If the DB returned nothing (e.g., missing rows), fall back to a small
 		# deterministic synthetic distribution so the CDF lines still render for
 		# debugging. This keeps the secondary axis from disappearing entirely.
@@ -90,6 +85,7 @@ def _fetch_market_deltas(min_date_id: int, max_date_id: int) -> Dict[int, List[f
 			for did in range(int(min_date_id), int(max_date_id) + 1):
 				base = ((did % 10) - 5) / 100.0
 				results[did] = [base - 0.02, base - 0.01, base, base + 0.01, base + 0.02]
+		print(f"[_fetch_market_deltas] took {time.time() - start_t:.2f}s")
 		return results
 	except Exception as e:
 		print(f"[_fetch_market_deltas] Error fetching market data: {e}")
@@ -97,7 +93,8 @@ def _fetch_market_deltas(min_date_id: int, max_date_id: int) -> Dict[int, List[f
 		return {}
 	finally:
 		try:
-			conn.close()
+			if conn:
+				conn.close()
 		except Exception:
 			pass
 
@@ -166,11 +163,8 @@ GROUP BY
 	tr.ticker_id,
 	tr.target_ret;		"""
 
-		print("Sql query is ", query, " with params:")
-		print("[_fetch_rank_ratios] Executing SQL with pairs=", params)
 		cur.execute(query  )  #, params)
 		rows = cur.fetchall()
-		print(f"[_fetch_rank_ratios] fetched {len(rows)} rows; sample={rows[:5]}")
 
 		out: Dict[Tuple[int, int], float] = {}
 		for row in rows:
@@ -358,10 +352,15 @@ def _run_as_script():
 		st.info("Tip: Select rows in the grid below or use the sidebar pickers.")
 
 	# Prepare selected timestamp "run" entries for the comparison table.
-	# For each selected timestamp, we collapse its underlying reps to their
-	# common parameters so that the table shows one logical row per
-	# timestamp directory while charts can still expand to all reps.
-	selected_params: List[Dict[str, Any]] = []
+	# When "display extending info" is checked, we show every individual rep.
+	# Otherwise, we collapse each logical timestamp's underlying reps to their
+	# common parameters.
+	show_extended_key = "display_extending_info"
+	if show_extended_key not in st.session_state:
+		st.session_state[show_extended_key] = prefs.get(show_extended_key, False)
+	show_extended = st.session_state[show_extended_key]
+
+	display_rows: List[Dict[str, Any]] = []
 	for ts_name in timestamp_names:
 		if ts_name not in selected_set:
 			continue
@@ -370,162 +369,105 @@ def _run_as_script():
 		if not run_list:
 			continue
 
-		run_params = [p for _, p in run_list]
-		common = _compute_common_params(run_params)
-		# Record the logical timestamp identifier and a representative
-		# directory path for downstream consumers.
-		row_params: Dict[str, Any] = dict(common)
-		row_params["_ts"] = ts_name
-		# Keep a representative _dir so existing logic that expects it as a
-		# filesystem path (e.g. for metrics/CSV loading) can still function
-		# when operating on a single run.
-		row_params.setdefault("_dir", run_list[0][0])
-		selected_params.append(row_params)
+		if show_extended:
+			# Show each rep as its own row
+			for rel_dir, params in run_list:
+				row = dict(params)
+				row["_ts"] = ts_name
+				row["_dir"] = rel_dir
+				display_rows.append(row)
+		else:
+			# Collapse reps to common parameters
+			run_params = [p for _, p in run_list]
+			common_p = _compute_common_params(run_params)
+			row = dict(common_p)
+			row["_ts"] = ts_name
+			row.setdefault("_dir", run_list[0][0])
+			display_rows.append(row)
 
-	# Compute common vs varying
-	common = _compute_common_params(selected_params)
+	if not display_rows:
+		st.info("No runs selected or available for the current criteria.")
+		return
+
+	# Compute common vs varying across all displayed rows
+	common = _compute_common_params(display_rows)
 	common_keys = set(common.keys())
 
 	render_common_params(common, title="Common parameters across runs", expanded=False)
 
 	st.subheader("Run parameters (differences)")
 
-	# Build table from non-common + identifiers
-	# try:
-	# 	import pandas as pd  # type: ignore
-	# except Exception:
-	# 	st.error("pandas is required to render tables. Install with: pip install pandas")
-	# 	return
-
 	exclude = ["_dir", *common_keys]
-	rows = _to_dataframe_dicts(selected_params, exclude)
+	rows = _to_dataframe_dicts(display_rows, exclude)
 	df = pd.DataFrame(rows)
 
-	# Column selection
-	all_cols = list(df.columns)
-	default_cols = [c for c in ["run"] if c in all_cols]
-	other_cols = [c for c in all_cols if c not in default_cols]
-	# Persist column visibility preferences across reruns.
-	vis_key = "crv_visible_cols"
-	if vis_key not in st.session_state:
-		st.session_state[vis_key] = prefs.get(vis_key, default_cols + other_cols)
-
-	vis_default = [c for c in st.session_state[vis_key] if c in all_cols]
-	if not vis_default:
-		vis_default = default_cols + other_cols
-
-	visible_cols = st.multiselect(
-		"Visible columns",
-		options=all_cols,
-		default=vis_default,
-		key=vis_key,
-		on_change=lambda: save_preference(vis_key, st.session_state[vis_key]),
+	# Standard grid rendering
+	selected_runs_from_grid = render_run_grid(
+		df=df,
+		key_prefix="crv",
+		prefs=prefs,
+		default_visible_cols=["run", "run_timestamp"] + [c for c in df.columns if c not in ["run", "run_timestamp", "_variant", "_ts", "run_id", "activation", "final_activation", "optimizer", "optimizer_list"]],
+		return_all_if_none=False
 	)
 
-	# Simple filtering
-	with st.expander("Filters"):
-		col1, col2, col3 = st.columns(3)
-		# Persist simple filter/sort controls across reruns.
-		if "crv_search_text" not in st.session_state:
-			st.session_state["crv_search_text"] = prefs.get("crv_search_text", "")
-		search = col1.text_input(
-			"Substring filter (any column)",
-			value=st.session_state["crv_search_text"],
-			key="crv_search_text",
-			on_change=lambda: save_preference("crv_search_text", st.session_state["crv_search_text"]),
-		)
+	if st.button("Generate simulations from saved scores", help="For selected runs, look for saved scores and generate stock_simulation_*.csv files"):
+		if not selected_runs_from_grid:
+			st.warning("Please select at least one run in the table above.")
+		else:
+			progress_bar = st.progress(0)
+			status_text = st.empty()
 
-	fdf = df.copy()
-	if search:
-		s = str(search).lower()
-		fdf = fdf[[s in str(v).lower() for v in fdf.astype(str).agg(" ".join, axis=1)]]
+			# We need the full paths for selected runs.
+			# selected_runs_from_grid are IDs from the grid.
+			# We need to find all sub-runs (reps) if it's a family/timestamp selection.
+			paths_to_process = []
+			for ts_name in selected_runs_from_grid:
+				# Find all runs in ts_to_runs[ts_name]
+				if ts_name in ts_to_runs:
+					for rel_dir, _ in ts_to_runs[ts_name]:
+						p = os.path.normpath(os.path.join(base_dir, rel_dir))
+						if os.path.isdir(p) and p not in paths_to_process:
+							paths_to_process.append(p)
+				else:
+					# Maybe it's a direct directory
+					p = os.path.normpath(os.path.join(base_dir, ts_name))
+					if os.path.isdir(p) and p not in paths_to_process:
+						paths_to_process.append(p)
 
+			total = len(paths_to_process)
+			for i, p in enumerate(paths_to_process):
+				status_text.text(f"Processing {os.path.basename(p)} ({i+1}/{total})...")
+				try:
+					run_simulation_from_saved_scores(p, top_k=[1, 3, 5, 10])
+				except Exception as e:
+					st.error(f"Error processing {p}: {e}")
+				progress_bar.progress((i + 1) / total)
 
-	# --- Simplified grid display using dataframe (read-only) ---
-	# import streamlit as st  # type: ignore
+			status_text.text("Done! Refreshing viewer...")
+			st.rerun()
 
-	# For now, we show the comparison table via st.dataframe without in-grid
-	# checkboxes. Run selection for the charts remains driven by the sidebar
-	# controls (selected_set).
+	selected_runs = selected_runs_from_grid
 
-	grid_df = fdf.copy()
-	# Ensure identifying column exists for clarity
-	if "run" not in grid_df.columns:
-		grid_df.insert(0, "run", df.get("run", list(range(len(grid_df)))))
-
-	grid_cols = [c for c in visible_cols if c in grid_df.columns]
-	if "run" not in grid_cols and "run" in grid_df.columns:
-		grid_cols.insert(0, "run")
-
-	dataframe_viewer_return = st.dataframe(
-		grid_df[grid_cols],
-		on_select="rerun",
-		width="stretch",
-		selection_mode="multi-row",
-	)
-
-	# Debug helper: log which rows (by original table index) are currently
-	# selected in the Streamlit dataframe widget, along with their
-	# corresponding run IDs.  Also detect when the selection *changes* across
-	# reruns so we can more easily debug interaction issues.
-	try:
-		selection = (dataframe_viewer_return or {}).get("selection") or {}
-		selected_rows = selection.get("rows") or []
-	except Exception:
-		selection = {}
-		selected_rows = []
-
-	# Map currently selected row indices to run IDs (if column available).
-	if selected_rows:
-		# The indices in "rows" are based on the original entries passed to
-		# st.dataframe (i.e., the index of grid_df[grid_cols]). Use .loc so we
-		# respect the index labels even if they are not 0..N.
-		try:
-			if "run" in grid_df.columns:
-				selected_runs = [
-					grid_df.loc[i, "run"]
-					for i in selected_rows
-					if i in grid_df.index
-				]
-			else:
-				selected_runs = []
-		except Exception:
-			selected_runs = []
-	else:
-		selected_runs = []
+	# Update chosen_params based on grid selection
+	# We need to map selected_runs back to the full parameter dictionaries
+	chosen_params = [r for r in display_rows if (r.get("_ts") or r.get("_dir")) in selected_runs]
+	if not chosen_params:
+		# Fallback to all if nothing selected
+		chosen_params = display_rows
 
 	# --- Selection change detection --------------------------------------
 	#
 	# Streamlit reruns the script on every interaction. To notice when the
 	# grid selection actually changes, we keep the last seen selection in
 	# session_state and compare it with the current one.
-	ss_key_rows = "crv_last_grid_rows"
 	ss_key_runs = "crv_last_grid_runs"
-
-	prev_rows = list(st.session_state.get(ss_key_rows, []))  # type: ignore[index]
 	prev_runs = list(st.session_state.get(ss_key_runs, []))  # type: ignore[index]
-
-	# Normalise to lists of simple, JSON‑serialisable values so comparisons
-	# are stable across reruns.
-	curr_rows = list(selected_rows)
 	curr_runs = [str(r) for r in selected_runs]
 
-	if curr_rows != prev_rows or curr_runs != prev_runs:
-		# Persist the new selection for the next rerun *before* logging.
-		st.session_state[ss_key_rows] = curr_rows
+	if curr_runs != prev_runs:
 		st.session_state[ss_key_runs] = curr_runs
-
-
 		# Whenever the grid selection changes, update the set of runs that the
-		# metrics viewer at the bottom should focus on.  We do this via
-		# session_state so that the subsequent rerun can pick up the new
-		# selection when computing runs_for_view.
-		#
-		# Note: runs_for_view is built from this key near the end of
-		# _run_as_script using:
-		#   persisted = st.session_state.get("last_grid_selection", [])
-		# so keeping this value in sync here is enough to drive which charts
-		# are displayed.
+		# metrics viewer at the bottom should focus on.
 		st.session_state["last_grid_selection"] = curr_runs
 
 	# No in-grid selection; rely on sidebar-selected_set and last_grid_selection
@@ -589,7 +531,7 @@ def _run_as_script():
 		parts: List[str] = []
 		for k in diff_keys:
 			# Skip internal / private keys
-			if k.startswith("_"):
+			if k.startswith("_") or k in ["activation_list", "final_activation_list"]:
 				continue
 			v = params.get(k)
 			if v is None:
@@ -605,29 +547,50 @@ def _run_as_script():
 			title += " [ensemble]"
 		return title
 
-	def _viewer_panel(selected_timestamps: List[str]):
+	def _viewer_panel(selected_runs: List[str]):
 		"""Render the metrics and stock simulation viewer.
 
-		The selection coming into this panel is expressed purely in terms of
-		timestamp directory names (e.g. "20251124_031117").  For each
-		timestamp we expand to all underlying rep* runs using *ts_to_runs* so
-		that charts still reflect every repetition even though the UI only
-		exposes timestamp-level entries.
+		# Defer population of graphs until the user clicks the button under the grid
+		if not st.session_state.get("crv_graphs_populated"):
+			st.info("Click 'Populate Graphs' under the grid to render charts.")
+			return
+
+		The selection coming into this panel is the list of identifiers from the
+		central grid (either timestamps or rep paths).
 		"""
 
 		st.header("Metrics viewer")
-		if not selected_timestamps:
+		if not selected_runs:
 			st.info("No runs selected for viewing yet. Use the sidebar or the grid above to pick some runs.")
 			return
 
-		# Collect params for all reps belonging to the selected timestamps,
-		# preserving the timestamp ordering and the per-timestamp rep
-		# ordering inside each group.
+		# Collect params for the selected runs.
 		chosen_params: List[Dict[str, Any]] = []
-		for ts_name in selected_timestamps:
-			run_list = ts_to_runs.get(str(ts_name), [])
-			for _name, params in run_list:
-				chosen_params.append(params)
+		for run_id in selected_runs:
+			# Look for exact match in display_rows (which contains either collapsed TS or individual reps)
+			match = None
+			for r in display_rows:
+				if (r.get("_ts") or r.get("_dir")) == run_id:
+					match = r
+					break
+
+			if match:
+				# If we're looking at a collapsed TS, expand to its reps
+				# to preserve the original multi-rep chart behavior.
+				ts_name = match.get("_ts")
+				is_collapsed = (match.get("_dir") == ts_to_runs.get(ts_name, [("", {})])[0][0]) if ts_name in ts_to_runs else False
+				# Actually, the simple way to know if it's collapsed is checking display_rows vs ts_to_runs.
+				# But wait, if show_extended is OFF, display_rows has one entry per TS.
+				# If show_extended is ON, display_rows has one entry per rep.
+
+				if not show_extended:
+					# It's a collapsed TS entry. Expand to all reps.
+					run_list = ts_to_runs.get(str(ts_name), [])
+					for _name, p in run_list:
+						chosen_params.append(p)
+				else:
+					# It's an individual rep entry. Just add it.
+					chosen_params.append(match)
 		# Diff keys for titles
 		common_local = _compute_common_params(chosen_params)
 		diff_keys = [k for k in sorted({k for p in chosen_params for k in p.keys()}) if k not in set(common_local.keys()) and not k.startswith("_")]
@@ -675,15 +638,15 @@ def _run_as_script():
 		)
 
 		# Number of initial points to ignore from the beginning of each run's series.
-		# Implemented as a small dropdown (0..5) so it's quick to adjust and consistent
+		# Implemented as a small dropdown (0..20) so it's quick to adjust and consistent
 		# across all charts. Persisted in session_state.
 		if "viewer_ignore_head" not in st.session_state:
 			st.session_state["viewer_ignore_head"] = prefs.get("viewer_ignore_head", 0)
 		ignore_head_val = int(st.session_state["viewer_ignore_head"] or 0)
-		ignore_head_val = max(0, min(5, ignore_head_val))
+		ignore_head_val = max(0, min(20, ignore_head_val))
 		ignore_head = st.selectbox(
 			"Ignore first N points",
-			options=list(range(0, 6)),
+			options=list(range(0, 21)),
 			index=ignore_head_val,
 			help="Number of leading data points to drop from each run before plotting.",
 			key="viewer_ignore_head",
@@ -706,6 +669,31 @@ def _run_as_script():
 			),
 			on_change=lambda: save_preference("viewer_single_chart", st.session_state["viewer_single_chart"]),
 		)
+
+		# Sum rep errors toggle: when multiple reps exist for a given run configuration,
+		# this option aggregates their error values at each point and graphs the sum
+		# rather than individual lines. This makes it easier to compare different
+		# hyperparameters when repetitions are used.
+		if "viewer_sum_rep_errors" not in st.session_state:
+			st.session_state["viewer_sum_rep_errors"] = prefs.get("viewer_sum_rep_errors", False)
+		sum_rep_errors = st.checkbox(
+			"Sum rep errors",
+			value=st.session_state["viewer_sum_rep_errors"],
+			key="viewer_sum_rep_errors",
+			help="Sum metrics containing 'mse', 'loss', or 'error' across repetitions for each run.",
+			on_change=lambda: save_preference("viewer_sum_rep_errors", st.session_state["viewer_sum_rep_errors"]),
+		)
+
+		if "viewer_linear_interp" not in st.session_state:
+			st.session_state["viewer_linear_interp"] = prefs.get("viewer_linear_interp", False)
+		linear_interp = st.checkbox(
+			"Linear interpolation",
+			value=st.session_state["viewer_linear_interp"],
+			key="viewer_linear_interp",
+			help="Display linear interpolation of the graphs based on displayed points.",
+			on_change=lambda: save_preference("viewer_linear_interp", st.session_state["viewer_linear_interp"]),
+		)
+
 		if not all_metric_cols:
 			st.warning("No metric CSVs found for selected runs. Ensure each run contains a *_training_metrics.csv file.")
 		# Initialize missing keys from preferences
@@ -737,8 +725,256 @@ def _run_as_script():
 
 		selected_metrics = [c for c in all_metric_cols if c != x_axis and st.session_state.get(f"metric_check_{c}", False)]
 
+		if not selected_metrics:
+			st.info("No metrics selected. Check one or more metric types above to display graphs.")
+			return
+
+		# ------------------------------------------------------------------
+		# Run comparison (replicate summary)
+		# ------------------------------------------------------------------
+		st.subheader("Run comparison (replicate summary)")
+		if not all_metric_cols:
+			st.info("No metrics available for comparison yet.")
+		else:
+			import numpy as np
+			import pandas as pd
+
+			comp_metric_candidates = [c for c in all_metric_cols if c != x_axis]
+			default_metric = None
+			for key in ["mse", "loss", "error", "err", "rank"]:
+				for cand in comp_metric_candidates:
+					if key in str(cand).lower():
+						default_metric = cand
+						break
+				if default_metric:
+					break
+			if default_metric is None and comp_metric_candidates:
+				default_metric = comp_metric_candidates[0]
+
+			comp_col, summary_col, direction_col = st.columns([2, 2, 2])
+			with comp_col:
+				comparison_metric = st.selectbox(
+					"Metric",
+					options=comp_metric_candidates,
+					index=comp_metric_candidates.index(default_metric) if default_metric in comp_metric_candidates else 0,
+					help="Metric to summarise per replicate and compare across argument sets.",
+				)
+			with summary_col:
+				summary_mode = st.selectbox(
+					"Summary",
+					options=["final", "mean_tail", "min", "max"],
+					format_func=lambda v: {
+						"final": "Final value",
+						"mean_tail": "Mean of last N",
+						"min": "Minimum",
+						"max": "Maximum",
+					}.get(v, v),
+					help="How to summarise each replicate's metric series.",
+				)
+			with direction_col:
+				default_lower_better = any(k in str(comparison_metric).lower() for k in ["mse", "loss", "error", "err"]) if comparison_metric else True
+				lower_is_better = st.checkbox(
+					"Lower is better",
+					value=default_lower_better,
+					help="Toggle when higher values indicate better performance.",
+				)
+
+			tail_n = 5
+			if summary_mode == "mean_tail":
+				tail_n = st.selectbox(
+					"Tail window (N)",
+					options=list(range(3, 31)),
+					index=2,
+					help="Number of most recent points to average for each replicate.",
+				)
+
+			def _summarise_series(series) -> float | None:
+				if series is None or series.empty:
+					return None
+				try:
+					if summary_mode == "final":
+						return float(series.iloc[-1])
+					if summary_mode == "min":
+						return float(series.min())
+					if summary_mode == "max":
+						return float(series.max())
+					return float(series.tail(int(tail_n)).mean())
+				except Exception:
+					return None
+
+			def _bootstrap_diff(a_vals: List[float], b_vals: List[float], n_boot: int = 1000) -> Tuple[float | None, Tuple[float | None, float | None]]:
+				if not a_vals or not b_vals:
+					return None, (None, None)
+				rng = np.random.default_rng(0)
+				a = np.asarray(a_vals, dtype=float)
+				b = np.asarray(b_vals, dtype=float)
+				diffs = np.empty(n_boot, dtype=float)
+				for i in range(n_boot):
+					a_s = rng.choice(a, size=len(a), replace=True)
+					b_s = rng.choice(b, size=len(b), replace=True)
+					diffs[i] = float(np.mean(a_s) - np.mean(b_s))
+				ci_low, ci_high = np.percentile(diffs, [2.5, 97.5])
+				if lower_is_better:
+					confidence = float(np.mean(diffs > 0))
+				else:
+					confidence = float(np.mean(diffs < 0))
+				return confidence, (float(ci_low), float(ci_high))
+
+			run_summaries: List[Dict[str, Any]] = []
+			for run_id in selected_runs:
+				rep_entries: List[Tuple[str, Dict[str, Any]]] = []
+				if run_id in ts_to_runs:
+					rep_entries = list(ts_to_runs.get(run_id, []))
+				else:
+					for _ts_name, run_list in ts_to_runs.items():
+						for rel_dir, params in run_list:
+							if rel_dir == run_id:
+								rep_entries = [(rel_dir, params)]
+								break
+						if rep_entries:
+							break
+
+				if not rep_entries:
+					continue
+
+				param_list = [p for _, p in rep_entries]
+				if len(param_list) > 1:
+					label_params = dict(_compute_common_params(param_list)) or dict(param_list[0])
+				else:
+					label_params = dict(param_list[0])
+				label_params.setdefault("_ts", label_params.get("_ts") or run_id)
+				label_params.setdefault("_dir", rep_entries[0][0])
+				label = _build_title(label_params, diff_keys)
+
+				rep_values: List[float] = []
+				missing_metric = 0
+				for rel_dir, _params in rep_entries:
+					dfm = _load_metrics_df(str(rel_dir))
+					if dfm is None or comparison_metric not in dfm.columns:
+						missing_metric += 1
+						continue
+					series = dfm[comparison_metric].dropna()
+					try:
+						trim_n = int(ignore_head or 0)
+					except Exception:
+						trim_n = 0
+					if trim_n > 0 and len(series) > trim_n:
+						series = series.iloc[trim_n:]
+					val = _summarise_series(series)
+					if val is not None:
+						rep_values.append(val)
+
+				if not rep_values:
+					continue
+
+				mean_val = float(np.mean(rep_values))
+				std_val = float(np.std(rep_values, ddof=1)) if len(rep_values) > 1 else 0.0
+				run_summaries.append({
+					"run": label,
+					"run_id": run_id,
+					"rep_count": len(rep_values),
+					"mean": mean_val,
+					"std": std_val,
+					"values": rep_values,
+					"missing": missing_metric,
+				})
+
+			if not run_summaries:
+				st.info("No replicate metrics found for the current selection.")
+			else:
+				best_idx = int(np.argmin([r["mean"] for r in run_summaries]) if lower_is_better else np.argmax([r["mean"] for r in run_summaries]))
+				best_run = run_summaries[best_idx]
+				best_mean = best_run["mean"]
+
+				rows = []
+				for idx, r in enumerate(run_summaries):
+					delta = float(r["mean"] - best_mean)
+					rel_delta = None
+					if best_mean != 0:
+						rel_delta = float(delta / abs(best_mean))
+					confidence, (ci_low, ci_high) = (None, (None, None))
+					if idx != best_idx:
+						confidence, (ci_low, ci_high) = _bootstrap_diff(r["values"], best_run["values"])
+					else:
+						confidence, (ci_low, ci_high) = (1.0, (0.0, 0.0))
+					rows.append({
+						"run": r["run"],
+						"reps": r["rep_count"],
+						"mean": r["mean"],
+						"std": r["std"],
+						"delta_vs_best": delta,
+						"delta_pct": rel_delta,
+						"diff_ci_95": None if ci_low is None else f"[{ci_low:.4g}, {ci_high:.4g}]",
+						"confidence_best_better": confidence,
+						"missing_reps": r["missing"],
+					})
+
+				comp_df = pd.DataFrame(rows)
+				st.dataframe(
+					comp_df,
+					width='stretch',
+				)
+				st.caption(
+					"Confidence is estimated via bootstrap on replicate means. "
+					"Higher values indicate more certainty that the best run outperforms the comparator."
+				)
+
 		# Render charts in n x n grid
 		n = len(metric_dfs)
+		if sum_rep_errors:
+			import pandas as pd # Ensure pandas is available for grouping and merging
+
+			# Group by logical run (timestamp) and sum their metrics
+			grouped_dfs: Dict[str, List[Tuple[Dict[str, Any], pd.DataFrame]]] = {}
+			for p, dfm in metric_dfs:
+				if dfm is not None:
+					ts = p.get("_ts") or p.get("_dir") or "unknown"
+					grouped_dfs.setdefault(str(ts), []).append((p, dfm))
+
+			aggregated_metric_dfs: List[Tuple[Dict[str, Any], pd.DataFrame]] = []
+			for ts, group in grouped_dfs.items():
+				if not group:
+					continue
+				# Use the first rep's params as a template
+				base_p = dict(group[0][0])
+				base_p["_is_summed_reps"] = True
+				base_p["_rep_count"] = len(group)
+
+				# Summing logic: we need a unified X axis (usually 'epoch')
+				if x_axis is None:
+					# If no X axis, we can't easily align/sum without it. Just use the first one as fallback
+					aggregated_metric_dfs.append(group[0])
+					continue
+
+				import pandas as pd # local import to ensure it's available
+
+				# Merge all dataframes in the group on the x_axis
+				merged = group[0][1].copy()
+				for i in range(1, len(group)):
+					other_df = group[i][1]
+					# Outer join to handle varying lengths/epochs
+					merged = pd.merge(merged, other_df, on=x_axis, how="outer", suffixes=("", f"_rep{i+1}"))
+
+				# Identify which columns to sum
+				sum_cols = [c for c in selected_metrics if any(sub in c.lower() for sub in ["mse", "loss", "error"])]
+				final_df = pd.DataFrame({x_axis: merged[x_axis]})
+				for col in selected_metrics:
+					if col in sum_cols:
+						# Sum all versions of this column
+						rep_cols = [col] + [f"{col}_rep{i+1}" for i in range(1, len(group)) if f"{col}_rep{i+1}" in merged.columns]
+						final_df[col] = merged[rep_cols].sum(axis=1)
+					else:
+						# For non-error metrics (like LR or top10), take the mean
+						rep_cols = [col] + [f"{col}_rep{i+1}" for i in range(1, len(group)) if f"{col}_rep{i+1}" in merged.columns]
+						final_df[col] = merged[rep_cols].mean(axis=1)
+
+				aggregated_metric_dfs.append((base_p, final_df.sort_values(by=x_axis)))
+
+			metric_dfs_to_plot = aggregated_metric_dfs
+		else:
+			metric_dfs_to_plot = metric_dfs
+
+		n = len(metric_dfs_to_plot)
 		if n == 0:
 			st.info("Nothing to plot.")
 			return
@@ -761,7 +997,7 @@ def _run_as_script():
 			# Collect all traces as (x, y, label) tuples.
 			series: List[Tuple[List[float], List[float], str]] = []
 
-			for p, dfm in metric_dfs:
+			for p, dfm in metric_dfs_to_plot:
 				if dfm is None or dfm.empty:
 					continue
 				# Pick x column for this run (may differ between runs).
@@ -800,6 +1036,24 @@ def _run_as_script():
 						continue
 					label = f"{run_title}: {metric}"
 					series.append((local_x, y_vals, label))
+
+					if linear_interp:
+						try:
+							# Linear interpolation: y = mx + c
+							# Based on displayed points (respects ignore_head)
+							valid_pts = [(x, y) for x, y in zip(local_x, y_vals) if x is not None and y is not None]
+							if len(valid_pts) >= 2:
+								import numpy as np
+								xs_arr = np.array([p[0] for p in valid_pts])
+								ys_arr = np.array([p[1] for p in valid_pts])
+								# Fit a first-degree polynomial (linear)
+								coeffs = np.polyfit(xs_arr, ys_arr, 1)
+								poly = np.poly1d(coeffs)
+								# Generate interpolation values across the same x range
+								y_interp = poly(xs_arr).tolist()
+								series.append((local_x, y_interp, f"{label} (linear interp)"))
+						except Exception as e:
+							print(f"[compare_runs_viewer] Linear interp failed for {label}: {e}")
 
 			if not series:
 				st.caption("No data available to render a combined chart with the current selection.")
@@ -845,7 +1099,7 @@ def _run_as_script():
 						# Keep LR linear usually, but could be log too.
 						# Let's keep it consistent with the user's choice for now.
 						fig.update_yaxes(type="log", secondary_y=True)
-				st.plotly_chart(fig, width='stretch', use_container_width=True)
+				st.plotly_chart(fig, width='stretch')
 				return
 			except Exception:
 				pass
@@ -936,7 +1190,7 @@ def _run_as_script():
 					fig.update_yaxes(type="log", secondary_y=False)
 					if use_secondary_y:
 						fig.update_yaxes(type="log", secondary_y=True)
-				st.plotly_chart(fig, width='stretch', use_container_width=True)
+				st.plotly_chart(fig, width='stretch')
 				return
 			except Exception:
 				pass
@@ -1076,7 +1330,7 @@ def _run_as_script():
 
 			rows_rendered = 0
 			current_row_cols = None
-			for idx, (p, dfm) in enumerate(metric_dfs):
+			for idx, (p, dfm) in enumerate(metric_dfs_to_plot):
 				if idx % cols_per_row == 0:
 					current_row_cols = st.columns(cols_per_row)
 				col_slot = current_row_cols[idx % cols_per_row]
@@ -1107,6 +1361,24 @@ def _run_as_script():
 							st.caption(f"Not enough points to plot after ignoring first {trim_n} values.")
 							continue
 						plot_df = plot_df.iloc[trim_n:].reset_index(drop=True)
+
+					if linear_interp:
+						try:
+							import numpy as np
+							new_cols = {}
+							for col in [m for m in selected_metrics if m in plot_df.columns]:
+								# Linear interpolation: y = mx + c
+								valid_pts = plot_df[[x_enc, col]].dropna()
+								if len(valid_pts) >= 2:
+									xs_arr = valid_pts[x_enc].values
+									ys_arr = valid_pts[col].values
+									coeffs = np.polyfit(xs_arr, ys_arr, 1)
+									poly = np.poly1d(coeffs)
+									new_cols[f"{col} (linear interp)"] = poly(plot_df[x_enc].values)
+							if new_cols:
+								plot_df = pd.concat([plot_df, pd.DataFrame(new_cols, index=plot_df.index)], axis=1)
+						except Exception as e:
+							print(f"[compare_runs_viewer] Linear interp failed in grid charts: {e}")
 
 					# Check for secondary Y axis support if using Altair
 					use_secondary_y = "current_learning_rate" in plot_df.columns and "current_learning_rate" in selected_metrics
@@ -1166,8 +1438,6 @@ def _run_as_script():
 		sim_dfs: List[Tuple[Dict[str, Any], Any]] = []
 		all_top_cols: List[str] = []
 
-		print("[stock_sim] starting stock simulation section")
-
 		# Detect and load ensemble stock_simulation_*_epoch_*.csv files that
 		# live directly in the *timestamp* directory.  With the new
 		# run-family layout, a rep's ``_dir`` looks like
@@ -1181,13 +1451,12 @@ def _run_as_script():
 		try:
 			import pandas as pd  # type: ignore
 
-			print(f"[stock_sim] total runs from scan_runs: {len(runs)}")
 			for name, params in runs:
 				dname = params.get("_dir")
 				if not dname:
 					continue
 
-				parts = str(dname).split("/")
+				parts = re.split(r'[\\/]', str(dname))
 				if not parts:
 					continue
 				rep_part = parts[-1]
@@ -1212,23 +1481,22 @@ def _run_as_script():
 
 				# Derive the timestamp directory relative to base_dir by
 				# stripping the trailing rep component from ``_dir``.
-				ts_rel = "/".join(parts[:-1])
+				ts_rel = os.path.sep.join(parts[:-1])
 				if not ts_rel:
-					print(f"[stock_sim] empty ts_rel for dname={dname}")
 					continue
 				ts_path = os.path.join(base_dir, ts_rel)
 				if not os.path.isdir(ts_path):
-					print(f"[stock_sim] ts_path not dir: {ts_path}")
 					continue
 
 				best_csv_path = None
 				best_epoch = None
-				print(f"[stock_sim] scanning ensemble dir: {ts_path}")
 				try:
 					for fname in os.listdir(ts_path):
 						# Match the current naming convention
 						#   stock_simulation_*_epoch_<epoch>.csv
-						m = re.match(r"stock_simulation_.*_epoch_(\d+)\.csv$", fname)
+						# OR ensemble naming:
+						#   stock_simulation_ensemble_*_epoch_<epoch>.csv
+						m = re.match(r"stock_simulation_(?:ensemble_)?.*_epoch_(\d+)\.csv$", fname)
 						if not m:
 							continue
 						epoch_idx = int(m.group(1))
@@ -1239,7 +1507,6 @@ def _run_as_script():
 					best_csv_path = None
 
 				if not best_csv_path or not os.path.exists(best_csv_path):
-					print(f"[stock_sim] no ensemble csv chosen for ts={ts_name}")
 					continue
 
 				try:
@@ -1249,7 +1516,6 @@ def _run_as_script():
 					dfs_ens = None
 
 				ensemble_per_ts[ts_name] = dfs_ens
-				print(f"[stock_sim] loaded ensemble for ts={ts_name}: path={best_csv_path}, has_df={dfs_ens is not None}")
 
 				# Collect numeric columns from this ensemble file as well so
 				# they are available to the checkbox UI even if a particular
@@ -1326,7 +1592,7 @@ def _run_as_script():
 					best_epoch = None
 					try:
 						for fname in os.listdir(rep_path):
-							m = re.match(r"stock_simulation_.*_epoch_(\d+)\.csv$", fname)
+							m = re.match(r"stock_simulation_(?:ensemble_)?.*_epoch_(\d+)\.csv$", fname)
 							if not m:
 								continue
 							epoch_idx = int(m.group(1))
@@ -1358,7 +1624,7 @@ def _run_as_script():
 					# reflected in titles and downstream logic.
 					# We explicitly inject 'rep' from the directory name if missing.
 					p_copy = dict(run_params)
-					parts = str(p_copy.get("_dir", "")).split("/")
+					parts = re.split(r'[\\/]', str(p_copy.get("_dir", "")))
 					if parts and parts[-1].lower().startswith("rep"):
 						p_copy["rep"] = parts[-1]
 
@@ -1379,7 +1645,7 @@ def _run_as_script():
 				best_epoch = None
 				try:
 					for fname in os.listdir(run_path):
-						m = re.match(r"stock_simulation_.*_epoch_(\d+)\.csv$", fname)
+						m = re.match(r"stock_simulation_(?:ensemble_)?.*_epoch_(\d+)\.csv$", fname)
 						if not m:
 							continue
 						epoch_idx = int(m.group(1))
@@ -1447,6 +1713,33 @@ def _run_as_script():
 			if key not in st.session_state:
 				st.session_state[key] = prefs.get(key, True)
 
+		# Ensemble method visibility controls (Sum, Norm, Rank)
+		method_suffix_map = {
+			"Sum": " (Sum)",
+			"Norm": " (Norm)",
+			"Rank": " (Rank)",
+		}
+		available_methods = [
+			m for m, suffix in method_suffix_map.items() if any(c.endswith(suffix) for c in sim_cols)
+		]
+		if available_methods:
+			for method in available_methods:
+				key = f"stock_sim_method_{method.lower()}"
+				if key not in st.session_state:
+					st.session_state[key] = prefs.get(key, True)
+
+			st.markdown("**Ensemble methods to show**")
+			method_cols = st.columns(len(available_methods))
+			for idx, method in enumerate(available_methods):
+				key = f"stock_sim_method_{method.lower()}"
+				with method_cols[idx]:
+					st.checkbox(
+						method,
+						key=key,
+						value=st.session_state[key],
+						on_change=lambda k=key: save_preference(k, st.session_state[k]),
+					)
+
 		if f"stock_sim_show_cdf" not in st.session_state:
 			st.session_state["stock_sim_show_cdf"] = prefs.get("stock_sim_show_cdf", True)
 
@@ -1478,8 +1771,19 @@ def _run_as_script():
 						on_change=lambda k=key: save_preference(k, st.session_state[k]),
 					)
 
+		def _method_enabled_for_col(col_name: str) -> bool:
+			for method_name, suffix in method_suffix_map.items():
+				if col_name.endswith(suffix):
+					key = f"stock_sim_method_{method_name.lower()}"
+					return st.session_state.get(key, True)
+			return True
+
 		# Final list of columns that are actually enabled for plotting.
-		selected_sim_cols = [c for c in sim_cols if st.session_state.get(f"stock_sim_col_{c}", False)]
+		selected_sim_cols = [
+			c
+			for c in sim_cols
+			if st.session_state.get(f"stock_sim_col_{c}", False) and _method_enabled_for_col(c)
+		]
 
 		# Bin width for histograms of day-over-day change ratios in the
 		# stock simulation curves. Expressed as a ratio (e.g. 0.01 == 1%).
@@ -1620,7 +1924,6 @@ def _run_as_script():
 			)
 
 		# Per-run stock simulation charts (one chart per run, stacked).
-		print(f"[stock_sim] total sim_dfs entries: {len(sim_dfs)}, numeric cols={all_top_cols}")
 
 		for p, dfs in sim_dfs:
 			base_title = _build_title(p, diff_keys)
@@ -1639,7 +1942,6 @@ def _run_as_script():
 			st.markdown(f"**{title}**")
 
 			if dfs is None or dfs.empty:
-				print(f"[stock_sim] empty dfs for title={title}, dir={p.get('_dir')}")
 				st.caption("No stock_simulation_*.csv data for this run.")
 				continue
 
@@ -1665,10 +1967,6 @@ def _run_as_script():
 				cols_here = [c for c in cols_here if c in selected_sim_cols]
 
 			if not cols_here:
-				print(
-					f"[stock_sim] no numeric/visible cols for title={title}, "
-					f"available={list(dfs.columns)}, selected={selected_sim_cols}"
-				)
 				if selected_sim_cols:
 					st.caption(
 						"None of the enabled stock simulation columns are present in this run's "
@@ -1715,102 +2013,85 @@ def _run_as_script():
 				st.session_state["stock_sim_show_cdf"] = prefs.get("stock_sim_show_cdf", True)
 
 			if show_cdf and date_col in dfs.columns and not dfs.empty and value_cols:
-				print(
-					f"[stock_sim] starting CDF calc for title={title}: date_col='{date_col}', "
-					f"rows={len(dfs)}, primary_cols={primary_cols}"
-				)
 				try:
 					dates = dfs[date_col].values
 					valid_dates = [int(d) for d in dates if d > 0]
 					min_d = min(valid_dates) if valid_dates else None
 					max_d = max(valid_dates) if valid_dates else None
 					if min_d is not None and max_d is not None:
-						print(f"[stock_sim] date range for CDF query: min={min_d} max={max_d}")
-
-					# Parse topNRecommends -> (date_id, top1 ticker)
-					topn_pairs: List[Tuple[int, int]] = []
-					top1_map: Dict[int, int] = {}
-					if "topNRecommends" in dfs.columns:
-						try:
-							for idx, val in enumerate(dfs["topNRecommends"].astype(str).values):
-								if idx >= len(dates):
-									continue
-								curr_date = int(dates[idx])
-								parts = [p for p in str(val).split("|") if p]
-								if parts:
-									try:
-										tid = int(parts[0])
-										topn_pairs.append((curr_date, tid))
-										top1_map[curr_date] = tid
-									except Exception:
+						# Parse topNRecommends -> (date_id, top1 ticker)
+						topn_pairs: List[Tuple[int, int]] = []
+						top1_map: Dict[int, int] = {}
+						if "topNRecommends" in dfs.columns:
+							try:
+								for idx, val in enumerate(dfs["topNRecommends"].astype(str).values):
+									if idx >= len(dates):
 										continue
-						except Exception as e_topn:
-							print(f"[stock_sim] error parsing topNRecommends: {e_topn}")
+									curr_date = int(dates[idx])
+									parts = [p for p in str(val).split("|") if p]
+									if parts:
+										try:
+											tid = int(parts[0])
+											topn_pairs.append((curr_date, tid))
+											top1_map[curr_date] = tid
+										except Exception:
+											continue
+							except Exception as e_topn:
+								print(f"[stock_sim] error parsing topNRecommends: {e_topn}")
 
-					# Prefer SQL rank ratios when available
-					rank_ratios: Dict[Tuple[int, int], float] = {}
-					if topn_pairs:
-						rank_ratios = _fetch_rank_ratios(topn_pairs)
-						print(f"[stock_sim] rank_ratios fetched: {len(rank_ratios)}; sample={list(rank_ratios.items())[:3]}")
-						market_deltas: Dict[int, List[float]] = {}
-					else:
-						market_deltas = _fetch_market_deltas(min_d, max_d) if (min_d is not None and max_d is not None) else {}
-						print(
-							f"[stock_sim] market_deltas keys count={len(market_deltas)}, "
-							f"sample_keys={sorted(list(market_deltas.keys()))[:5]}"
-						)
+						# Prefer SQL rank ratios when available
+						rank_ratios: Dict[Tuple[int, int], float] = {}
+						if topn_pairs:
+							rank_ratios = _fetch_rank_ratios(topn_pairs)
+							market_deltas: Dict[int, List[float]] = {}
+						else:
+							market_deltas = _fetch_market_deltas(min_d, max_d) if (min_d is not None and max_d is not None) else {}
 
-					ret_override = None
-					if "top1_daily_return" in dfs.columns:
-						try:
-							ret_override = dfs["top1_daily_return"].astype(float).values
-						except Exception:
-							ret_override = None
+						ret_override = None
+						if "top1_daily_return" in dfs.columns:
+							try:
+								ret_override = dfs["top1_daily_return"].astype(float).values
+							except Exception:
+								ret_override = None
 
-					for col in value_cols:
-						series = dfs[col].values
-						cdf_series: List[float] = []
+						for col in value_cols:
+							series = dfs[col].values
+							cdf_series: List[float] = []
 
-						for i in range(len(series)):
-							curr_date = int(dates[i])
+							for i in range(len(series)):
+								curr_date = int(dates[i])
 
-							# Use top1_daily_return when available; else portfolio day-over-day
-							if ret_override is not None:
-								ret = ret_override[i] if i < len(ret_override) else np.nan
-							elif i == 0:
-								ret = np.nan
-							else:
-								prev_val = series[i - 1]
-								curr_val = series[i]
-								ret = (curr_val / prev_val) - 1.0 if prev_val > 0 else np.nan
+								# Use top1_daily_return when available; else portfolio day-over-day
+								if ret_override is not None:
+									ret = ret_override[i] if i < len(ret_override) else np.nan
+								elif i == 0:
+									ret = np.nan
+								else:
+									prev_val = series[i - 1]
+									curr_val = series[i]
+									ret = (curr_val / prev_val) - 1.0 if prev_val > 0 else np.nan
 
-							rank_val = np.nan
-							top_tid = top1_map.get(curr_date)
-							if top_tid is not None and rank_ratios:
-								rank_val = rank_ratios.get((curr_date, top_tid), np.nan)
-							elif market_deltas:
-								m_vals_raw = market_deltas.get(curr_date)
-								if m_vals_raw and np.isfinite(ret):
-									m_vals = [float(x) for x in m_vals_raw if np.isfinite(x)] if hasattr(np, "isfinite") else [float(x) for x in m_vals_raw]
-									if m_vals:
-										count = sum(1 for x in m_vals if x < ret)
-										rank_val = count / float(len(m_vals)) if len(m_vals) > 0 else np.nan
+								rank_val = np.nan
+								top_tid = top1_map.get(curr_date)
+								if top_tid is not None and rank_ratios:
+									rank_val = rank_ratios.get((curr_date, top_tid), np.nan)
+								elif market_deltas:
+									m_vals_raw = market_deltas.get(curr_date)
+									if m_vals_raw and np.isfinite(ret):
+										m_vals = [float(x) for x in m_vals_raw if np.isfinite(x)] if hasattr(np, "isfinite") else [float(x) for x in m_vals_raw]
+										if m_vals:
+											count = sum(1 for x in m_vals if x < ret)
+											rank_val = count / float(len(m_vals)) if len(m_vals) > 0 else np.nan
 
-							cdf_series.append(rank_val)
+								cdf_series.append(rank_val)
 
-						cdf_name = f"CDF ({col})"
-						plot_df[cdf_name] = cdf_series
-						cdf_cols.append(cdf_name)
-						valid_count = int(np.isfinite(plot_df[cdf_name]).sum()) if hasattr(np, "isfinite") else len(cdf_series)
-						print(
-							f"[stock_sim] CDF series computed for col={col}: "
-							f"len={len(cdf_series)}, non_nan={valid_count}"
-						)
+							cdf_name = f"CDF ({col})"
+							plot_df[cdf_name] = cdf_series
+							cdf_cols.append(cdf_name)
 				except Exception as e:
 					print(f"[stock_sim] Error computing CDFs: {e}")
 
 			has_cdf = len(cdf_cols) > 0
-			print(f"[stock_sim] has_cdf={has_cdf} for title={title}, cdf_cols={cdf_cols}")
 
 			try:
 				import plotly.graph_objects as go
@@ -1877,7 +2158,7 @@ def _run_as_script():
 					# Even if no secondary data, keep the axis for consistent rendering style
 					fig.update_yaxes(title_text="", secondary_y=True)
 
-				st.plotly_chart(fig, width="stretch", use_container_width=True)
+				st.plotly_chart(fig, width="stretch")
 
 			except Exception as e:
 				print(f"[stock_sim] Plotly dual-axis error: {e}")
@@ -1932,7 +2213,6 @@ def _run_as_script():
 				all_vals.extend(other_values)
 
 				if not all_vals:
-					print(f"[stock_sim] no histogram values for title={title}")
 					continue
 
 				vals = _np.asarray(all_vals, dtype=float)
@@ -1940,7 +2220,6 @@ def _run_as_script():
 				min_val = float(_np.min(vals))
 
 				if hist_bin_width <= 0.0:
-					print(f"[stock_sim] invalid hist_bin_width={hist_bin_width} for title={title}")
 					continue
 
 				# Build bin edges using the configured window size.
@@ -2315,25 +2594,21 @@ def _run_as_script():
 					st.markdown(f"**Simulation set {sim_set}, epoch {epoch}**")
 					_plot_lines(plot_df_epoch, x_enc_epoch, height=260, y_ref=1000.0)
 
-	# Download (from the filtered view, without helper columns)
+	# Download (from the (standardized) grid DataFrame, without helper columns)
 	csv_buf = io.StringIO()
-	fdf.to_csv(csv_buf, index=False)
+	df.to_csv(csv_buf, index=False)
 	st.download_button("Download CSV", data=csv_buf.getvalue(), file_name="run_params_comparison.csv", mime="text/csv")
 
-	# Determine which timestamps to show in the viewer: prefer current grid
-	# selection, then fall back to last_grid_selection, then sidebar-based
-	# selection.
-	runs_for_view: List[str] = []
-	if selected_current:
-		runs_for_view = list(dict.fromkeys(str(r) for r in selected_current))
-	else:
-		persisted = st.session_state.get("last_grid_selection", []) or []
-		if persisted:
-			runs_for_view = list(dict.fromkeys(str(r) for r in persisted))
-		else:
-			runs_for_view = sorted(list(selected_set))
+	# Determine which timestamps to show in the viewer: ONLY use explicit grid selection.
+	# We no longer fall back to all sidebar runs or persistent state from previous runs
+	# if nothing is currently selected, as requested.
+	runs_for_view: List[str] = list(dict.fromkeys(str(r) for r in selected_runs_from_grid))
 
-	# Render the viewer panel at the bottom of the main page
+	# Provide a button under the grid to explicitly populate the graphs
+	if st.button("Populate Graphs", key="crv_populate_graphs"):
+		st.session_state["crv_graphs_populated"] = True
+
+	# Render the viewer panel at the bottom of the main page (only after button press)
 	_viewer_panel(runs_for_view)
 
 

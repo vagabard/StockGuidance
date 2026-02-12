@@ -45,11 +45,19 @@ def save_preference(key: str, value: Any) -> None:
 def _is_timestamp_dir(name: str) -> bool:
 	"""Return ``True`` if *name* looks like a YYYYMMDD_HHMMSS timestamp.
 
-	This helper is used by :func:`scan_runs` and therefore shared between the
-	different viewers.
+	Supports:
+	  - Legacy: 20250101_120000
+	  - New: run_single_20250101_120000_00
 	"""
-
-	return re.fullmatch(r"\d{8}_\d{6}", name or "") is not None
+	if not name:
+		return False
+	if re.fullmatch(r"\d{8}_\d{6}", name):
+		return True
+	if re.fullmatch(r"run_single_\d{8}_\d{6}_\d{2,}", name):
+		return True
+	if re.fullmatch(r"run_single_\d{8}_\d{6}_\d", name):
+		return True
+	return False
 
 
 def has_any_simulation_files(path: str) -> bool:
@@ -66,6 +74,9 @@ def has_any_simulation_files(path: str) -> bool:
 		if re.match(r"stock_simulation_(?:ensemble_)?\d+(?:days|percent)?(?:_epoch_\d+)?\.csv$", n):
 			return True
 		if n.startswith("recommendations-") and n.endswith(".txt"):
+			return True
+		# Also consider it having simulation files if it has saved scores that can be used to generate them
+		if re.match(r"stock_scores_epoch_\d+_date_\d+_net_\d+\.csv$", n):
 			return True
 	return False
 
@@ -143,7 +154,7 @@ def parse_run_parameters(params_path: str) -> Dict[str, Any]:
 
 
 def _params_from_single_run_json(ts_path: str) -> Dict[str, Any]:
-	"""Load parameters for a timestamp directory via ``single_run_0.json``.
+	"""Load parameters for a timestamp directory via ``single_run_*.json``.
 
 	Newer training runs persist their configuration as a JSON pair of
 	``FamilyRun`` + ``SingleRun`` (see :mod:`trainer.state.single_run`).
@@ -152,8 +163,19 @@ def _params_from_single_run_json(ts_path: str) -> Dict[str, Any]:
 	``compare_runs_viewer`` and friends can consume.
 	"""
 
-	json_path = os.path.join(ts_path, "single_run_0.json")
-	if not os.path.exists(json_path):
+	# Look for any single_run_*.json file (typically single_run_0.json or
+	# matching the combo index).
+	json_path = None
+	try:
+		if os.path.isdir(ts_path):
+			for f in os.listdir(ts_path):
+				if f.startswith("single_run_") and f.endswith(".json"):
+					json_path = os.path.join(ts_path, f)
+					break
+	except Exception:
+		pass
+
+	if not json_path or not os.path.exists(json_path):
 		return {}
 
 	try:
@@ -163,16 +185,20 @@ def _params_from_single_run_json(ts_path: str) -> Dict[str, Any]:
 
 		single_run = SingleRun.load(json_path)
 	except Exception as e:  # pragma: no cover - defensive
-		return {"_parse_error": f"single_run_0.json: {e}"}
+		return {"_parse_error": f"single_run_*.json: {e}"}
 
-	params: Dict[str, Any] = {"run_timestamp": getattr(single_run, "timestamp_id", None),
-	                          "timestamp_id": getattr(single_run, "timestamp_id", None),
-	                          "day_change_centered": getattr(single_run, "day_change_centered", None),
-	                          "prior_days": getattr(single_run, "prior_days", None),
-	                          "mlp_layers": getattr(single_run, "mlp_layers", None),
-	                          "lr": getattr(single_run, "lr", None),
-	                          "activation": getattr(single_run, "activation", None),
-	                          "final_activation": getattr(single_run, "final_activation", None)}
+	params: Dict[str, Any] = {
+		"run_timestamp": getattr(single_run, "timestamp_id", None),
+		"timestamp_id": getattr(single_run, "timestamp_id", None),
+		"day_change_centered": getattr(single_run, "day_change_centered", None),
+		"prior_days": getattr(single_run, "prior_days", None),
+		"mlp_layers": getattr(single_run, "mlp_layers", None),
+		"lr": getattr(single_run, "lr", None),
+		"activation": getattr(single_run, "activation", None),
+		"final_activation": getattr(single_run, "final_activation", None),
+		"optimizer": getattr(single_run, "optimizer", None),
+		"learning_rate_adjustment_parameter": getattr(single_run, "learning_rate_adjustment_parameter", None),
+	}
 
 	# Core identifying fields
 	include_features = getattr(single_run, "include_features", None)
@@ -181,7 +207,7 @@ def _params_from_single_run_json(ts_path: str) -> Dict[str, Any]:
 
 	# Attach FamilyRun‑level information that is relevant for grouping and
 	# for high‑level training configuration.
-	family_run = getattr(single_run, "single_run", None)
+	family_run = getattr(single_run, "family_run", None)
 	if family_run is not None:
 		for name in [
 			"precision",
@@ -196,6 +222,26 @@ def _params_from_single_run_json(ts_path: str) -> Dict[str, Any]:
 			"run_repeats",
 			"neural_network_type",
 			"hidden_layer_size",
+			"batch_of_instances_to_train_on_at_once",
+			"shuffle_instances_in_training_set",
+			"number_of_GPU_workers",
+			"pin_GPU_memory",
+			"layer_types",
+			"random_seed_splits",
+			"use_ranking_error_loss",
+			"rank_temperature",
+			"enable_rank_error_loss_in_training",
+			"rank_error_lower_bound",
+			"rank_error_upper_bound",
+			"activation_list",
+			"final_activation_list",
+			"optimizer_list",
+			"trading_interval",
+			"ensemble_interval",
+			"architecture",
+			"hidden_layers",
+			"batch_size",
+			"epochs",
 		]:
 			if hasattr(family_run, name):
 				params[name] = getattr(family_run, name)
@@ -657,7 +703,7 @@ def plot_lines(
 		# NOTE: Streamlit auto-generates element IDs for Plotly charts based on the
 		# figure + params. When many similar charts are rendered (e.g., in loops or
 		# placeholder-data scenarios), IDs can collide unless we pass an explicit key.
-		st.plotly_chart(fig, use_container_width=True, key=key)
+		st.plotly_chart(fig, width='stretch', key=key)
 	except Exception as e:
 		print(f"Plotly error in plot_lines: {e}")
 		# As an ultra‑simple fallback, show the data table so that the user at
@@ -675,6 +721,153 @@ def plot_lines(
 				# Last‑ditch: print to stderr.
 				#debug(f"plot_lines fallback: unable to display plot or dataframe: {e2}")
 
+
+
+def render_run_grid(
+	*,
+	df: Any,
+	key_prefix: str,
+	prefs: Dict[str, Any],
+	verbose_col_key: str = "display_extending_info",
+	default_visible_cols: List[str] | None = None,
+	return_all_if_none: bool = True,
+) -> List[str]:
+	"""Render a standardized run selection grid using ``st.dataframe``.
+
+	This helper centralizes the logic for:
+	1. Displaying a "display extending info" checkbox.
+	2. Handling column visibility via a multiselect.
+	3. Applying a substring filter.
+	4. Rendering the dataframe with multi-row selection enabled.
+	5. Returning the list of selected "run" identifiers.
+
+	Parameters
+	----------
+	df:
+		The pandas DataFrame to display. Must contain a "run" column.
+	key_prefix:
+		Prefix for session state and preference keys (e.g. "crv" or "crsv").
+	prefs:
+		The loaded preferences dictionary.
+	verbose_col_key:
+		The key used for the "display extending info" checkbox in session state.
+	default_visible_cols:
+		The set of columns to show by default if no preference is saved.
+	return_all_if_none:
+		If True, return all visible runs when nothing is selected in the grid.
+		If False, return an empty list when nothing is selected.
+	"""
+
+	try:
+		import streamlit as st
+	except ImportError:
+		return []
+
+	# 1. "Display extending info" checkbox
+	if verbose_col_key not in st.session_state:
+		st.session_state[verbose_col_key] = prefs.get(verbose_col_key, False)
+
+	show_extended = st.checkbox(
+		"Display extending info",
+		value=st.session_state[verbose_col_key],
+		key=verbose_col_key,
+		on_change=lambda: save_preference(verbose_col_key, st.session_state[verbose_col_key]),
+	)
+
+	# 2. Substring filter
+	search_key = f"{key_prefix}_search_text"
+	if search_key not in st.session_state:
+		st.session_state[search_key] = prefs.get(search_key, "")
+
+	search = st.text_input(
+		"Substring filter (any column)",
+		value=st.session_state[search_key],
+		key=search_key,
+		on_change=lambda: save_preference(search_key, st.session_state[search_key]),
+	)
+
+	fdf = df.copy()
+	if search:
+		s = str(search).lower()
+		mask = fdf.astype(str).agg(" ".join, axis=1).str.lower().str.contains(s)
+		fdf = fdf[mask]
+
+	# Reset index so selection indices match fdf
+	fdf = fdf.reset_index(drop=True)
+
+	# 3. Column visibility
+	all_cols = list(fdf.columns)
+	vis_key = f"{key_prefix}_visible_cols"
+
+	# If NOT showing extended info, we might want to filter out some columns
+	# by default or based on some convention. For now, we just use the stored preference.
+	if vis_key not in st.session_state:
+		if default_visible_cols:
+			initial_vis = [c for c in default_visible_cols if c in all_cols]
+		else:
+			initial_vis = all_cols
+		st.session_state[vis_key] = prefs.get(vis_key, initial_vis)
+
+	vis_default = [c for c in st.session_state[vis_key] if c in all_cols]
+	if not vis_default:
+		vis_default = all_cols
+
+	visible_cols = st.multiselect(
+		"Visible columns",
+		options=all_cols,
+		default=vis_default,
+		key=vis_key,
+		on_change=lambda: save_preference(vis_key, st.session_state[vis_key]),
+	)
+
+	grid_cols = [c for c in visible_cols if c in fdf.columns]
+	if not grid_cols:
+		grid_cols = all_cols
+
+	# Ensure identifying columns are present for selection mapping
+	# and specific user-requested columns like activation are shown if they exist.
+	important_cols = ["run", "activation", "final_activation", "optimizer", "optimizer_list"]
+	for col in reversed(important_cols):
+		if col in fdf.columns and col not in grid_cols:
+			grid_cols = [col] + grid_cols
+
+	if "run" not in grid_cols and "run" in fdf.columns:
+		grid_cols = ["run"] + grid_cols
+
+	# 4. Render Grid
+	dataframe_viewer_return = st.dataframe(
+		fdf[grid_cols],
+		on_select="rerun",
+		width="stretch",
+		selection_mode="multi-row",
+	)
+
+	# 5. Extract Selection
+	try:
+		selection = (dataframe_viewer_return or {}).get("selection") or {}
+		selected_rows = selection.get("rows") or []
+	except Exception:
+		selected_rows = []
+
+	if selected_rows:
+		try:
+			selected_runs = [
+				str(fdf.loc[i, "run"])
+				for i in selected_rows
+				if i in fdf.index and "run" in fdf.columns
+			]
+		except Exception:
+			selected_runs = []
+	elif return_all_if_none:
+		# Fallback: nothing selected in grid, return all visible runs
+		selected_runs = [str(r) for r in fdf.get("run", [])]
+	else:
+		selected_runs = []
+
+	# Persist last selection
+	st.session_state[f"{key_prefix}_last_selection"] = selected_runs
+
+	return selected_runs
 
 
 def render_common_params(

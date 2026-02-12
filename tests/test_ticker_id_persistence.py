@@ -53,7 +53,42 @@ def test_stock_recommender_uses_ticker_ids_mapping(tmp_path):
     with open(manifest_path, "w", encoding="utf-8") as f:
         json.dump(manifest, f)
 
-    rec = StockRecommenderFromModel(str(run_dir), device="cpu")
+    # Create a dummy SingleRun
+    from trainer.state.single_run import SingleRun
+    from trainer.state.family_run import FamilyRun
+    from trainer.file_structure_single_run_handler import FileStructureSingleRunHandler
+
+    fr = FamilyRun.from_dict({
+        "initial_run_id": "test",
+        "day_change_centered_list": ["zero"],
+        "prior_days_list": [0],
+        "mlp_layers_list": [2],
+        "lr_list": [0.001],
+        "activation_list": ["relu"],
+        "optimizer_list": ["adam"],
+        "ticker_ids": ticker_ids,
+        "total_epochs_to_train": 1,
+        "neural_network_type": "mlp",
+        "hidden_layer_size": [8],
+    })
+    single_run = SingleRun(
+        timestamp_id="test_ts",
+        family_run=fr,
+        day_change_centered="zero",
+        prior_days=0,
+        mlp_layers=2,
+        lr=0.001,
+        activation="relu",
+        final_activation="",
+        file_structure=FileStructureSingleRunHandler.from_dict({
+            "run_directory": str(run_dir),
+            "suffix": "test"
+        }),
+        ticker_ids=ticker_ids
+    )
+    single_run.save(str(run_dir / "single_run_epoch.json"))
+
+    rec = StockRecommenderFromModel(single_run, str(run_dir), device="cpu")
 
     # Mock transactions for these ticker_ids
     dummy_transactions = np.ones(output_size, dtype=np.float32) * 1000
@@ -131,7 +166,34 @@ def test_stock_recommender_db_fetch_uses_ticker_ids(tmp_path, monkeypatch):
 
     monkeypatch.setattr(rec_mod, "get_connection", lambda **kwargs: MockConn())
 
-    rec = StockRecommenderFromModel(str(run_dir), device="cpu")
+    # Create a dummy SingleRun
+    from trainer.state.single_run import SingleRun
+    from trainer.state.family_run import FamilyRun
+    from trainer.file_structure_single_run_handler import FileStructureSingleRunHandler
+
+    fr = FamilyRun.from_dict({
+        "initial_run_id": "test",
+        "ticker_ids": ticker_ids,
+        "neural_network_type": "mlp",
+        "hidden_layer_size": [8],
+    })
+    single_run = SingleRun(
+        timestamp_id="test_ts",
+        family_run=fr,
+        day_change_centered="zero",
+        prior_days=0,
+        mlp_layers=2,
+        lr=0.001,
+        activation="relu",
+        final_activation="",
+        file_structure=FileStructureSingleRunHandler.from_dict({
+            "run_directory": str(run_dir),
+            "suffix": "test"
+        }),
+        ticker_ids=ticker_ids
+    )
+
+    rec = StockRecommenderFromModel(single_run, str(run_dir), device="cpu")
 
     x = np.zeros(input_size, dtype=np.float32)
     # Ticker 600 should be recommended because it has enough transactions.

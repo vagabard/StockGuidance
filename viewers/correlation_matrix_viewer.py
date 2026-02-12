@@ -9,11 +9,36 @@ def main():
     st.set_page_config(page_title="Ticker Correlation Matrix Viewer", layout="wide")
     st.title("Ticker Correlation Matrix Viewer")
 
-    file_path = st.sidebar.text_input("File Path (CSV or Parquet)", "ticker_correlations.parquet" if Path("ticker_correlations.parquet").exists() else "ticker_correlations.csv")
+    # File selection
+    st.sidebar.header("Data Selection")
 
-    if not Path(file_path).exists():
+    # List files in the current directory
+    available_files = sorted([f.name for f in Path(".").glob("*") if f.suffix in [".csv", ".parquet"]])
+
+    # Try to find a default file
+    default_files = ["ticker_correlations.parquet", "ticker_correlations.csv"]
+    default_index = 0
+    for i, f in enumerate(available_files):
+        if f in default_files:
+            default_index = i
+            break
+
+    selected_file = st.sidebar.selectbox("Select local file", available_files, index=default_index if available_files else 0)
+
+    # Also allow manual path entry
+    file_path = st.sidebar.text_input("Or enter custom File Path", selected_file if selected_file else "")
+
+    if not file_path or not Path(file_path).exists():
         st.error(f"File not found: {file_path}")
         return
+
+    # Extract dates from filename if possible
+    import re
+    date_match = re.search(r'_(\d+)_(\d+)\.', Path(file_path).name)
+    if date_match:
+        start_date, end_date = date_match.groups()
+    else:
+        start_date, end_date = None, None
 
     @st.cache_data
     def load_data(path):
@@ -77,7 +102,10 @@ def main():
     upper_tri = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
 
     # Stack to get pairs
-    pairs = upper_tri.stack().reset_index()
+    # Use name= argument to avoid conflicts if index/columns have same name
+    stacked = upper_tri.stack()
+    stacked.index.names = [None, None]
+    pairs = stacked.reset_index()
     pairs.columns = ['Ticker A', 'Ticker B', 'Correlation']
 
     # Filter by absolute threshold
@@ -91,12 +119,14 @@ def main():
         col1, col2 = st.columns(2)
         with col1:
             if st.button("Save to CSV"):
-                output_name = f"high_correlation_{threshold}.csv"
+                date_suffix = f"_{start_date}_{end_date}" if start_date and end_date else ""
+                output_name = f"high_correlation{date_suffix}_{threshold}.csv"
                 filtered_pairs.to_csv(output_name, index=False)
                 st.success(f"Saved to {output_name}")
         with col2:
             if st.button("Save to Parquet"):
-                output_name = f"high_correlation_{threshold}.parquet"
+                date_suffix = f"_{start_date}_{end_date}" if start_date and end_date else ""
+                output_name = f"high_correlation{date_suffix}_{threshold}.parquet"
                 filtered_pairs.to_parquet(output_name, index=False)
                 st.success(f"Saved to {output_name}")
 
@@ -177,7 +207,8 @@ def main():
             st.dataframe(classes_df)
 
             if st.button("Save Classes to CSV"):
-                output_name = f"correlation_classes_{threshold}.csv"
+                date_suffix = f"_{start_date}_{end_date}" if start_date and end_date else ""
+                output_name = f"correlation_classes{date_suffix}_{threshold}.csv"
                 classes_df.to_csv(output_name, index=False)
                 st.success(f"Saved to {output_name}")
         else:

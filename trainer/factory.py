@@ -24,8 +24,11 @@ def create_model_and_optimizer(
     device: torch.device,
     lr: float,
     to_device: bool = True,
+	prior_days: int = 0,
+	optimizer_name: str = "adam",
+	final_activation: Optional[str] = None,
 ) -> tuple[torch.nn.Module, optim.Optimizer, torch.amp.GradScaler, bool, Optional[torch.dtype]]:
-	"""Instantiate model via make_model and create Adam optimizer and AMP scaler."""
+	"""Instantiate model via make_model and create optimizer and AMP scaler."""
 	if make_model is None:
 		raise RuntimeError("models.make_model is unavailable")
 
@@ -36,10 +39,22 @@ def create_model_and_optimizer(
 		hidden_layers=family_run.hidden_layer_size,
 		num_layers=int(num_layers),
 		activation=str(activation),
+		final_activation=final_activation,
+		layer_types=family_run.layer_types,
+		sequence_length=int(prior_days) + 1,
 	)
 	if to_device:
 		model = model.to(device)
-	optimizer = optim.Adam(model.parameters(), lr=float(lr))  # type: ignore[attr-defined]
+
+	optimizer_name = optimizer_name.lower()
+	if optimizer_name == "adam":
+		optimizer = optim.Adam(model.parameters(), lr=float(lr), fused=True)  # type: ignore[attr-defined]
+	elif optimizer_name == "adamw":
+		optimizer = optim.AdamW(model.parameters(), lr=float(lr), fused=True)  # type: ignore[attr-defined]
+	elif optimizer_name == "sgd":
+		optimizer = optim.SGD(model.parameters(), lr=float(lr), fused=True)
+	else:
+		raise ValueError(f"Unsupported optimizer: {optimizer_name}")
 
 	requested_precision = (family_run.precision or "auto").lower()
 	use_amp = (device.type == "cuda") and (requested_precision in ("auto", "fp16", "bf16"))  # type: ignore[union-attr]

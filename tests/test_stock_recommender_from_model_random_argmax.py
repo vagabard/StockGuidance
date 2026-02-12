@@ -69,8 +69,30 @@ def test_stock_recommender_random_inputs_vary_argmax(tmp_path):
     with open(manifest_path, "w", encoding="utf-8") as f:
         json.dump(manifest, f)
 
+    # Create a minimal SingleRun for the new StockRecommenderFromModel API
+    from trainer.state.single_run import SingleRun
+    from trainer.state.family_run import FamilyRun
+    from trainer.file_structure_single_run_handler import FileStructureSingleRunHandler
+
+    fr = FamilyRun.from_dict({
+        "initial_run_id": "test",
+        "neural_network_type": arch,
+        "hidden_layer_size": hidden_layers,
+    })
+    single_run = SingleRun(
+        timestamp_id="test",
+        family_run=fr,
+        day_change_centered="zero",
+        prior_days=0,
+        mlp_layers=mlp_layers,
+        lr=0.001,
+        activation=activation,
+        final_activation="",
+        file_structure=FileStructureSingleRunHandler.from_dict({"run_directory": str(run_dir), "suffix": ""}),
+    )
+
     # Instantiate the recommender pointing at the run directory
-    rec = StockRecommenderFromModel(str(run_dir), device="cpu")
+    rec = StockRecommenderFromModel(single_run, str(run_dir), device="cpu")
     assert rec.input_size == input_size
 
     # Generate several random inputs and record the top-1 output id each time

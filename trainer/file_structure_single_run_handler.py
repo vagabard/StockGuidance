@@ -10,6 +10,7 @@ if TYPE_CHECKING:  # pragma: no cover - import for type checkers only
 	from trainer.state.family_run import FamilyRun
 
 SUBDIRECTORY_OF_SOURCE = "data"
+RUN_SINGLE_PREFIX = "run_single_"
 class FileStructureSingleRunHandler:
 	"""Encapsulate per-repeat run directory and core file paths.
 
@@ -47,7 +48,9 @@ class FileStructureSingleRunHandler:
 		# the module root directory. This keeps behaviour consistent with
 		# :meth:`from_args` while avoiding ``None`` dereferences during
 		# construction.
-		family_root = self.parent_file_structure.family_dir  # type: ignore[assignment]
+		family_root = None
+		if self.parent_file_structure:
+			family_root = self.parent_file_structure.family_dir  # type: ignore[assignment]
 		self.wrapper_path = self._create_wrapper_path(family_root)
 		if self.run_group_dir :
 			self.metrics_file = os.path.join(self.run_group_dir, f"{self.suffix}_training_metrics.csv")
@@ -124,7 +127,8 @@ class FileStructureSingleRunHandler:
 		os.makedirs(self.run_group_dir, exist_ok=True)
 
 	def set_from_timestamp(self, timestamp: str) -> None:
-		self.run_group_dir = os.path.join(self.parent_file_structure.family_dir if self.parent_file_structure.family_dir else "", timestamp)
+		family_dir = self.parent_file_structure.family_dir if (self.parent_file_structure and self.parent_file_structure.family_dir) else ""
+		self.run_group_dir = os.path.join(family_dir, f"{RUN_SINGLE_PREFIX}{timestamp}")
 		metrics_file_header = self.suffix
 		if not metrics_file_header:
 			metrics_file_header = ""
@@ -178,12 +182,22 @@ class FileStructureSingleRunHandler:
 		else:
 			parent_file_structure = parent_raw
 		inst = cls(parent_file_structure=parent_file_structure)
+		# Restore simple fields saved by to_dict/older payloads
 		inst.metrics_file = data.get("metrics_file")
 		inst.suffix = data.get("suffix")
 		inst.ckpt_model = data.get("ckpt_model")
 		inst.ckpt_optim = data.get("ckpt_optim")
 		inst.wrapper_path = data.get("wrapper_path")
 		inst.run_directory = data.get("run_directory")
+		# IMPORTANT: restore run_group_dir so downstream writers know where to persist artifacts
+		run_group_dir = data.get("run_group_dir")
+		if run_group_dir:
+			inst.run_group_dir = str(run_group_dir)
+			# Best effort: ensure the directory exists since many callers assume it
+			try:
+				os.makedirs(inst.run_group_dir, exist_ok=True)
+			except Exception:
+				pass
 		# ``metric_handler`` remains ``None``; instantiating it would require
 		# I/O and is better left to callers that need it.
 		return inst

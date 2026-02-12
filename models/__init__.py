@@ -7,6 +7,26 @@ from .convolution_transformer import ConvolutionAndTransformerFeedForwareNet
 from .multi_layer_mlp import MultiLayerLinearNet
 
 
+class SigmoidRange(nn.Module):
+	"""
+	Activation function based on Sigmoid that maps inputs to the range [-1, 1].
+	Formula: 2 * sigmoid(x) - 1
+	"""
+	def __init__(self):
+		super().__init__()
+
+	def forward(self, x: torch.Tensor) -> torch.Tensor:
+		return 2.0 * torch.sigmoid(x) - 1.0
+
+
+def xavier_init_weights(m: nn.Module):
+	"""Apply Xavier uniform initialization to linear and convolutional layers."""
+	if isinstance(m, (nn.Linear, nn.Conv1d)):
+		nn.init.xavier_uniform_(m.weight)
+		if m.bias is not None:
+			nn.init.constant_(m.bias, 0)
+
+
 import json
 import os
 _ACT_ALIASES = {
@@ -14,6 +34,8 @@ _ACT_ALIASES = {
 	"gelu": (nn.GELU, ()),
 	"tanh": (nn.Tanh, ()),
 	"sigmoid": (nn.Sigmoid, ()),
+	"sigmoid_range": (SigmoidRange, ()),
+	"sigmoid_ranged": (SigmoidRange, ()),
 	"silu": (nn.SiLU, ()),
 	"swish": (nn.SiLU, ()),  # alias
 	"leaky_relu": (nn.LeakyReLU, (0.01,)),
@@ -56,6 +78,8 @@ def make_model(
 	activation:str|None=None,
 	final_activation:str|None =None,
 	num_layers: int = 3,
+	layer_types: Optional[List[str]] = None,
+	sequence_length: int = 1,
 ):
 	if isinstance(hidden_layers, int):
 		hidden_layers = [hidden_layers]
@@ -67,7 +91,7 @@ def make_model(
 		# Resolve activation name/callable to a factory and pass through
 		act_factory = resolve_activation_factory(activation)
 		final_activation = resolve_activation_factory(final_activation)
-		return MultiLayerLinearNet(input_size, output_size, hidden_layers, act_factory,final_activation, num_layers=num_layers)
+		return MultiLayerLinearNet(input_size, output_size, hidden_layers, act_factory, final_activation, num_layers=num_layers, layer_types=layer_types, sequence_length=sequence_length)
 	raise ValueError(f"Unknown architecture '{arch}'. Choices: conv_trans, mlp")
 
 
@@ -94,8 +118,11 @@ def load_model_from_manifest(manifest_path: str, map_location: str = "cpu") -> t
 	mlp_layers = int(m.get("mlp_layers", 3))
 	activation = m.get("activation", "relu")
 	final_activation = m.get("final_activation", "")
+	layer_types = m.get("layer_types")
+	prior_days = int(m.get("prior_days", 0))
+	sequence_length = m.get("sequence_length", prior_days + 1)
 
-	model = make_model(arch, input_size, output_size, hidden_layers, activation=activation, final_activation=final_activation, num_layers=mlp_layers)
+	model = make_model(arch, input_size, output_size, hidden_layers, activation=activation, final_activation=final_activation, num_layers=mlp_layers, layer_types=layer_types, sequence_length=sequence_length)
 	device = torch.device(map_location)
 
 	base_dir = os.path.dirname(os.path.abspath(manifest_path))

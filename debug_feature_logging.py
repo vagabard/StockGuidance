@@ -52,6 +52,9 @@ def dump_feature_window(
 	  - change_in_price_over_day if available among features
 	  - training label for the chosen ticker at the current day (d)
 	"""
+	if not env_feature_debug_enabled():
+		return
+
 	try:
 		# Collect output lines to mirror to stdout and a log file
 		lines: list[str] = []

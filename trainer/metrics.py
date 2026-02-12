@@ -8,7 +8,6 @@ import torch
 from trainer.torch_interface.compat import  nn
 from .loss_functions.losses import mse_restricted, rank_range_displacement
 from trainer.loss_functions.ranking import batch_positions_from_prediction_and_labels, ranking_error_from_positions
-from trainer.util.utils import tensorize_and_sanitize
 
 
 def eval_epoch(
@@ -36,7 +35,14 @@ def eval_epoch(
 	with torch.no_grad():
 		with amp_cm:
 			for xb, yb in batch_iter:
-				xb, yb = tensorize_and_sanitize(xb, yb, device=device, non_blocking=pin_memory)
+				if not isinstance(xb, torch.Tensor):
+					xb = torch.as_tensor(xb, dtype=torch.float32, device=device)
+				else:
+					xb = xb.to(device=device, dtype=torch.float32, non_blocking=pin_memory)
+				if not isinstance(yb, torch.Tensor):
+					yb = torch.as_tensor(yb, dtype=torch.float32, device=device)
+				else:
+					yb = yb.to(device=device, dtype=torch.float32, non_blocking=pin_memory)
 				# print(xb.shape)
 				# print(yb.shape)
 				pred = model(xb)
@@ -62,6 +68,11 @@ def eval_epoch(
 				top10_sum += top10.item() * bs
 				rde_sum += (rde.item() if compute_rank_disp else 0.0) * bs
 				#rank_err_sum += batch_rank_err * bs
+
+				# Explicitly clear tensors to help GC
+				del xb, yb, pred, label_to_pred_dtype, mse, top10, rde
+				if compute_rank_err:
+					del pos_list
 	denom = max(1, total)
 	rde_avg = rde_sum / denom
 	#rank_err_avg = rank_err_sum / denom

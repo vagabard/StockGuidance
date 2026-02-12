@@ -100,7 +100,7 @@ ORDER BY ddsd.date_id ASC, ddsd.ticker_id ASC	"""
 #     ORDER BY ddsd.date_id
 # ) AS next_day_change_in_price
 
-def SELECT_VARIABLE_DATA_SQL(day_change_centered: str, current_day_change = False, volume_ratio = False, vwap_ratio = False, tranaction_ratio = False, only_use_tickers_without_missing_dates = True, start_date_id:Optional[int] = -1, end_date_id:Optional[int] = -1, ticker_pool_end_date_id:Optional[int] = None) -> str:
+def SELECT_VARIABLE_DATA_SQL(day_change_centered: str, current_day_change = False, volume_ratio = False, vwap_ratio = False, tranaction_ratio = False, only_use_tickers_without_missing_dates = True, start_date_id:Optional[int] = -1, end_date_id:Optional[int] = -1, ticker_pool_start_date_id:Optional[int] = None, ticker_pool_end_date_id:Optional[int] = None) -> str:
 	"""Build SQL that selects only close ratio as the single feature plus the chosen label.
 
 	day_change_centered:
@@ -125,6 +125,8 @@ def SELECT_VARIABLE_DATA_SQL(day_change_centered: str, current_day_change = Fals
 		additional_fields_to_select = "ddsd.zero_center_raise1_lower_neg1"
 	elif day_change_centered == "top_100_binary_negpos":
 		additional_fields_to_select = "ddsd.zero_center_top100_1_other_neg1"
+	elif day_change_centered == "stock_change_ratio_ranked":
+		additional_fields_to_select = "ddsd.next_day_change_in_price"
 	else:
 		additional_fields_to_select = "ddsd.next_day_change_in_price"
 
@@ -149,9 +151,10 @@ FROM daily_delta_stock_data ddsd """
 
 	# Limit to tickers present on both start and end date
 	ticker_pool_end = ticker_pool_end_date_id if ticker_pool_end_date_id is not None else end_date_id
+	ticker_pool_start = ticker_pool_start_date_id if ticker_pool_start_date_id is not None else start_date_id
 	full_query += f"""
 	INNER JOIN (
-	""" + create_ticker_id_selection_sql(only_use_tickers_without_missing_dates, start_date_id, ticker_pool_end) + f"""
+	""" + create_ticker_id_selection_sql(only_use_tickers_without_missing_dates, ticker_pool_start, ticker_pool_end) + f"""
 	) AS boundary_tickers ON ddsd.ticker_id = boundary_tickers.ticker_id """
 
 	if start_date_id is not None or end_date_id is not None :
@@ -167,7 +170,7 @@ FROM daily_delta_stock_data ddsd """
 """
 	return full_query
 
-def create_ticker_id_selection_sql(only_use_tickers_without_missing_dates = True, start_date_id:Optional[int] = "", end_date_id:Optional[int] = "") -> str:
+def create_ticker_id_selection_sql(only_use_tickers_without_missing_dates = True, start_date_id:Optional[int] = "", end_date_id:Optional[int] = "", only_use_tickers_with_common_stock_type:bool = True) -> str:
 
 	# Limit to tickers present on both start and end date
 	ticker_id_selection_query = f"""
@@ -190,7 +193,8 @@ def create_ticker_id_selection_sql(only_use_tickers_without_missing_dates = True
 	"""
 	if only_use_tickers_without_missing_dates:
 		ticker_id_selection_query += f"""AND ts.missing_dates = FALSE """
-	print ("Ticker_id selection query: ", ticker_id_selection_query)
+	if only_use_tickers_with_common_stock_type:
+		ticker_id_selection_query += f"""AND ts.type = 'CS' """
 	return ticker_id_selection_query
 
 
@@ -345,6 +349,7 @@ def fetch_grouped_by_date(
 	day_change_centered: str = "one",
 	start_date_id: Optional[int] = None,
 	end_date_id: Optional[int] = None,
+	ticker_pool_start_date_id: Optional[int] = None,
 	ticker_pool_end_date_id: Optional[int] = None,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, List[int]]:
 	"""Fetch rows and pack features into a fixed layout per date.
@@ -436,11 +441,12 @@ def fetch_grouped_by_date(
 			True,
 			start_date_id,
 			end_date_id,
+			ticker_pool_start_date_id=ticker_pool_start_date_id,
 			ticker_pool_end_date_id=ticker_pool_end_date_id,
+
 		)
 		if limit is not None and limit > 0:
 			sql = f"{sql}\nLIMIT {int(limit)}"
-		print("Executing SQL:", sql)
 		cur.execute(sql)
 
 		# Collect rows grouped by date while tracking max ticker_id
@@ -519,6 +525,24 @@ def fetch_grouped_by_date(
 						)
 						Y[d_idx, ticker_id - 1] = label_safe
 
+		if day_change_centered == "stock_change_ratio_ranked":
+			# For each date (row in Y), rank the non-NaN values and normalize to 0-1
+			# smallest/most negative change -> 0, largest positive change -> 1
+			for d_idx in range(Y.shape[0]):
+				row = Y[d_idx]
+				mask = ~np.isnan(row)
+				if np.any(mask):
+					valid_values = row[mask]
+					# scipy.stats.rankdata would be nice but let's stick to numpy for fewer dependencies
+					# numpy.argsort gives indices that would sort the array.
+					# argsort of argsort gives the rank.
+					ranks = np.argsort(np.argsort(valid_values)).astype(np.float64)
+					if len(ranks) > 1:
+						normalized_ranks = ranks / (len(ranks) - 1)
+					else:
+						normalized_ranks = np.array([0.5]) # or 0 or 1, if only one stock
+					Y[d_idx, mask] = normalized_ranks
+
 		# Save to cache file for future processes.
 		ticker_ids_list = sorted(list(tickers_found))
 		try:
@@ -547,7 +571,7 @@ def parse_args(argv: Optional[list[str]] = None):
 	p = argparse.ArgumentParser(description="Load daily_delta_stock_data into tensors/arrays.")
 	p.add_argument("--dbinfo-file", default="dbinfo.id", help="Path to DB info file (default: dbinfo.id)")
 	p.add_argument("--limit", type=int, default=None, help="Optional LIMIT for debugging")
-	p.add_argument("--day-change-centered", default="one", choices=["one", "half", "zero"], help="The centroid of ratio of next_day_change_in_price")
+	p.add_argument("--day-change-centered", default="one", choices=["one", "half", "zero", "stock_change_ratio_ranked"], help="The centroid of ratio of next_day_change_in_price")
 	p.add_argument("--current-day-change", action="store_true", help="Include current_day_change_in_price")
 	p.add_argument("--volume-ratio", action="store_true", help="Include volume_ratio")
 	p.add_argument("--vwap-ratio", action="store_true", help="Include vwap_ratio")
