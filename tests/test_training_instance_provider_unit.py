@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+import sys
+from unittest.mock import MagicMock
 
 import training_instance_provider as tip
 
@@ -50,9 +52,9 @@ def test_provider_returns_concatenated_features_and_labels(provider, synthetic_d
 	# Instance 1: date index 1 (date 11), uses dates [1, 0]
 	features, lbls, date_id_extra = provider.get_feature_and_label_pair(1)
 
-	expected_features = np.concatenate([x_flat[1], x_flat[0]], axis=0)
+	expected_features = np.concatenate([x_flat[1], x_flat[0]], axis=0).astype(np.float32)
 	np.testing.assert_array_equal(features, expected_features)
-	np.testing.assert_array_equal(lbls, labels[1])
+	np.testing.assert_array_equal(lbls, labels[1].astype(np.float32))
 	assert date_id_extra == dates[1]
 
 	# Instance 2: date index 2 (date 12), uses dates [2, 1]
@@ -69,8 +71,8 @@ def test_provider_zero_prior_days(provider, synthetic_data):
 
 	for i in range(1, 4):
 		features, lbls, date_id_extra = provider.get_feature_and_label_pair(i)
-		np.testing.assert_array_equal(features, x_flat[i - 1])
-		np.testing.assert_array_equal(lbls, labels[i - 1])
+		np.testing.assert_array_equal(features, x_flat[i - 1].astype(np.float32))
+		np.testing.assert_array_equal(lbls, labels[i - 1].astype(np.float32))
 		assert date_id_extra == dates[i - 1]
 
 
@@ -130,16 +132,54 @@ def test_provider_initialization_parameters(monkeypatch):
 def test_provider_with_torch(monkeypatch, synthetic_data):
 	dates, x_flat, labels = synthetic_data
 
+	class MockTensor(np.ndarray):
+		def numel(self):
+			return self.size
+		def element_size(self):
+			return self.itemsize
+		def cpu(self):
+			return self
+		def numpy(self):
+			return self.view(np.ndarray)
+		@property
+		def shape(self):
+			return super().shape
+		def view(self, *args):
+			if len(args) == 1 and isinstance(args[0], type) and issubclass(args[0], np.ndarray):
+				return super().view(args[0])
+			if len(args) == 1 and isinstance(args[0], (int, tuple)):
+				return self.reshape(args[0]).view(MockTensor)
+			return self.reshape(args).view(MockTensor)
+		def to(self, *args, **kwargs):
+			return self
+
 	class MockTorch:
 		def from_numpy(self, arr):
-			return arr  # In a real test this would be a torch.Tensor
-		def as_tensor(self, arr, dtype=None):
-			return np.array(arr, dtype=np.float32) if dtype is not None else np.array(arr)
+			return arr.view(MockTensor)
+		def as_tensor(self, arr, dtype=None, device=None):
+			return np.array(arr, dtype=np.float32).view(MockTensor) if dtype is not None else np.array(arr).view(MockTensor)
+		def device(self, name):
+			return name
+		def arange(self, start, end, step):
+			return np.arange(start, end, step).view(MockTensor)
+		def index_select(self, tensor, dim, indices):
+			return tensor[indices].view(MockTensor)
+		def nan_to_num(self, tensor, nan=0.0, posinf=0.0, neginf=0.0):
+			return np.nan_to_num(tensor, nan=nan, posinf=posinf, neginf=neginf).view(MockTensor)
 		float32 = np.float32
+		Tensor = MockTensor
 
 	mock_torch = MockTorch()
+	# Replace torch in sys.modules to catch all imports
+	monkeypatch.setitem(sys.modules, "torch", mock_torch)
+	# Also need to monkeypatch tip specifically as it might have already imported it
 	monkeypatch.setattr(tip, "torch", mock_torch)
 	monkeypatch.setattr(tip, "TORCH_AVAILABLE", True)
+
+	# Since we monkeypatched sys.modules, we might also need to patch trainer.util.utils
+	import trainer.util.utils
+	monkeypatch.setattr(trainer.util.utils, "torch", mock_torch)
+	monkeypatch.setattr(trainer.util.utils, "TORCH_AVAILABLE", True)
 
 	def fake_fetch_grouped_by_date(*args, **kwargs):
 		return dates.copy(), x_flat.copy(), labels.copy(), [1, 2, 3]
@@ -216,9 +256,9 @@ def test_provider_with_skipped_dates_and_multiple_tickers(monkeypatch):
 	features, lbls, date_id_extra = provider.get_feature_and_label_pair(1)
 	assert date_id_extra == 12
 	# features should be concatenation of x_flat[1] and x_flat[0]
-	expected_features = np.concatenate([x_flat[1], x_flat[0]], axis=0)
+	expected_features = np.concatenate([x_flat[1], x_flat[0]], axis=0).astype(np.float32)
 	np.testing.assert_array_equal(features, expected_features)
-	np.testing.assert_array_equal(lbls, labels[1])
+	np.testing.assert_array_equal(lbls, labels[1].astype(np.float32))
 
 	# Verify ticker values in features for instance 1 (date 12)
 	# Tickers for date 12 were 5, 6, 9.

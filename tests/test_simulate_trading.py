@@ -68,6 +68,18 @@ def test_simulate_basic_flow(mock_recommender, tmp_path):
     mock_recommender.get_output_directory.return_value = str(tmp_path)
     mock_recommender.ticker_ids = [10, 20, 30, 40]
 
+    def mock_get_buy_recs(*args, **kwargs):
+        current_date_id = kwargs.get('current_date_id')
+        scores = np.array([0.9, 0.1])
+        top_ids = [10, 20]
+        if kwargs.get('save_scores'):
+            filename = f"stock_scores_epoch__date_{current_date_id}_net_0.csv"
+            save_path = os.path.join(str(tmp_path), filename)
+            np.savetxt(save_path, scores, delimiter=",")
+        return scores, top_ids
+
+    mock_recommender.getBuyRecommendations.side_effect = mock_get_buy_recs
+
     with patch("simulate_trading.fetch_open_close_for_date_tickers", side_effect=mock_fetch_prices), \
          patch("simulate_trading.get_ticker_positions") as mock_pos:
 
@@ -110,6 +122,18 @@ def test_simulate_missing_price_data(mock_recommender, tmp_path):
     mock_recommender.get_output_directory.return_value = str(tmp_path)
     mock_recommender.ticker_ids = None
 
+    def mock_get_buy_recs(*args, **kwargs):
+        current_date_id = kwargs.get('current_date_id')
+        scores = np.array([0.9, 0.1])
+        top_ids = [10, 20]
+        if kwargs.get('save_scores'):
+            filename = f"stock_scores_epoch__date_{current_date_id}_net_0.csv"
+            save_path = os.path.join(str(tmp_path), filename)
+            np.savetxt(save_path, scores, delimiter=",")
+        return scores, top_ids
+
+    mock_recommender.getBuyRecommendations.side_effect = mock_get_buy_recs
+
     with patch("simulate_trading.fetch_open_close_for_date_tickers", return_value={}), \
          patch("simulate_trading.get_ticker_positions", return_value={}):
         out_path = simulate(
@@ -143,6 +167,18 @@ def test_simulate_invalid_open_price(mock_recommender, tmp_path):
 
     mock_recommender.get_output_directory.return_value = str(tmp_path)
     mock_recommender.ticker_ids = None
+
+    def mock_get_buy_recs(*args, **kwargs):
+        current_date_id = kwargs.get('current_date_id')
+        scores = np.array([0.9, 0.8])
+        top_ids = [10, 20]
+        if kwargs.get('save_scores'):
+            filename = f"stock_scores_epoch__date_{current_date_id}_net_0.csv"
+            save_path = os.path.join(str(tmp_path), filename)
+            np.savetxt(save_path, scores, delimiter=",")
+        return scores, top_ids
+
+    mock_recommender.getBuyRecommendations.side_effect = mock_get_buy_recs
 
     with patch("simulate_trading.fetch_open_close_for_date_tickers", return_value=price_data), \
          patch("simulate_trading.get_ticker_positions", return_value={20: 0.7}):

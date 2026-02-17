@@ -1005,3 +1005,56 @@ def sidebar_family_and_build_selector(
 
 	return selected_builds, selected_families, available_builds
 
+
+def discover_best_run_dir(base_dir: str, ts_name: str, run_list: List[Tuple[str, Dict[str, Any]]]) -> str | None:
+	"""Choose the most appropriate directory to read statistics from for a timestamp.
+
+	Preference:
+	  1) The timestamp directory itself (ensemble) if it has any stock_simulation files.
+	  2) Any ``rep*`` (or first run's ``_dir``) under the timestamp that has files.
+	Returns normalized absolute path or None if nothing found.
+	"""
+
+	try:
+		base_dir = os.path.normpath(base_dir)
+	except Exception:
+		pass
+
+	# Start with the obvious timestamp directory
+	ts_path = os.path.normpath(os.path.join(base_dir, ts_name))
+
+	# Some pipelines store _dir like "20251215_211039/rep1" or
+	# "run_family_.../run_single_.../rep1". Use its parent
+	# to refine ts_path if it exists on disk.
+	dname_0 = (run_list[0][1] or {}).get("_dir") if run_list else None
+	if dname_0:
+		parent_rel = os.path.dirname(dname_0)
+		candidate = os.path.normpath(os.path.join(base_dir, parent_rel))
+		if os.path.isdir(candidate):
+			ts_path = candidate
+
+	# 1) Prefer the timestamp directory itself
+	if has_any_simulation_files(ts_path):
+		return ts_path
+
+	# 2) Search subdirectories beneath the timestamp directory
+	if os.path.isdir(ts_path):
+		try:
+			for fname in sorted(os.listdir(ts_path)):
+				# Rep folders are commonly named rep1, rep2, ... but allow any dir
+				sub_path = os.path.join(ts_path, fname)
+				if not os.path.isdir(sub_path):
+					continue
+				# For run_single_... directories, the reps are usually inside.
+				if has_any_simulation_files(sub_path):
+					return os.path.normpath(sub_path)
+		except Exception as e:
+			print(f"[crs] Error scanning subdirs of {ts_path}: {e}")
+
+	# 3) Try first run's explicit _dir as a last resort
+	if dname_0:
+		alt_path = os.path.normpath(os.path.join(base_dir, dname_0))
+		if has_any_simulation_files(alt_path):
+			return alt_path
+
+	return None

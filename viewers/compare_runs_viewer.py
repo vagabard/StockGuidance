@@ -17,7 +17,7 @@ import traceback
 from math import ceil, sqrt
 from typing import Dict, List, Any, Tuple
 
-from simulate_trading import run_simulation_from_saved_scores
+from simulate_trading import run_simulation_from_saved_scores, generate_simulations_from_directories, get_single_run_directory
 
 import plotly.express as px
 import plotly.graph_objects as go
@@ -34,6 +34,7 @@ from viewers.compare_runs_shared import (
 	load_preferences,
 	save_preference,
 	render_run_grid,
+	discover_best_run_dir,
 )
 from database.db_connect import get_connection
 
@@ -377,13 +378,30 @@ def _run_as_script():
 				row["_dir"] = rel_dir
 				display_rows.append(row)
 		else:
-			# Collapse reps to common parameters
-			run_params = [p for _, p in run_list]
-			common_p = _compute_common_params(run_params)
-			row = dict(common_p)
-			row["_ts"] = ts_name
-			row.setdefault("_dir", run_list[0][0])
-			display_rows.append(row)
+			# Show only the logical single run (ensemble) for this timestamp.
+			# We prefer a directory that contains simulation files at the top level (ensemble).
+			best_dir = discover_best_run_dir(base_dir, ts_name, run_list)
+
+			# Map back to params
+			if best_dir:
+				rel_best = os.path.relpath(best_dir, base_dir)
+				# Try to find exactly matching rep or just use first if it's the ensemble dir
+				match = next((p for d, p in run_list if d == rel_best), None)
+				if not match:
+					match = _compute_common_params([p for _, p in run_list])
+
+				row = dict(match)
+				row["_ts"] = ts_name
+				row["_dir"] = rel_best
+				display_rows.append(row)
+			else:
+				# Fallback: Collapse reps to common parameters
+				run_params = [p for _, p in run_list]
+				common_p = _compute_common_params(run_params)
+				row = dict(common_p)
+				row["_ts"] = ts_name
+				row.setdefault("_dir", run_list[0][0])
+				display_rows.append(row)
 
 	if not display_rows:
 		st.info("No runs selected or available for the current criteria.")
@@ -414,37 +432,41 @@ def _run_as_script():
 		if not selected_runs_from_grid:
 			st.warning("Please select at least one run in the table above.")
 		else:
-			progress_bar = st.progress(0)
 			status_text = st.empty()
 
 			# We need the full paths for selected runs.
-			# selected_runs_from_grid are IDs from the grid.
-			# We need to find all sub-runs (reps) if it's a family/timestamp selection.
+			# selected_runs_from_grid are IDs from the grid (usually timestamp names or _dir).
 			paths_to_process = []
-			for ts_name in selected_runs_from_grid:
-				# Find all runs in ts_to_runs[ts_name]
-				if ts_name in ts_to_runs:
-					for rel_dir, _ in ts_to_runs[ts_name]:
-						p = os.path.normpath(os.path.join(base_dir, rel_dir))
-						if os.path.isdir(p) and p not in paths_to_process:
+			for rid in selected_runs_from_grid:
+				# Find the original row to get the full _dir
+				match = next((r for r in display_rows if (r.get("_ts") or r.get("_dir")) == rid), None)
+				if match and match.get("_dir"):
+					p = os.path.normpath(os.path.join(base_dir, match["_dir"]))
+					if os.path.isdir(p):
+						# Ensure we only process single run (ensemble) directories
+						p = get_single_run_directory(p)
+						if p not in paths_to_process:
 							paths_to_process.append(p)
 				else:
-					# Maybe it's a direct directory
-					p = os.path.normpath(os.path.join(base_dir, ts_name))
-					if os.path.isdir(p) and p not in paths_to_process:
-						paths_to_process.append(p)
+					# Fallback to direct join if not found in display_rows
+					p = os.path.normpath(os.path.join(base_dir, rid))
+					if os.path.isdir(p):
+						p = get_single_run_directory(p)
+						if p not in paths_to_process:
+							paths_to_process.append(p)
 
-			total = len(paths_to_process)
-			for i, p in enumerate(paths_to_process):
-				status_text.text(f"Processing {os.path.basename(p)} ({i+1}/{total})...")
+			if not paths_to_process:
+				st.warning(f"No directories found for selection: {selected_runs_from_grid}")
+			else:
+				status_text.text(f"Generating simulations for {len(paths_to_process)} directories...")
 				try:
-					run_simulation_from_saved_scores(p, top_k=[1, 3, 5, 10])
+					generate_simulations_from_directories(paths_to_process, top_k=[1, 3, 5, 10], force=False)
 				except Exception as e:
-					st.error(f"Error processing {p}: {e}")
-				progress_bar.progress((i + 1) / total)
+					st.error(f"Error during simulation generation: {e}")
+					traceback.print_exc()
 
-			status_text.text("Done! Refreshing viewer...")
-			st.rerun()
+				status_text.text("Done! Refreshing viewer...")
+				st.rerun()
 
 	selected_runs = selected_runs_from_grid
 
@@ -1479,30 +1501,39 @@ def _run_as_script():
 					# Already processed this timestamp.
 					continue
 
-				# Derive the timestamp directory relative to base_dir by
-				# stripping the trailing rep component from ``_dir``.
+				# Derive the timestamp directory relative to base_dir.
+				# In the new structure, we might have run_family_.../run_single_.../repN
+				# We want the directory that contains the reps (e.g. run_single_...)
 				ts_rel = os.path.sep.join(parts[:-1])
 				if not ts_rel:
 					continue
 				ts_path = os.path.join(base_dir, ts_rel)
-				if not os.path.isdir(ts_path):
-					continue
+
+				# Also check the parent of THAT directory if it's not a family directory
+				# but might contain ensemble results (legacy or different layout)
+				search_paths = [ts_path]
+				if len(parts) > 2:
+					parent_rel = os.path.sep.join(parts[:-2])
+					parent_path = os.path.join(base_dir, parent_rel)
+					if os.path.isdir(parent_path):
+						search_paths.append(parent_path)
 
 				best_csv_path = None
 				best_epoch = None
 				try:
-					for fname in os.listdir(ts_path):
-						# Match the current naming convention
-						#   stock_simulation_*_epoch_<epoch>.csv
-						# OR ensemble naming:
-						#   stock_simulation_ensemble_*_epoch_<epoch>.csv
-						m = re.match(r"stock_simulation_(?:ensemble_)?.*_epoch_(\d+)\.csv$", fname)
-						if not m:
-							continue
-						epoch_idx = int(m.group(1))
-						if best_epoch is None or epoch_idx > best_epoch:
-							best_epoch = epoch_idx
-							best_csv_path = os.path.join(ts_path, fname)
+					for spath in search_paths:
+						for fname in os.listdir(spath):
+							# Match the current naming convention
+							#   stock_simulation_*_epoch_<epoch>.csv
+							# OR ensemble naming:
+							#   stock_simulation_ensemble_*_epoch_<epoch>.csv
+							m = re.match(r"stock_simulation_(?:ensemble_)?.*_epoch_(\d+)\.csv$", fname)
+							if not m:
+								continue
+							epoch_idx = int(m.group(1))
+							if best_epoch is None or epoch_idx > best_epoch:
+								best_epoch = epoch_idx
+								best_csv_path = os.path.join(spath, fname)
 				except FileNotFoundError:
 					best_csv_path = None
 
@@ -1564,12 +1595,17 @@ def _run_as_script():
 			# an ensemble CSV, insert a synthetic ensemble entry ahead of it.
 			if ts_name and ts_name in ensemble_per_ts and ts_name not in seen_ensemble_ts:
 				ens_params = {k: v for k, v in p.items() if not k.startswith("_")}
-				ens_params["_dir"] = ts_name  # logical identifier
+				# logical identifier, but if it's already a timestamp-like name, keep it
+				ens_params["_dir"] = ts_name
 				ens_params["_is_ensemble"] = True
 				ens_params["_timestamp"] = ts_name
 				# Make it obvious in the title that this line is the
 				# ensemble/aggregate across reps.
 				ens_params.setdefault("rep", "ensemble")
+
+				# Inject the _family if it exists in the original params
+				if "_family" in p:
+					ens_params["_family"] = p["_family"]
 
 				sim_dfs.append((ens_params, ensemble_per_ts.get(ts_name)))
 				seen_ensemble_ts.add(ts_name)
@@ -1667,7 +1703,6 @@ def _run_as_script():
 
 		# At this point sim_dfs should contain an ensemble entry (if
 		# available) plus one entry per rep under the selected timestamp.
-		print(f"[stock_sim] total sim_dfs entries: {len(sim_dfs)}, numeric cols={all_top_cols}")
 
 		if not any(df is not None for _, df in sim_dfs):
 			st.caption("No stock_simulation_*.csv files found for the currently selected runs.")

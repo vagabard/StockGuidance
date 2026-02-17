@@ -145,7 +145,6 @@ class StockRecommenderFromSavedScores(StockRecommender):
 		if self.output_size is not None:
 			top_k = int(min(top_k, self.output_size))
 
-		out_from_model_flat_cpu = precalculated_scores.detach().cpu()
 		T = int(self.output_size)
 
 		# Build transactions vector
@@ -172,8 +171,12 @@ class StockRecommenderFromSavedScores(StockRecommender):
 		if transactions_vec_tensor is None:
 			raise ValueError("Transactions must be provided to StockRecommenderFromSavedScores.")
 
+		out_from_model_flat_cpu = precalculated_scores.detach().cpu()
+		transactions_vec_cpu = transactions_vec_tensor.detach().cpu()
+		T = int(self.output_size)
+
 		# Build mask
-		mask_allowed = torch.isfinite(transactions_vec_tensor) & (transactions_vec_tensor >= float(MIN_TRADES_FOR_RECOMMENDATION))
+		mask_allowed = torch.isfinite(transactions_vec_cpu) & (transactions_vec_cpu >= float(MIN_TRADES_FOR_RECOMMENDATION))
 
 		# Apply mask
 		masked_scores = out_from_model_flat_cpu.clone()

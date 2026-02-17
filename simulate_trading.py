@@ -1,12 +1,15 @@
 import argparse
 import os
 import re
+import threading
 import time
 import traceback
-from typing import Tuple, Dict, Optional, List, Union
+from queue import Queue
+from typing import Tuple, Dict, Optional, List, Union, Any
 
 import numpy as np
 import torch
+from torch import Tensor
 
 from StockRecommenderFromModel import StockRecommenderFromModel, StockRecommenderFromSavedScores, StockRecommender
 from database.db_connect import get_connection
@@ -22,6 +25,59 @@ from training_instance_provider import TrainingInstanceProvider
 # Key: (dbinfo_file, min_date, max_date)
 # Value: (all_ratios_by_date, transactions_by_date, price_data_by_date)
 GLOBAL_DATA_CACHE: Dict[Tuple[str, int, int], Tuple[Dict, Dict, Dict]] = {}
+
+# Global cache for score files to avoid repeated glob calls
+# Key: score_dir
+# Value: List of (name, is_dir) tuples
+GLOBAL_SCORE_FILE_CACHE: Dict[str, List[Tuple[str, bool]]] = {}
+
+def _get_cached_entries(score_dir: str, force_refresh: bool = False) -> List[Tuple[str, bool]]:
+	"""Get list of (name, is_dir) in a directory, using a cache to avoid repeated OS calls."""
+	if score_dir not in GLOBAL_SCORE_FILE_CACHE or force_refresh:
+		try:
+			entries = []
+			with os.scandir(score_dir) as it:
+				for entry in it:
+					entries.append((entry.name, entry.is_dir()))
+			GLOBAL_SCORE_FILE_CACHE[score_dir] = entries
+		except Exception as e:
+			print(f"Error scanning {score_dir}: {e}")
+			GLOBAL_SCORE_FILE_CACHE[score_dir] = []
+	return GLOBAL_SCORE_FILE_CACHE[score_dir]
+
+# Queue for background score processing
+# Elements: (score_path, raw_scores_list, norm_scores_list, rank_scores_list)
+SCORE_PROCESSING_QUEUE: Queue = Queue()
+
+
+def _score_processing_worker():
+	"""Worker thread to process scores from the queue."""
+	while True:
+		item = SCORE_PROCESSING_QUEUE.get()
+		if item is None:
+			SCORE_PROCESSING_QUEUE.task_done()
+			break
+
+		score_path, raw_scores_list, norm_scores_list, rank_scores_list = item
+		try:
+			scores = _load_scores_from_file(score_path)
+			raw_scores_list.append(scores)
+
+			norm_scores = _normalize_scores(scores)
+			norm_scores_list.append(norm_scores)
+
+			ranks = _rank_scores(scores)
+			rank_scores_list.append(ranks)
+		except Exception as e:
+			print(f"Error processing scores from {score_path}: {e}")
+			traceback.print_exc()
+		finally:
+			SCORE_PROCESSING_QUEUE.task_done()
+
+
+# Start the background thread
+worker_thread = threading.Thread(target=_score_processing_worker, daemon=True)
+worker_thread.start()
 
 
 def perform_analysis_prefetch_scores(
@@ -150,6 +206,8 @@ def perform_analysis(
 	dates_to_handle: IndexDataset,
 	dbinfo_file: str = "dbinfo.id",
 	out_filename_suffix: Optional[str] = None,
+	only_ensemble: bool = False,
+	force: bool = False,
 ) -> str:
 	"""Step 2: Use saved scores to generate recommendations and update portfolio."""
 	out_paths = []
@@ -174,18 +232,29 @@ def perform_analysis(
 	tasks = []
 
 	if num_networks > 1:
-		# Ensemble task: all reps (recommenders 1..N) aggregated into parent dir (recommender 0)
 		parent_recommender = stock_recommenders[0]
-		ensemble_reps = stock_recommenders[1:]
-		out_name = f"stock_simulation_ensemble_{stock_simulation_size}{out_filename_suffix or ''}.csv"
-		out_path = os.path.join(parent_recommender.get_output_directory(), out_name)
-		tasks.append((out_path, ensemble_reps, parent_recommender)) # target_path, source_reps, main_recommender
+		target_dir = parent_recommender.get_output_directory()
+		if not is_family_directory(target_dir):
+			# Ensemble task: all reps (recommenders 1..N) aggregated into parent dir (recommender 0)
+			ensemble_reps = stock_recommenders[1:]
+			out_name = f"stock_simulation_ensemble_{stock_simulation_size}{out_filename_suffix or ''}.csv"
+			out_path = os.path.join(target_dir, out_name)
+			tasks.append((out_path, ensemble_reps, parent_recommender)) # target_path, source_reps, main_recommender
 
-		# Individual rep tasks: each rep (recommenders 1..N) in its own dir
-		for rep_rec in ensemble_reps:
-			out_name = f"stock_simulation_{stock_simulation_size}{out_filename_suffix or ''}.csv"
-			out_path = os.path.join(rep_rec.get_output_directory(), out_name)
-			tasks.append((out_path, [rep_rec], rep_rec))
+			# Individual rep tasks: each rep (recommenders 1..N) in its own dir
+			if not only_ensemble:
+				for rep_rec in ensemble_reps:
+					out_name = f"stock_simulation_{stock_simulation_size}{out_filename_suffix or ''}.csv"
+					out_path = os.path.join(rep_rec.get_output_directory(), out_name)
+					tasks.append((out_path, [rep_rec], rep_rec))
+		else:
+			# It's a family directory, don't ensemble the sub-runs here.
+			# Just process each individually (if requested via not only_ensemble)
+			if not only_ensemble:
+				for rec in stock_recommenders:
+					out_name = f"stock_simulation_{stock_simulation_size}{out_filename_suffix or ''}.csv"
+					out_path = os.path.join(rec.get_output_directory(), out_name)
+					tasks.append((out_path, [rec], rec))
 	else:
 		# Single recommender task
 		rec = stock_recommenders[0]
@@ -193,7 +262,12 @@ def perform_analysis(
 		out_path = os.path.join(rec.get_output_directory(), out_name)
 		tasks.append((out_path, [rec], rec))
 
+	# The ensemble file in the parent directory is the primary output we want to return
+	final_out_path = tasks[0][0] if tasks else ""
 	for out_path, source_reps, main_recommender in tasks:
+		if os.path.exists(out_path) and not force:
+			print(f"DEBUG: [perform_analysis] Skipping {os.path.basename(out_path)} as it already exists.")
+			continue
 		print(f"DEBUG: [perform_analysis] Generating {os.path.basename(out_path)} in {os.path.dirname(out_path)}")
 
 		# Portfolio initial values
@@ -357,18 +431,24 @@ def perform_analysis(
 				f.write(",".join(row_vals) + "\n")
 
 		out_paths.append(out_path)
-
-	return out_paths[0] if out_paths else ""
+	return final_out_path
 
 
 def _find_score_file(score_dir: str, feature_date_id: int, epoch_name: str) -> Optional[str]:
 	"""Find the score file for a specific date and epoch in the given directory."""
-	import glob
-	pattern = os.path.join(score_dir, f"stock_scores_epoch_{epoch_name}_date_{feature_date_id}_net_*.csv")
-	found_files = glob.glob(pattern)
+	files = _get_cached_entries(score_dir)
+
+	# pattern was: stock_scores_epoch_{epoch_name}_date_{feature_date_id}_net_*.csv
+	prefix = f"stock_scores_epoch_{epoch_name}_date_{feature_date_id}_net_"
+	suffix = ".csv"
+
+	found_files = [
+		os.path.join(score_dir, f) for f, is_dir in files
+		if not is_dir and f.startswith(prefix) and f.endswith(suffix)
+	]
 
 	if not found_files:
-		print(f"Warning: No score file found for date {feature_date_id} in {score_dir} (pattern: {os.path.basename(pattern)})")
+		print(f"Warning: No score file found for date {feature_date_id} in {score_dir} (prefix: {prefix})")
 		return None
 
 	if len(found_files) > 1:
@@ -421,16 +501,18 @@ def _load_epoch_scores(
 		if score_path is None:
 			continue
 
-		scores = _load_scores_from_file(score_path)
-		raw_scores_list.append(scores)
+		load_and_process_scores_from_files(norm_scores_list, rank_scores_list, raw_scores_list, score_path)
 
-		norm_scores = _normalize_scores(scores)
-		norm_scores_list.append(norm_scores)
-
-		ranks = _rank_scores(scores)
-		rank_scores_list.append(ranks)
+	# Wait for all scores in this epoch to be processed
+	SCORE_PROCESSING_QUEUE.join()
 
 	return raw_scores_list, norm_scores_list, rank_scores_list
+
+
+def load_and_process_scores_from_files(norm_scores_list: list[Tensor], rank_scores_list: list[Tensor],
+									   raw_scores_list: list[Tensor], score_path: str):
+	"""Add a score processing task to the queue."""
+	SCORE_PROCESSING_QUEUE.put((score_path, raw_scores_list, norm_scores_list, rank_scores_list))
 
 
 def simulate(
@@ -439,6 +521,8 @@ def simulate(
 	dates_to_handle: IndexDataset,
 	dbinfo_file: str = "dbinfo.id",
 	out_filename_suffix: Optional[str] = None,
+	only_ensemble: bool = False,
+	force: bool = False,
 ) -> str:
 	"""Run a trading simulation for a single model or an ensemble of models."""
 	epoch_name = str(out_filename_suffix).replace("_epoch_", "") if out_filename_suffix else ""
@@ -447,7 +531,7 @@ def simulate(
 	calculate_scores(stock_recommenders, dates_to_handle, epoch_name=epoch_name, dbinfo_file=dbinfo_file)
 
 	print(f"Step 2: Performing analysis for epoch {epoch_name}...")
-	return perform_analysis(stock_recommenders, top_k, dates_to_handle, dbinfo_file, out_filename_suffix)
+	return perform_analysis(stock_recommenders, top_k, dates_to_handle, dbinfo_file, out_filename_suffix, only_ensemble=only_ensemble, force=force)
 
 
 def parse_args(argv: Optional[List[str]] = None):
@@ -499,6 +583,11 @@ def parse_args(argv: Optional[List[str]] = None):
 		action="store_true",
 		help="Generate simulation results using existing stock_scores_*.csv files instead of running models",
 	)
+	p.add_argument(
+		"--only-ensemble",
+		action="store_true",
+		help="Only process ensemble simulations, skipping individual reps.",
+	)
 	return p.parse_args(argv)
 
 def simulate_using_models_passed(models_passed: List[StockRecommender], args: argparse.Namespace, top_k_parsed=None,
@@ -517,6 +606,7 @@ def simulate_using_models_passed(models_passed: List[StockRecommender], args: ar
 			top_k=top_k_parsed,
 			dates_to_handle=dates_to_handle,
 			dbinfo_file=args.dbinfo_file,
+			only_ensemble=args.only_ensemble,
 		)
 		print(f"Simulation complete. Results written to: {out_path}")
 
@@ -524,14 +614,51 @@ def simulate_using_models_passed(models_passed: List[StockRecommender], args: ar
 		elapsed = time.perf_counter() - start_time
 		print(f"Completed simulations in {elapsed:.2f} seconds")
 
-def is_ensemble_directory_given(path: str) -> bool:
+def is_rep_directory(path: str, force_refresh: bool = False) -> bool:
+	"""Check if the given path is a rep directory (contains net_X score files)."""
+	if not os.path.isdir(path):
+		return False
+	entries = _get_cached_entries(path, force_refresh=force_refresh)
+	for fname, is_dir in entries:
+		if not is_dir and fname.startswith("stock_scores_epoch_") and fname.endswith(".csv") and "_net_" in fname:
+			return True
+	return False
+
+
+def get_single_run_directory(path: str) -> str:
+	"""Return the single run (ensemble) directory for a given path.
+	If the path is a rep directory, returns its parent. Otherwise returns the path itself.
+	"""
+	if is_rep_directory(path):
+		return os.path.dirname(path)
+	return path
+
+
+def is_family_directory(path: str, force_refresh: bool = False) -> bool:
+	"""Check if the given path is a family directory."""
+	entries = _get_cached_entries(path, force_refresh=force_refresh)
+	for fname, is_dir in entries:
+		if not is_dir and fname == "family_state.json":
+			return True
+	return False
+
+
+def is_ensemble_directory_given(path: str, force_refresh: bool = False) -> bool:
 	"""Check if the given path is an ensemble directory based on naming convention."""
-	entries = sorted(os.listdir(path))
-	rep_dirs = []
-	for name in entries:
-		if name.lower().startswith("rep") and os.path.isdir(os.path.join(path, name)):
-			rep_dirs.append(name)
-	return len(rep_dirs) > 1
+	entries = _get_cached_entries(path, force_refresh=force_refresh)
+
+	is_family = False
+	rep_count = 0
+	for name, is_dir in entries:
+		if not is_dir and name == "family_state.json":
+			is_family = True
+		if is_dir and name.lower().startswith("rep"):
+			rep_count += 1
+
+	if is_family:
+		return False
+
+	return rep_count > 1
 
 
 def create_list_of_stock_recommender_models_from_single_run_directory_with_repeats(ensemble_normalize:bool, repeat_run_home_dir: str) -> list[
@@ -591,27 +718,29 @@ def _find_single_run_path(run_dir: str) -> Optional[str]:
 				return matches[0]
 
 	# Priority 3: Search one level deep
-	if os.path.isdir(run_dir):
-		for entry in os.listdir(run_dir):
-			sub_dir = os.path.join(run_dir, entry)
-			if os.path.isdir(sub_dir):
+	entries = _get_cached_entries(run_dir)
+	for entry, is_dir in entries:
+		if not is_dir:
+			continue
+		sub_dir = os.path.join(run_dir, entry)
+		sub_entries = _get_cached_entries(sub_dir)
+		for sub_f, sub_is_dir in sub_entries:
+			if not sub_is_dir:
 				for pattern in patterns:
-					matches = glob.glob(os.path.join(sub_dir, os.path.basename(pattern)))
-					if matches:
-						return matches[0]
+					pat_name = os.path.basename(pattern)
+					if re.match(pat_name.replace("*", ".*"), sub_f):
+						return os.path.join(sub_dir, sub_f)
 	return None
 
 
 def _get_score_dirs(run_dir: str) -> List[str]:
 	"""Return the list of directories that might contain score files (reps or run_dir itself)."""
 	try:
+		entries = _get_cached_entries(run_dir)
 		rep_dirs = []
-		for name in sorted(os.listdir(run_dir)):
-			full = os.path.join(run_dir, name)
-			if not os.path.isdir(full):
-				continue
-			if name.lower().startswith("rep") and name[3:].isdigit():
-				rep_dirs.append(full)
+		for name, is_dir in sorted(entries):
+			if is_dir and name.lower().startswith("rep") and name[3:].isdigit():
+				rep_dirs.append(os.path.join(run_dir, name))
 		if rep_dirs:
 			return rep_dirs
 	except Exception as e:
@@ -621,17 +750,16 @@ def _get_score_dirs(run_dir: str) -> List[str]:
 
 def _identify_epochs_with_scores(score_dirs: List[str]) -> List[str]:
 	"""Identify all epochs that have saved score files in the given directories."""
-	import glob
 	epochs_with_scores = set()
 	try:
 		for d in score_dirs:
-			pattern = os.path.join(d, "stock_scores_epoch_*_date_*_net_*.csv")
-			for score_path in glob.glob(pattern):
-				fname = os.path.basename(score_path)
-				# Match epoch_(\d+)
-				m = re.search(r"epoch_(\d+)", fname)
-				if m:
-					epochs_with_scores.add(m.group(1))
+			entries = _get_cached_entries(d)
+			for fname, is_dir in entries:
+				if not is_dir and fname.startswith("stock_scores_epoch_") and fname.endswith(".csv"):
+					# Match epoch_(\d+)
+					m = re.search(r"epoch_(\d+)", fname)
+					if m:
+						epochs_with_scores.add(m.group(1))
 	except Exception as e:
 		print(f"Error identifying epochs in score dirs: {e}")
 	return sorted(list(epochs_with_scores), key=int)
@@ -639,15 +767,15 @@ def _identify_epochs_with_scores(score_dirs: List[str]) -> List[str]:
 
 def _get_epoch_dates(score_dirs: List[str], epoch: str) -> set[int]:
 	"""Return the set of date_ids that have score files for a specific epoch across all score_dirs."""
-	import glob
 	epoch_dates = set()
 	for d in score_dirs:
-		pattern = os.path.join(d, f"stock_scores_epoch_{epoch}_date_*_net_*.csv")
-		for score_path in glob.glob(pattern):
-			fname = os.path.basename(score_path)
-			m = re.search(rf"epoch_{epoch}_date_(\d+)", fname)
-			if m:
-				epoch_dates.add(int(m.group(1)))
+		entries = _get_cached_entries(d)
+		prefix = f"stock_scores_epoch_{epoch}_date_"
+		for fname, is_dir in entries:
+			if not is_dir and fname.startswith(prefix) and fname.endswith(".csv"):
+				m = re.search(rf"epoch_{epoch}_date_(\d+)", fname)
+				if m:
+					epoch_dates.add(int(m.group(1)))
 	return epoch_dates
 
 
@@ -669,60 +797,118 @@ def _map_dates_to_indices(provider: TrainingInstanceProvider, epoch_dates: set[i
 	return available_indices
 
 
+def generate_simulations_from_directories(
+	directories: List[str],
+	top_k: List[int] = [1, 3, 5, 10],
+	dbinfo_file: str = "dbinfo.id",
+	only_ensemble: bool = False,
+	force: bool = False,
+) -> List[str]:
+	"""
+	Unified method to generate simulations from a list of directories.
+	Handles family, single run (ensemble), and rep directories.
+	"""
+	all_generated = []
+	for d in directories:
+		if not os.path.isdir(d):
+			print(f"Warning: {d} is not a directory. Skipping.")
+			continue
+
+		if is_family_directory(d, force_refresh=force):
+			print(f"Processing family directory: {d}")
+			sub_runs = []
+			find_sub_runs_for_given_run_directory(d, sub_runs)
+			# If it's a family directory, it should generate a list of single run directories in it,
+			# then call the previous method to handle single run directories.
+			all_generated.extend(generate_simulations_from_directories(sub_runs, top_k, dbinfo_file, only_ensemble, force=force))
+		elif is_ensemble_directory_given(d, force_refresh=force):
+			print(f"Processing ensemble directory: {d}")
+			# Generate simulations for the ensemble itself and its reps (if requested)
+			all_generated.extend(handle_single_run_directory(d, top_k, dbinfo_file, only_ensemble, force=force))
+		elif is_rep_directory(d, force_refresh=force):
+			# If rep directories, the list should repeatedly call a method to generate simulations from a rep directory.
+			print(f"Processing rep directory: {d}")
+			all_generated.extend(_run_simulation_for_single_or_ensemble(d, top_k, dbinfo_file, only_ensemble, force=force))
+		else:
+			print(f"INVALID DIRECTORY: {d}")
+			# Or if it's just a plain single run directory without reps.
+			# Try treating it as a single run anyway if it has a manifest or json
+			if _find_single_run_path(d) or _dir_has_model(d):
+				print(f"Processing single run directory: {d}")
+				all_generated.extend(_run_simulation_for_single_or_ensemble(d, top_k, dbinfo_file, only_ensemble, force=force))
+			else:
+				print(f"INVALID DIRECTORY: {d}")
+				# Don't raise error, just skip
+				# raise ValueError(f"Invalid directory: {d}")
+
+	return all_generated
+
+
 def run_simulation_from_saved_scores(
 	run_dir: str,
 	top_k: List[int] = [1, 3, 5, 10],
 	dbinfo_file: str = "dbinfo.id",
+	only_ensemble: bool = False,
+	force: bool = False,
 ) -> List[str]:
 	"""
 	Higher-level entry point for viewers.
 	Scans the run_dir for all epochs that have saved scores and generates
 	the corresponding stock_simulation_*.csv files.
 	"""
-	from trainer.state.single_run import SingleRun
-	from trainer.datasets import IndexDataset
-	from training_instance_provider import TrainingInstanceProvider
+	return generate_simulations_from_directories([run_dir], top_k, dbinfo_file, only_ensemble, force=force)
 
-	# 1. Load SingleRun to get parameters
-	print(f"DEBUG: [run_simulation_from_saved_scores] Starting for {run_dir}")
 
-	# Handle Family Directory first
-	is_family = os.path.exists(os.path.join(run_dir, "family_state.json"))
-	if os.path.isdir(run_dir) and (is_family or not _find_single_run_path(run_dir)):
-		sub_runs = []
-		for entry in sorted(os.listdir(run_dir)):
-			full_entry = os.path.join(run_dir, entry)
-			if not os.path.isdir(full_entry):
-				continue
-			# Check for sub-run indicators
-			if os.path.exists(os.path.join(full_entry, "single_run_epoch.json")) or \
-			   os.path.exists(os.path.join(full_entry, "single_run_0.json")) or \
-			   re.match(r"run_single_\d{8}_\d{6}_\d{2,}", entry) or \
-			   re.match(r"run_single_\d{8}_\d{6}_\d", entry) or \
-			   re.match(r"\d{8}_\d{6}", entry):
-				sub_runs.append(full_entry)
+def grow_generate_run_list(all_generated: list[Any] | list[str], dbinfo_file: str, sub_runs: list[Any],
+                           top_k: list[int], only_ensemble: bool = False):
+	for sr in sub_runs:
+		all_generated.extend(run_simulation_from_saved_scores(sr, top_k=top_k, dbinfo_file=dbinfo_file, only_ensemble=only_ensemble))
 
-		if sub_runs:
-			print(f"DEBUG: [run_simulation_from_saved_scores] Found {len(sub_runs)} sub-runs in family directory {run_dir}. Processing ensemble first, then each sub-run...")
-			# First, process as an ensemble if it has reps
-			generated_ensemble = []
-			if is_ensemble_directory_given(run_dir):
-				print(f"DEBUG: [run_simulation_from_saved_scores] {run_dir} is an ensemble directory. Generating ensemble simulation.")
-				# To avoid infinite recursion, we need to process this run_dir WITHOUT the family/sub-run check
-				generated_ensemble = _run_simulation_for_single_or_ensemble(run_dir, top_k=top_k, dbinfo_file=dbinfo_file)
 
-			all_generated = generated_ensemble
-			for sr in sub_runs:
-				all_generated.extend(run_simulation_from_saved_scores(sr, top_k=top_k, dbinfo_file=dbinfo_file))
-			return all_generated
+def find_sub_runs_for_given_run_directory(run_dir: str, sub_runs: list[Any]):
+	entries = _get_cached_entries(run_dir)
+	for entry, is_dir in sorted(entries):
+		if not is_dir:
+			continue
+		full_entry = os.path.join(run_dir, entry)
+		# Check for sub-run indicators
+		sub_entries = _get_cached_entries(full_entry)
 
-	return _run_simulation_for_single_or_ensemble(run_dir, top_k=top_k, dbinfo_file=dbinfo_file)
+		is_sub_run = False
+		if re.match(r"run_single_\d{8}_\d{6}_\d{2,}", entry) or \
+			re.match(r"run_single_\d{8}_\d{6}_\d", entry) or \
+			re.match(r"\d{8}_\d{6}", entry):
+			is_sub_run = True
+		else:
+			for sub_f, sub_is_dir in sub_entries:
+				if not sub_is_dir:
+					if sub_f == "single_run_epoch.json" or (sub_f.startswith("single_run_") and sub_f.endswith(".json")):
+						is_sub_run = True
+						break
+
+		if is_sub_run:
+			sub_runs.append(full_entry)
+
+
+def handle_single_run_directory(
+	run_dir: str,
+	top_k: List[int] = [1, 3, 5, 10],
+	dbinfo_file: str = "dbinfo.id",
+	only_ensemble: bool = False,
+	force: bool = False,
+) -> List[str]:
+	"""
+	Generate simulations for a single run directory, including ensemble if applicable.
+	"""
+	return _run_simulation_for_single_or_ensemble(run_dir, top_k, dbinfo_file, only_ensemble, force=force)
 
 
 def _run_simulation_for_single_or_ensemble(
 	run_dir: str,
 	top_k: List[int] = [1, 3, 5, 10],
 	dbinfo_file: str = "dbinfo.id",
+	only_ensemble: bool = False,
+	force: bool = False,
 ) -> List[str]:
 	"""Internal helper to process a single run or an ensemble directory."""
 	from trainer.state.single_run import SingleRun
@@ -734,8 +920,15 @@ def _run_simulation_for_single_or_ensemble(
 	epochs_list = _identify_epochs_with_scores(score_dirs)
 
 	if not epochs_list:
-		print(f"DEBUG: [run_simulation_from_saved_scores] No score files found in {run_dir}")
-		return []
+		# If it's a force regeneration, we should have refreshed the cache in caller
+		# but if it was not a force, maybe we just need a refresh now because we expected something.
+		# Refreshing anyway if empty to be sure.
+		for sd in score_dirs:
+			_get_cached_entries(sd, force_refresh=True)
+		epochs_list = _identify_epochs_with_scores(score_dirs)
+		if not epochs_list:
+			print(f"DEBUG: [_run_simulation_for_single_or_ensemble] No score files found in {run_dir} or its score dirs {score_dirs}")
+			return []
 
 	start_total = time.perf_counter()
 
@@ -749,22 +942,36 @@ def _run_simulation_for_single_or_ensemble(
 
 	# 2. Create Recommenders
 	from StockRecommenderFromModel import StockRecommenderFromSavedScores
-	recommenders = [StockRecommenderFromSavedScores(single_run)]
+	# If it's an ensemble (has rep directories), we want the first recommender
+	# to represent the ensemble (saving to run_dir).
+	recommenders = [StockRecommenderFromSavedScores(single_run, output_directory=run_dir)]
+
 	# If it's an ensemble (has rep directories), we might want multiple recommenders
 	# but for saved scores, they are often aggregated or we can just use one
 	# since we are loading precalculated scores anyway.
 	# However, _load_epoch_scores expects a list of recommenders matching the net_X files.
 	# Let's see how many net_X files there are.
-	import glob
-	net_files = glob.glob(os.path.join(score_dirs[0], f"stock_scores_epoch_{epochs_list[0]}_date_*_net_*.csv"))
+	score_entries = _get_cached_entries(score_dirs[0])
 	max_net_idx = -1
-	for f in net_files:
-		m = re.search(r"net_(\d+)", f)
-		if m:
-			max_net_idx = max(max_net_idx, int(m.group(1)))
+	epoch_prefix = f"stock_scores_epoch_{epochs_list[0]}_date_"
+	for fname, is_dir in score_entries:
+		if not is_dir and fname.startswith(epoch_prefix) and fname.endswith(".csv"):
+			m = re.search(r"net_(\d+)", fname)
+			if m:
+				max_net_idx = max(max_net_idx, int(m.group(1)))
 
 	if max_net_idx >= 0:
-		recommenders = [StockRecommenderFromSavedScores(single_run, output_directory=sd) for sd in score_dirs for _ in range(max_net_idx + 1)]
+		if is_ensemble_directory_given(run_dir):
+			# In an ensemble, the first recommender in the list passed to perform_analysis
+			# is treated as the "parent" where ensemble results are saved.
+			# We want it to point to run_dir.
+			# Then we include all reps as source recommenders.
+			ensemble_parent = StockRecommenderFromSavedScores(single_run, output_directory=run_dir)
+			reps = [StockRecommenderFromSavedScores(single_run, output_directory=sd) for sd in score_dirs for _ in range(max_net_idx + 1)]
+			recommenders = [ensemble_parent] + reps
+		else:
+			# Not an ensemble, just use the first score dir (run_dir itself or its only rep)
+			recommenders = [StockRecommenderFromSavedScores(single_run, output_directory=score_dirs[0]) for _ in range(max_net_idx + 1)]
 
 	if not recommenders:
 		print(f"Error: No recommenders found for {run_dir}")
@@ -810,7 +1017,9 @@ def _run_simulation_for_single_or_ensemble(
 			top_k=top_k,
 			dates_to_handle=dates_to_handle,
 			dbinfo_file=dbinfo_file,
-			out_filename_suffix=f"_epoch_{epoch}"
+			out_filename_suffix=f"_epoch_{epoch}",
+			only_ensemble=only_ensemble,
+			force=force,
 		)
 		print(f"DEBUG: [run_simulation_from_saved_scores] Epoch {epoch} complete in {time.perf_counter() - start_epoch:.2f}s")
 		generated_paths.append(out_path)
@@ -827,10 +1036,11 @@ def main(argv: Optional[List[str]] = None) -> None:
 	top_k_parsed = parse_int_list(args.top_k, "top-k")
 
 	if args.from_saved_scores:
-		run_simulation_from_saved_scores(
-			args.model,
+		generate_simulations_from_directories(
+			[args.model],
 			top_k=top_k_parsed,
-			dbinfo_file=args.dbinfo_file
+			dbinfo_file=args.dbinfo_file,
+			only_ensemble=args.only_ensemble,
 		)
 		return
 
@@ -840,6 +1050,14 @@ def main(argv: Optional[List[str]] = None) -> None:
 	if not stock_recommenders:
 		print(f"No models found in {model_arg}")
 		return
+
+	# If it's an ensemble directory, we might need to adjust which models are being used
+	# ensure the first one is the "ensemble" one if it's there
+	is_ensemble = is_ensemble_directory_given(model_arg)
+	if is_ensemble:
+		print(f"DEBUG: Detected ensemble directory {model_arg}")
+	elif len(stock_recommenders) > 1:
+		print(f"DEBUG: Detected multiple models in {model_arg} but not identified as standard ensemble.")
 
 	# Use the first recommender to configure the data provider
 	first_recommender = stock_recommenders[0]

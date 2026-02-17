@@ -37,28 +37,40 @@ def build_run_epoch_series(run_path: str) -> Tuple[Dict[Any, Dict[int, float]], 
     summary_file = os.path.join(run_path, "run_summary_stats.json")
     if os.path.exists(summary_file):
         try:
+            def _parse_series_key(n_str: str) -> Any:
+                if n_str == "0":
+                    return 0
+                if n_str.startswith(("[", "(")):
+                    try:
+                        parsed = ast.literal_eval(n_str)
+                        if isinstance(parsed, list):
+                            parsed = tuple(parsed)
+                        if isinstance(parsed, tuple) and len(parsed) == 2:
+                            k_val, method_val = parsed
+                            if isinstance(method_val, str):
+                                return (int(k_val), method_val.capitalize())
+                        return parsed
+                    except Exception:
+                        pass
+                m = _re.match(r"^(\d+)(sum|norm|rank)$", n_str, flags=_re.IGNORECASE)
+                if m:
+                    return (int(m.group(1)), m.group(2).capitalize())
+                if n_str.isdigit():
+                    return int(n_str)
+                return n_str
+
             with open(summary_file, "r") as f:
                 summary = json.load(f)
             series_data = summary.get("epoch_series", {})
             for n_str, epochs_map in series_data.items():
                 int_epochs_map = {int(k): float(v) for k, v in epochs_map.items()}
-                if n_str == "0":
-                    key: Any = 0
-                elif n_str.startswith("["):
-                    key = tuple(ast.literal_eval(n_str))
-                else:
-                    key = n_str
+                key = _parse_series_key(n_str)
                 by_topn[key] = int_epochs_map
 
             first5_series_data = summary.get("first5_series", {})
             for n_str, epochs_map in first5_series_data.items():
                 int_epochs_map = {int(k): float(v) for k, v in epochs_map.items()}
-                if n_str == "0":
-                    key = 0
-                elif n_str.startswith("["):
-                    key = tuple(ast.literal_eval(n_str))
-                else:
-                    key = n_str
+                key = _parse_series_key(n_str)
                 by_topn_first5[key] = int_epochs_map
         except Exception:
             # fall back to CSVs

@@ -20,7 +20,10 @@ __all__ = ["ranking_surrogate_loss", "mse_restricted", "rank_range_displacement"
 
 
 def mse_restricted(y_pred: "torch.Tensor", y_true: "torch.Tensor", mode: str, k: int = 10) -> "torch.Tensor":
-	"""MSE limited to top/bottom-k entries determined by predicted values (per-sample).
+	"""MSE limited to top/bottom-k entries determined by predicted values (per-sample)
+	AND top/bottom-k entries determined by true values (per-sample).
+
+	The result is the average of these two restricted MSEs.
 
 	mode: "top" or "bottom"
 	"""
@@ -29,13 +32,21 @@ def mse_restricted(y_pred: "torch.Tensor", y_true: "torch.Tensor", mode: str, k:
 	if O == 0:
 		return torch.tensor(0.0, device=y_pred.device, dtype=y_pred.dtype)
 	kk = int(max(1, min(int(k), O)))
-	if mode == "top":
-		idx = torch.topk(y_pred, kk, dim=1, largest=True, sorted=False).indices
-	else:
-		idx = torch.topk(y_pred, kk, dim=1, largest=False, sorted=False).indices
-	gather_pred = torch.gather(y_pred, 1, idx)
-	gather_true = torch.gather(y_true.to(y_pred.dtype), 1, idx)
-	return torch.mean((gather_pred - gather_true) ** 2)
+	largest = (mode == "top")
+
+	# Part 1: MSE on top/bottom k predictions
+	idx_pred = torch.topk(y_pred, kk, dim=1, largest=largest, sorted=False).indices
+	gather_pred_1 = torch.gather(y_pred, 1, idx_pred)
+	gather_true_1 = torch.gather(y_true.to(y_pred.dtype), 1, idx_pred)
+	mse_pred_based = torch.mean((gather_pred_1 - gather_true_1) ** 2)
+
+	# Part 2: MSE on top/bottom k labels
+	idx_true = torch.topk(y_true.to(y_pred.dtype), kk, dim=1, largest=largest, sorted=False).indices
+	gather_pred_2 = torch.gather(y_pred, 1, idx_true)
+	gather_true_2 = torch.gather(y_true.to(y_pred.dtype), 1, idx_true)
+	mse_true_based = torch.mean((gather_pred_2 - gather_true_2) ** 2)
+
+	return (mse_pred_based + mse_true_based) / 2.0
 
 
 def rank_range_displacement(y_pred: "torch.Tensor", y_true: "torch.Tensor", lower: int, upper: int) -> "torch.Tensor":

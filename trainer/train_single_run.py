@@ -312,7 +312,7 @@ def _build_training_bundles_and_loaders(
 
 	# Determine if we should use caching based on memory usage
 	total_mem = psutil.virtual_memory().total
-	use_caching = True
+	use_caching = False
 
 	for run_idx in range(repeat_count_cfg):
 		m, opt, sc, inner_use_amp, inner_amp_dtype = create_model_and_optimizer(
@@ -892,22 +892,20 @@ class TrainSingleRun:
 						map_location="cpu"
 					)
 
-					# We still need to create the optimizer and scaler to load the states into
-					# but wait, load_model_from_checkpoint returns the model.
-					# To get the optimizer with the right parameters, we can use create_model_and_optimizer
-					_, opt, sc, _, _ = create_model_and_optimizer(
-						family_run,
-						input_size,
-						output_size,
-						single_run.mlp_layers,
-						single_run.activation,
-						torch.device("cpu"),
-						single_run.lr,
-						to_device=False,
-						prior_days=single_run.prior_days,
-						optimizer_name=single_run.optimizer,
-						final_activation=single_run.final_activation,
-					)
+					# Create an optimizer that is bound to the LOADED model's parameters, not a new dummy model.
+					opt_name = str(single_run.optimizer or "adam").lower()
+					lr = float(single_run.lr)
+					if opt_name == "adam":
+						opt = torch.optim.Adam(m.parameters(), lr=lr)
+					elif opt_name == "adamw":
+						opt = torch.optim.AdamW(m.parameters(), lr=lr)
+					elif opt_name == "sgd":
+						opt = torch.optim.SGD(m.parameters(), lr=lr)
+					else:
+						raise ValueError(f"Unsupported optimizer: {single_run.optimizer}")
+
+					# Recreate scaler consistent with bundle AMP dtype
+					sc = torch.amp.GradScaler('cuda', enabled=(bundle.amp_dtype == torch.float16))  # type: ignore[attr-defined]
 
 					if opt_state:
 						opt.load_state_dict(opt_state)
