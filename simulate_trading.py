@@ -1,5 +1,6 @@
 import argparse
 import os
+import random
 import re
 import threading
 import time
@@ -7,6 +8,7 @@ import traceback
 from queue import Queue
 from typing import Tuple, Dict, Optional, List, Union, Any
 
+import line_profiler
 import numpy as np
 import torch
 from torch import Tensor
@@ -120,10 +122,8 @@ def perform_analysis_prefetch_scores(
 	# Check cache
 	cache_key = (dbinfo_file, min_date, max_date)
 	if cache_key in GLOBAL_DATA_CACHE:
-		print(f"DEBUG: [perform_analysis_prefetch_scores] Using cached data for range {min_date} to {max_date}")
 		return GLOBAL_DATA_CACHE[cache_key]
 
-	print(f"DEBUG: [perform_analysis_prefetch_scores] Fetching data from DB for date range {min_date} to {max_date}...")
 	try:
 		conn = get_connection(dbinfo_file=dbinfo_file)
 		cur = conn.cursor()
@@ -200,6 +200,8 @@ def calculate_scores(
 					clear_gpu_cache=True,
 				)
 
+
+@line_profiler.profile
 def perform_analysis(
 	stock_recommenders: List[StockRecommender],
 	top_k: List[int],
@@ -242,19 +244,24 @@ def perform_analysis(
 			tasks.append((out_path, ensemble_reps, parent_recommender)) # target_path, source_reps, main_recommender
 
 			# Individual rep tasks: each rep (recommenders 1..N) in its own dir
-			if not only_ensemble:
-				for rep_rec in ensemble_reps:
-					out_name = f"stock_simulation_{stock_simulation_size}{out_filename_suffix or ''}.csv"
-					out_path = os.path.join(rep_rec.get_output_directory(), out_name)
-					tasks.append((out_path, [rep_rec], rep_rec))
+			# In an ensemble, reps are added for each net_X.
+			# We only want to generate one simulation per rep directory.
+			seen_dirs = set()
+			for rep_rec in ensemble_reps:
+				rep_dir = rep_rec.get_output_directory()
+				if rep_dir in seen_dirs:
+					continue
+				seen_dirs.add(rep_dir)
+				out_name = f"stock_simulation_{stock_simulation_size}{out_filename_suffix or ''}.csv"
+				out_path = os.path.join(rep_dir, out_name)
+				tasks.append((out_path, [rep_rec], rep_rec))
 		else:
 			# It's a family directory, don't ensemble the sub-runs here.
 			# Just process each individually (if requested via not only_ensemble)
-			if not only_ensemble:
-				for rec in stock_recommenders:
-					out_name = f"stock_simulation_{stock_simulation_size}{out_filename_suffix or ''}.csv"
-					out_path = os.path.join(rec.get_output_directory(), out_name)
-					tasks.append((out_path, [rec], rec))
+			for rec in stock_recommenders:
+				out_name = f"stock_simulation_{stock_simulation_size}{out_filename_suffix or ''}.csv"
+				out_path = os.path.join(rec.get_output_directory(), out_name)
+				tasks.append((out_path, [rec], rec))
 	else:
 		# Single recommender task
 		rec = stock_recommenders[0]
@@ -266,9 +273,7 @@ def perform_analysis(
 	final_out_path = tasks[0][0] if tasks else ""
 	for out_path, source_reps, main_recommender in tasks:
 		if os.path.exists(out_path) and not force:
-			print(f"DEBUG: [perform_analysis] Skipping {os.path.basename(out_path)} as it already exists.")
 			continue
-		print(f"DEBUG: [perform_analysis] Generating {os.path.basename(out_path)} in {os.path.dirname(out_path)}")
 
 		# Portfolio initial values
 		portfolio_values_by_k_method: Dict[Tuple[str, int], float] = {} # (method, k) -> value
@@ -320,7 +325,7 @@ def perform_analysis(
 				if num_sources == 1:
 					methods = [("", methods[0][1])]
 
-				# Store results for all methods
+				# Results for all methods
 				daily_method_results = {} # method_name -> {k -> (ret, rank, port_val)}
 
 				for method_name, agg_scores in methods:
@@ -328,7 +333,7 @@ def perform_analysis(
 					precalc_trans = transactions_by_date.get(int(feature_date_id))
 
 					# Use main_recommender for logic (ticker pool etc)
-					_scores, top_scroing_ticker_ids_all = main_recommender.getBuyRecommendations(
+					_scores, top_scoring_ticker_ids_all = main_recommender.getBuyRecommendations(
 						feature_vector=None,
 						top_k=max_k,
 						index_base=1,
@@ -340,7 +345,7 @@ def perform_analysis(
 					)
 
 					# Fetch actual open/close prices to calculate real returns
-					needed_tickers_list = [int(tid) for tid in top_scroing_ticker_ids_all[:max_k]]
+					needed_tickers_list = [int(tid) for tid in top_scoring_ticker_ids_all[:max_k]]
 
 					day_price_data = price_data_by_date.get(trade_date_id, {})
 					if not day_price_data:
@@ -354,7 +359,7 @@ def perform_analysis(
 
 					method_results_k = {}
 					for k in top_k:
-						chosen = top_scroing_ticker_ids_all[:k]
+						chosen = top_scoring_ticker_ids_all[:k]
 						valid_ratios: List[float] = []
 						for tid in chosen:
 							prices = price_data_map.get(int(tid))
@@ -371,36 +376,42 @@ def perform_analysis(
 							ret = day_ratio_avg - 1.0
 
 							# Calculate percentile rank
+							# The requirement is to rank against all stocks from the recommendation file (the pool)
 							pool_ticker_ids = main_recommender.ticker_ids
 							date_ratios = all_ratios_by_date.get(trade_date_id, {})
-							if not date_ratios:
-								positions_map = get_ticker_positions(
-									ticker_ids=chosen,
-									date_id=trade_date_id,
-									dbinfo_file=dbinfo_file,
-									pool_ticker_ids=pool_ticker_ids
-								)
-							else:
-								if pool_ticker_ids is not None:
-									pool_set = set(pool_ticker_ids)
-									ticker_to_ratio = {tid: ratio for tid, ratio in date_ratios.items() if tid in pool_set}
-								else:
-									ticker_to_ratio = date_ratios
 
-								if not ticker_to_ratio:
-									positions_map = {tid: 0.0 for tid in chosen}
-								else:
-									all_ratios_vals = np.array(list(ticker_to_ratio.values()))
-									all_ratios_sorted = np.sort(all_ratios_vals)
-									total_count = len(all_ratios_sorted)
-									positions_map = {}
-									for tid in chosen:
-										if tid in ticker_to_ratio:
-											ratio = ticker_to_ratio[tid]
-											lower_count = np.searchsorted(all_ratios_sorted, ratio, side='left')
-											positions_map[tid] = float(lower_count) / total_count
-										else:
-											positions_map[tid] = 0.0
+							# Filter distribution to ONLY include those in the recommendation pool
+							if pool_ticker_ids is not None:
+								pool_set = set(pool_ticker_ids)
+								ticker_to_ratio = {tid: ratio for tid, ratio in date_ratios.items() if tid in pool_set}
+							else:
+								ticker_to_ratio = date_ratios
+
+							if not ticker_to_ratio:
+								positions_map = {tid: 0.0 for tid in chosen}
+							else:
+								all_ratios_vals = np.fromiter(ticker_to_ratio.values(),dtype=np.float32)
+								all_ratios_sorted = np.sort(all_ratios_vals)
+								total_count = len(all_ratios_sorted)
+								positions_map = {}
+
+								stable_order = sorted(chosen)
+								ordered_ratios = list()
+								used_tickers = list()
+								for tid in stable_order:
+									if tid in ticker_to_ratio:
+										ordered_ratios.append(ticker_to_ratio[tid])
+										used_tickers.append(tid)
+									else:
+										positions_map[tid] = 0.0
+										print(f"Warning: Ticker {tid} not found in the recommendation pool.")
+										# "count the number of stocks ... with a true ... next day change less than that"
+								lower_count = np.searchsorted(all_ratios_sorted, ordered_ratios, side='left')
+								for idx, tid in enumerate(used_tickers):
+									positions_map[tid] = float(lower_count[idx]) / total_count
+
+
+
 
 							if positions_map:
 								rank = float(np.mean(list(positions_map.values())))
@@ -413,7 +424,7 @@ def perform_analysis(
 
 						method_results_k[k] = (ret, rank, portfolio_values_by_k_method[port_key])
 
-					daily_method_results[method_name] = (method_results_k, "|".join(str(int(tid)) for tid in top_scroing_ticker_ids_all[:max_k]))
+					daily_method_results[method_name] = (method_results_k, "|".join(str(int(tid)) for tid in top_scoring_ticker_ids_all[:max_k]))
 
 				# Write row to CSV
 				primary_method = methods[0][0]
@@ -479,7 +490,6 @@ def _rank_scores(scores: torch.Tensor) -> torch.Tensor:
 	ranks = torch.zeros_like(temp_scores)
 	ranks[sorted_indices] = torch.arange(len(temp_scores), dtype=torch.float32)
 	return ranks
-
 
 def _load_epoch_scores(
 	stock_recommenders: List[StockRecommender],
@@ -588,6 +598,11 @@ def parse_args(argv: Optional[List[str]] = None):
 		action="store_true",
 		help="Only process ensemble simulations, skipping individual reps.",
 	)
+	p.add_argument(
+		"--force",
+		action="store_true",
+		help="Force recalculation even if simulation results already exist.",
+	)
 	return p.parse_args(argv)
 
 def simulate_using_models_passed(models_passed: List[StockRecommender], args: argparse.Namespace, top_k_parsed=None,
@@ -607,6 +622,7 @@ def simulate_using_models_passed(models_passed: List[StockRecommender], args: ar
 			dates_to_handle=dates_to_handle,
 			dbinfo_file=args.dbinfo_file,
 			only_ensemble=args.only_ensemble,
+			force=args.force,
 		)
 		print(f"Simulation complete. Results written to: {out_path}")
 
@@ -796,6 +812,9 @@ def _map_dates_to_indices(provider: TrainingInstanceProvider, epoch_dates: set[i
 			continue
 	return available_indices
 
+def extending_list(list_to_extend: List[str], new_list: List[str]):
+	"""Extend a list with another list, preserving the original list."""
+	list_to_extend.extend(new_list)
 
 def generate_simulations_from_directories(
 	directories: List[str],
@@ -820,15 +839,18 @@ def generate_simulations_from_directories(
 			find_sub_runs_for_given_run_directory(d, sub_runs)
 			# If it's a family directory, it should generate a list of single run directories in it,
 			# then call the previous method to handle single run directories.
-			all_generated.extend(generate_simulations_from_directories(sub_runs, top_k, dbinfo_file, only_ensemble, force=force))
+			temp_generated = generate_simulations_from_directories(sub_runs, top_k, dbinfo_file, only_ensemble, force=force)
+			all_generated.extend(temp_generated)
 		elif is_ensemble_directory_given(d, force_refresh=force):
 			print(f"Processing ensemble directory: {d}")
 			# Generate simulations for the ensemble itself and its reps (if requested)
-			all_generated.extend(handle_single_run_directory(d, top_k, dbinfo_file, only_ensemble, force=force))
+			temp_generated = handle_single_run_directory(d, top_k, dbinfo_file, only_ensemble, force=force)
+			all_generated.extend(temp_generated)
 		elif is_rep_directory(d, force_refresh=force):
 			# If rep directories, the list should repeatedly call a method to generate simulations from a rep directory.
 			print(f"Processing rep directory: {d}")
-			all_generated.extend(_run_simulation_for_single_or_ensemble(d, top_k, dbinfo_file, only_ensemble, force=force))
+			temp_generated = _run_simulation_for_single_or_ensemble(d, top_k, dbinfo_file, only_ensemble, force=force)
+			all_generated.extend(temp_generated)
 		else:
 			print(f"INVALID DIRECTORY: {d}")
 			# Or if it's just a plain single run directory without reps.
@@ -903,6 +925,7 @@ def handle_single_run_directory(
 	return _run_simulation_for_single_or_ensemble(run_dir, top_k, dbinfo_file, only_ensemble, force=force)
 
 
+@line_profiler.profile
 def _run_simulation_for_single_or_ensemble(
 	run_dir: str,
 	top_k: List[int] = [1, 3, 5, 10],
@@ -938,7 +961,6 @@ def _run_simulation_for_single_or_ensemble(
 		return []
 
 	single_run = SingleRun.load(single_run_path)
-	print(f"DEBUG: [run_simulation_from_saved_scores] SingleRun loaded. Date range: {single_run.train_validation_test_sets_start_date_id} to {single_run.train_validation_test_sets_end_date_id}")
 
 	# 2. Create Recommenders
 	from StockRecommenderFromModel import StockRecommenderFromSavedScores
@@ -967,7 +989,10 @@ def _run_simulation_for_single_or_ensemble(
 			# We want it to point to run_dir.
 			# Then we include all reps as source recommenders.
 			ensemble_parent = StockRecommenderFromSavedScores(single_run, output_directory=run_dir)
-			reps = [StockRecommenderFromSavedScores(single_run, output_directory=sd) for sd in score_dirs for _ in range(max_net_idx + 1)]
+			reps = []
+			for sd in score_dirs:
+				for _ in range(max_net_idx + 1):
+					reps.append(StockRecommenderFromSavedScores(single_run, output_directory=sd))
 			recommenders = [ensemble_parent] + reps
 		else:
 			# Not an ensemble, just use the first score dir (run_dir itself or its only rep)
@@ -979,7 +1004,6 @@ def _run_simulation_for_single_or_ensemble(
 
 	# 3. Setup Data Provider
 	first_recommender = recommenders[0]
-	print("DEBUG: [run_simulation_from_saved_scores] Initializing TrainingInstanceProvider...")
 	start_prov = time.perf_counter()
 	provider = TrainingInstanceProvider(
 		dbinfo_file=dbinfo_file,
@@ -1021,7 +1045,6 @@ def _run_simulation_for_single_or_ensemble(
 			only_ensemble=only_ensemble,
 			force=force,
 		)
-		print(f"DEBUG: [run_simulation_from_saved_scores] Epoch {epoch} complete in {time.perf_counter() - start_epoch:.2f}s")
 		generated_paths.append(out_path)
 
 	print(f"DEBUG: [run_simulation_from_saved_scores] All done in {time.perf_counter() - start_total:.2f}s")
@@ -1041,6 +1064,7 @@ def main(argv: Optional[List[str]] = None) -> None:
 			top_k=top_k_parsed,
 			dbinfo_file=args.dbinfo_file,
 			only_ensemble=args.only_ensemble,
+			force=args.force,
 		)
 		return
 

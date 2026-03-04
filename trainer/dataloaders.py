@@ -39,18 +39,18 @@ def build_dataloaders(family_run: FamilyRun, dataset_to_wrap) -> DataLoader[Any]
 		except Exception:
 			estimated_batch_bytes = None
 
-	if estimated_batch_bytes is not None and num_workers and num_workers > 0:
-		# If each batch is extremely large, disable multiprocessing to avoid prefetch blow-ups.
-		# 512 MB threshold keeps memory predictable on Windows/spawn.
-		if estimated_batch_bytes >= 512 * 1024 * 1024:
-			print(
-				f"Large batch estimate: {estimated_batch_bytes / (1024**3):.2f} GB. "
-				"Disabling DataLoader workers/pin_memory to reduce RAM pressure."
-			)
-			num_workers = 0
-			persistent_workers = False
-			pin_memory = False
-
+	# if estimated_batch_bytes is not None and num_workers and num_workers > 0:
+	# 	# If each batch is extremely large, disable multiprocessing to avoid prefetch blow-ups.
+	# 	# 512 MB threshold keeps memory predictable on Windows/spawn.
+	# 	if estimated_batch_bytes >= 512 * 1024 * 1024:
+	# 		print(
+	# 			f"Large batch estimate: {estimated_batch_bytes / (1024**3):.2f} GB. "
+	# 			"Disabling DataLoader workers/pin_memory to reduce RAM pressure."
+	# 		)
+	# 		num_workers = 0
+	# 		persistent_workers = False
+	# 		pin_memory = False
+	#
 	prefetch_factor = 1 if num_workers and num_workers > 0 else None
 
 	if len(dataset_to_wrap) == 0:

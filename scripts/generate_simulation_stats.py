@@ -218,6 +218,22 @@ def get_portfolio_columns(columns: List[str]) -> Dict[Any, str]:
 		n_to_col[0] = "portfolio_value"
 	return n_to_col
 
+def get_rank_columns(columns: List[str]) -> Dict[Any, str]:
+	"""Identify rank-percent-like columns and map them to (N, Method) keys."""
+	n_to_col = {}
+	for c in columns:
+		if not isinstance(c, str):
+			continue
+		cn = _norm(c)
+		# Rank Percent topN (Method)
+		m = re.match(r"^rankpercenttop(\d+)(?:\((sum|norm|rank)\))?$", cn)
+		if m:
+			k_val = int(m.group(1))
+			method_val = m.group(2).capitalize() if m.group(2) else ""
+			n_to_col[(k_val, method_val)] = c
+			continue
+	return n_to_col
+
 def generate_run_summary(run_path: str) -> Dict[str, Any]:
 	"""Compute summary statistics for a run directory by scanning all simulation CSVs."""
 	print(f"Generating run summary for {run_path}...")
@@ -258,6 +274,7 @@ def generate_run_summary(run_path: str) -> Dict[str, Any]:
 	first5_best_epoch = {}
 	epoch_series = {}
 	first5_series = {}
+	rank_series = {}
 
 	for fname in os.listdir(run_path):
 		m = epoch_pattern.match(fname) or epoch_pattern2.match(fname)
@@ -303,6 +320,14 @@ def generate_run_summary(run_path: str) -> Dict[str, Any]:
 					if n not in first5_best or head_max > first5_best[n]:
 						first5_best[n] = head_max
 						first5_best_epoch[n] = epoch
+
+			n_to_rank_col = get_rank_columns(df.columns)
+			for n, col in n_to_rank_col.items():
+				series = df[col]
+				avg_val = float(series.mean())
+				key = str(n)
+				if key not in rank_series: rank_series[key] = {}
+				rank_series[key][epoch] = avg_val
 		except Exception as e:
 			print(f"Error processing epoch CSV {fname}: {e}")
 
@@ -317,6 +342,7 @@ def generate_run_summary(run_path: str) -> Dict[str, Any]:
 		}
 	summary["epoch_series"] = epoch_series
 	summary["first5_series"] = first5_series
+	summary["rank_series"] = rank_series
 
 	return summary
 

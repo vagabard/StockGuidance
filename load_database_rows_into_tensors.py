@@ -43,7 +43,7 @@ import argparse
 import os
 import time
 import traceback
-from typing import Optional, Tuple, List, Dict, Set
+from typing import Optional, Tuple, List, Dict, Set, Any, Iterator
 
 import numpy as np
 
@@ -55,10 +55,11 @@ except Exception:
 	TORCH_AVAILABLE = False
 
 from database.db_connect import get_connection
+from trainer.label.transform import transform_labels
 
 
 # Streaming helper to avoid loading millions o rows with fetchall()
-def _iter_rows(cursor, batch_size: int = 10000):
+def _iter_rows(cursor, batch_size: int = 10000)-> Iterator[Tuple|Dict[str, Any]]:
 	"""Yield rows from a DB-API cursor in batches using fetchmany.
 
 	This prevents the process from hanging or running out of memory when the
@@ -100,6 +101,8 @@ ORDER BY ddsd.date_id ASC, ddsd.ticker_id ASC	"""
 #     ORDER BY ddsd.date_id
 # ) AS next_day_change_in_price
 
+
+
 def SELECT_VARIABLE_DATA_SQL(day_change_centered: str, current_day_change = False, volume_ratio = False, vwap_ratio = False, tranaction_ratio = False, only_use_tickers_without_missing_dates = True, start_date_id:Optional[int] = -1, end_date_id:Optional[int] = -1, ticker_pool_start_date_id:Optional[int] = None, ticker_pool_end_date_id:Optional[int] = None) -> str:
 	"""Build SQL that selects only close ratio as the single feature plus the chosen label.
 
@@ -109,29 +112,10 @@ def SELECT_VARIABLE_DATA_SQL(day_change_centered: str, current_day_change = Fals
 	- "zero" -> use ddsd.zero_centered_next_day_price_change
 	Any other value falls back to "one" behavior.
 	"""
-	if day_change_centered == "half":
-		additional_fields_to_select = "ddsd.half_centered_next_day_price_change"
-	elif day_change_centered == "zero":
-		additional_fields_to_select = "ddsd.zero_centered_next_day_price_change"
-	elif day_change_centered == "gapped01":
-		additional_fields_to_select = "ddsd.next_day_price_change_to_extremes_0_1"
-	elif day_change_centered == "binary_labels":
-		additional_fields_to_select = "ddsd.next_day_raise1_lower0"
-	elif day_change_centered == "top_100_binary_labels":
-		additional_fields_to_select = "ddsd.next_day_top100_raise1_lower0"
-	elif day_change_centered == "gappednegpos":
-		additional_fields_to_select = "ddsd.zero_center_extremes_neg1_pos1"
-	elif day_change_centered == "binary_negpos":
-		additional_fields_to_select = "ddsd.zero_center_raise1_lower_neg1"
-	elif day_change_centered == "top_100_binary_negpos":
-		additional_fields_to_select = "ddsd.zero_center_top100_1_other_neg1"
-	elif day_change_centered == "stock_change_ratio_ranked":
-		additional_fields_to_select = "ddsd.next_day_change_in_price"
-	else:
-		additional_fields_to_select = "ddsd.next_day_change_in_price"
+	additional_fields_to_select = f"ddsd.next_day_change_in_price"
 
 	if current_day_change:
-		additional_fields_to_select = f"{additional_fields_to_select},ddsd.change_in_price_over_day"
+		additional_fields_to_select = f"{additional_fields_to_select},ddsd.change_in_price_over_day"#close_ratio_to_prior
 	if volume_ratio:
 		additional_fields_to_select = f"{additional_fields_to_select},ddsd.volume_normalized"
 	if vwap_ratio:
@@ -143,7 +127,7 @@ def SELECT_VARIABLE_DATA_SQL(day_change_centered: str, current_day_change = Fals
 SELECT
 	ddsd.ticker_id,
 	ddsd.date_id,
-	ddsd.close_ratio_to_prior,
+	ddsd.change_in_price_over_day,
 	{additional_fields_to_select}
 FROM daily_delta_stock_data ddsd """
 	if only_use_tickers_without_missing_dates:
@@ -174,17 +158,18 @@ def create_ticker_id_selection_sql(only_use_tickers_without_missing_dates = True
 
 	# Limit to tickers present on both start and end date
 	ticker_id_selection_query = f"""
-	SELECT t1.ticker_id
+	SELECT Distinct(t1.ticker_id)
 	FROM daily_delta_stock_data t1
 	JOIN ticker_symbol ts ON t1.ticker_id = ts.id
-	JOIN daily_delta_stock_data t2 ON t1.ticker_id = t2.ticker_id
 """
 	if start_date_id is not None or end_date_id is not None:
-		if start_date_id is None or start_date_id < 0 :
+		ticker_id_selection_query += f""" JOIN daily_delta_stock_data t2 ON t1.ticker_id = t2.ticker_id
+"""
+		if start_date_id is None or (isinstance(start_date_id, int) and start_date_id < 0):
 			start_date_string = f" (SELECT MIN(date_id) FROM daily_delta_stock_data) "
 		else:
 			start_date_string = f" (SELECT MAX(date_id) FROM daily_delta_stock_data WHERE date_id <= {start_date_id}) "
-		if end_date_id is None or end_date_id < 0:
+		if end_date_id is None or (isinstance(end_date_id, int) and end_date_id < 0):
 			end_date_string = f" (SELECT MAX(date_id) FROM daily_delta_stock_data) "
 		else:
 			end_date_string = f" (SELECT MAX(date_id) FROM daily_delta_stock_data WHERE date_id <= {end_date_id}) "
@@ -351,6 +336,7 @@ def fetch_grouped_by_date(
 	end_date_id: Optional[int] = None,
 	ticker_pool_start_date_id: Optional[int] = None,
 	ticker_pool_end_date_id: Optional[int] = None,
+	primary_feature_field: str = "change_in_price_over_day",
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, List[int]]:
 	"""Fetch rows and pack features into a fixed layout per date.
 
@@ -372,6 +358,8 @@ def fetch_grouped_by_date(
 
 	global _DISK_GROUPED_CACHE_CLEARED_ONCE
 
+	print(f"date id information start_date_id={start_date_id} end_date_id={end_date_id} ticker_pool_start_date_id={ticker_pool_start_date_id} ticker_pool_end_date_id={ticker_pool_end_date_id}")
+
 	# Build cache paths based on configuration so different feature sets keep
 	# separate cache files.
 	cache_base = (
@@ -385,6 +373,8 @@ def fetch_grouped_by_date(
 		cache_base += f"_start_{start_date_id}"
 	if end_date_id is not None:
 		cache_base += f"_end_{end_date_id}"
+	if ticker_pool_start_date_id is not None:
+		cache_base += f"_pool_start_{ticker_pool_start_date_id}"
 	if ticker_pool_end_date_id is not None:
 		cache_base += f"_pool_end_{ticker_pool_end_date_id}"
 	cache_base+=f".npz"
@@ -431,7 +421,7 @@ def fetch_grouped_by_date(
 	print("Fetching rows from database using dbinfo file:", dbinfo_file)
 	conn = get_connection(dbinfo_file=dbinfo_file)
 	try:
-		cur = conn.cursor()
+		cur = conn.cursor(dictionary=True)
 		sql = SELECT_VARIABLE_DATA_SQL(
 			day_change_centered,
 			current_day_change,
@@ -443,7 +433,6 @@ def fetch_grouped_by_date(
 			end_date_id,
 			ticker_pool_start_date_id=ticker_pool_start_date_id,
 			ticker_pool_end_date_id=ticker_pool_end_date_id,
-
 		)
 		if limit is not None and limit > 0:
 			sql = f"{sql}\nLIMIT {int(limit)}"
@@ -454,23 +443,42 @@ def fetch_grouped_by_date(
 		tickers_found: Set[int] = set()
 
 		# Stream rows batch-by-batch to prevent hanging/memory pressure
+		max_label_overall = -np.inf
+		min_label_overall = np.inf
 		for row in _iter_rows(cur):
-			ticker_id = int(row[0])
+			# ddsd.ticker_id,
+			# ddsd.date_id,
+			# ddsd.change_in_price_over_day,
+
+			ticker_id = int(row['ticker_id'])
 			tickers_found.add(ticker_id)
-			date_id = int(row[1])
+			date_id = int(row['date_id'])
 			# split features and label (last)
-			stock_feature_values = row[2:-1]
-			label_val = row[-1]
+			primary_feature_value = row[primary_feature_field]
+			label_val = row['next_day_change_in_price']
 			stock_data_fields_safe = [
-				np.nan if one_stock_value is None else float(one_stock_value) for one_stock_value in stock_feature_values
+				np.nan if primary_feature_value is None else float(primary_feature_value)
+			] + [
+				np.nan if row[k] is None else float(row[k])
+				for k in row.keys()
+				if k not in ['ticker_id', 'date_id', primary_feature_field, 'next_day_change_in_price']
 			]
 			label_safe = np.nan if label_val is None else float(label_val)
 
 			if date_id not in stock_ids_and_features_and_label_by_date:
 				# first time encountering this date_id
 				stock_ids_and_features_and_label_by_date[date_id] = []
+			if label_safe is not None and not np.isnan(label_safe):
+				if label_safe > max_label_overall: max_label_overall = label_safe
+				if label_safe < min_label_overall: min_label_overall = label_safe
+
 			stock_ids_and_features_and_label_by_date[date_id].append((ticker_id, stock_data_fields_safe, label_safe))
+
+		stock_ids_and_features_and_label_by_date = transform_labels(day_change_centered, stock_ids_and_features_and_label_by_date, min_value_found=min_label_overall, max_value_found=max_label_overall)
+
 		number_of_tickers = len(tickers_found)
+
+
 
 		Number_Of_dates_found = len(stock_ids_and_features_and_label_by_date.keys())
 		# feature width depends on selected SQL (add up the features)
@@ -496,15 +504,18 @@ def fetch_grouped_by_date(
 			)
 			Y = np.full((Number_Of_dates_found, number_of_tickers), np.nan, dtype=np.float64)
 			for d_idx, dt in enumerate(dates_list):
-				for (
+				for ticker_index,(
 					ticker_id,
 					stock_data_fields_safe,
 					label_safe,
-				) in stock_ids_and_features_and_label_by_date.get(dt, []):
+				) in enumerate(stock_ids_and_features_and_label_by_date.get(dt, [])):
 					t_idx = ticker_id - 1
-					if 0 <= t_idx < number_of_tickers:
-						X[d_idx, t_idx, :] = stock_data_fields_safe
-						Y[d_idx, t_idx] = label_safe
+					if 0 <= ticker_index < number_of_tickers:
+						print(f"included ticker_index={ticker_index} ticker_id={ticker_id} t_idx={t_idx}")
+						X[d_idx, ticker_index, :] = stock_data_fields_safe
+						Y[d_idx, ticker_index] = label_safe
+					# else:
+					# 	print(f"skipped ticker_index={ticker_index} ticker_id={ticker_id} t_idx={t_idx}")
 		else:
 			X = np.full(
 				(Number_Of_dates_found, number_of_tickers * Number_of_fields_per_ticker_symbol),
@@ -512,19 +523,25 @@ def fetch_grouped_by_date(
 				dtype=np.float64,
 			)
 			Y = np.full((Number_Of_dates_found, number_of_tickers), np.nan, dtype=np.float64)
+			counted_tickers = False
+			ticker_count = 0
 			for d_idx, dt in enumerate(dates_list):
-				for (
+				for ticker_index,(
 					ticker_id,
 					stock_data_fields_safe,
 					label_safe,
-				) in stock_ids_and_features_and_label_by_date.get(dt, []):
-					base = (ticker_id - 1) * Number_of_fields_per_ticker_symbol
+				) in enumerate(stock_ids_and_features_and_label_by_date.get(dt, [])):
+					base = (ticker_index) * Number_of_fields_per_ticker_symbol
 					if 0 <= base < number_of_tickers * Number_of_fields_per_ticker_symbol:
 						X[d_idx, base : base + Number_of_fields_per_ticker_symbol] = (
 							stock_data_fields_safe
 						)
-						Y[d_idx, ticker_id - 1] = label_safe
-
+						Y[d_idx, ticker_index] = label_safe
+					else:
+						if not counted_tickers:
+							ticker_count += 1
+							print(f"skipped count {ticker_count} ticker_id={ticker_id} base={base}")
+				counted_tickers = True
 		if day_change_centered == "stock_change_ratio_ranked":
 			# For each date (row in Y), rank the non-NaN values and normalize to 0-1
 			# smallest/most negative change -> 0, largest positive change -> 1
@@ -554,6 +571,9 @@ def fetch_grouped_by_date(
 
 		dates_nd_array = np.array(dates_list, dtype=np.int32)
 		return dates_nd_array, X, Y, ticker_ids_list
+	except Exception as e:
+		traceback.print_exception(e)
+		raise
 	finally:
 		try:
 			conn.close()
@@ -605,6 +625,11 @@ def parse_args(argv: Optional[list[str]] = None):
 		),
 	)
 	p.add_argument("--save-pt", default=None, help="Path to save PyTorch tensors as .pt (requires --to-torch_interface)")
+	p.add_argument("--start-date-id", type=int, default=None)
+	p.add_argument("--end-date-id", type=int, default=None)
+	p.add_argument("--ticker-start-date", type=int, default=None, help="Start date_id for ticker pool selection")
+	p.add_argument("--ticker-end-date", type=int, default=None, help="End date_id for ticker pool selection")
+	p.add_argument("--save-csv", default=None, help="Path to save features to CSV as (feature value, ticker_id, date_id)")
 	return p.parse_args(argv)
 
 
@@ -654,7 +679,6 @@ def main(argv: Optional[list[str]] = None) -> None:
 	# 			print(f"Saved PyTorch tensors to {args.save_pt}")
 	# else:
 	return_2d = args.layout == "per-date-2d"
-	print(f"user arg: {args}")
 	dates_np, X_np, Y_np, _ticker_ids = fetch_grouped_by_date(
 		dbinfo_file=args.dbinfo_file,
 		limit=args.limit,
@@ -666,6 +690,8 @@ def main(argv: Optional[list[str]] = None) -> None:
 		tranaction_ratio=args.tranaction_ratio,
 		start_date_id=args.start_date_id,
 		end_date_id=args.end_date_id,
+		ticker_pool_start_date_id=args.ticker_start_date,
+		ticker_pool_end_date_id=args.ticker_end_date,
 	)
 
 	layout_desc = "(D, T, F)" if return_2d else "(D, T*F)"
@@ -703,6 +729,67 @@ def main(argv: Optional[list[str]] = None) -> None:
 		if args.save_pt:
 			torch.save({"dates": dates_t, "X": X_t, "Y": Y_t}, args.save_pt)
 			print(f"Saved PyTorch tensors to {args.save_pt}")
+
+	if args.save_csv:
+		import csv
+		# Flatten the data to (feature value, ticker_id, date_id)
+		# X_np: (D, T, F) if return_2d, (D, T*F) if not
+		# _ticker_ids: (T,)
+		# dates_np: (D,)
+		print(f"Saving CSV to {args.save_csv}...")
+
+		# Prepare data for faster writing
+		num_dates = X_np.shape[0]
+		num_tickers = len(_ticker_ids)
+
+		if return_2d:
+			# X_np shape: (D, T, F)
+			num_features = X_np.shape[2]
+			X_reshaped = X_np.reshape(-1) # All values in one flat array
+
+			# Create ticker_id array: [T1, T1... (F times), T2, T2... (F times), ...]
+			# Then repeat for each date.
+			ticker_ids_repeated = np.repeat(_ticker_ids, num_features)
+			ticker_ids_all = np.tile(ticker_ids_repeated, num_dates)
+
+			# Create date_id array: [D1, D1... (T*F times), D2, D2... (T*F times), ...]
+			date_ids_all = np.repeat(dates_np, num_tickers * num_features)
+		else:
+			# X_np shape: (D, T*F)
+			num_features = X_np.shape[1] // num_tickers
+			X_reshaped = X_np.reshape(-1)
+
+			ticker_ids_repeated = np.repeat(_ticker_ids, num_features)
+			ticker_ids_all = np.tile(ticker_ids_repeated, num_dates)
+
+			date_ids_all = np.repeat(dates_np, num_tickers * num_features)
+
+		# Filter out NaNs
+		mask = ~np.isnan(X_reshaped)
+		X_valid = X_reshaped[mask]
+		ticker_ids_valid = ticker_ids_all[mask]
+		date_ids_valid = date_ids_all[mask]
+
+		# Stack valid data: (N, 3) where N is number of non-NaN values
+		# Use float64 for values, int32 for ids
+		data_to_write = np.column_stack([X_valid, ticker_ids_valid, date_ids_valid])
+
+		with open(args.save_csv, "w", newline="") as f:
+			writer = csv.writer(f)
+			writer.writerow(["feature value", "ticker_id", "date_id"])
+			# Write in one go or in large chunks for better performance
+			# To avoid large memory allocation for string conversion, we can write in chunks
+			chunk_size = 100000
+			for i in range(0, len(data_to_write), chunk_size):
+				chunk = data_to_write[i:i + chunk_size]
+				# Ensure IDs are integers in the output
+				rows = [
+					[row[0], int(row[1]), int(row[2])]
+					for row in chunk
+				]
+				writer.writerows(rows)
+
+		print(f"Saved CSV to {args.save_csv}")
 
 	elapsed = time.perf_counter() - start_time
 	print(f"Total time: {elapsed:.2f} seconds")

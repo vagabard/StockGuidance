@@ -22,17 +22,21 @@ from __future__ import annotations
 
 import os
 import json
+import random
 import traceback
 import smtplib
 from email.mime.text import MIMEText
 from pathlib import Path
 from typing import Iterable, List, Tuple, Union, Optional, Dict
 
+import line_profiler
 import numpy as np
 import torch  # type: ignore
+from numpy import array_equal
 from torch import nn
 
 from trainer import torch_interface
+from trainer.state.single_run import SingleRun
 
 TORCH_AVAILABLE = True
 
@@ -106,7 +110,6 @@ class StockRecommender:
 	def get_tranaction_ratio_used(self) -> bool:
 		return bool(self._single_run.family_run.transaction_ratio)
 
-
 class StockRecommenderFromSavedScores(StockRecommender):
 	"""Recommender that only uses precalculated scores and transactions."""
 	def __init__(self, single_run: "SingleRun", output_directory: Optional[str] = None):
@@ -116,6 +119,7 @@ class StockRecommenderFromSavedScores(StockRecommender):
 	def get_output_directory(self) -> Optional[str]:
 		return self.output_directory
 
+	@line_profiler.profile
 	def getBuyRecommendations(
 		self,
 		feature_vector: Optional[ArrayLike] = None,
@@ -157,9 +161,13 @@ class StockRecommenderFromSavedScores(StockRecommender):
 					if val is not None:
 						arr[i] = float(val)
 			else:
-				for tid, val in precalculated_transactions.items():
-					if 1 <= int(tid) <= T:
-						arr[int(tid) - 1] = float(val)
+				possible_tickers = range(1, T + 1)
+				key_source = (possible_tickers if len(possible_tickers) < len(precalculated_transactions.keys()) else precalculated_transactions.keys())
+				key_filter = (precalculated_transactions.keys() if len(possible_tickers) < len(precalculated_transactions.keys()) else possible_tickers)
+				for tid in key_source:
+					if tid in key_filter:
+						val = precalculated_transactions.get(tid)
+						arr[int(tid) - 1] = val
 			transactions_vec_tensor = torch.from_numpy(arr)
 		elif transactions_per_ticker is not None:
 			if isinstance(transactions_per_ticker, np.ndarray):
@@ -195,7 +203,8 @@ class StockRecommenderFromSavedScores(StockRecommender):
 		else:
 			offset = 1 if int(index_base) == 1 else 0
 			for i in idx_list:
-				if masked_scores[i] > -float("inf"):
+
+				if not masked_scores[i].isneginf():
 					top_scoring_ticker_ids.append(int(i + offset))
 
 		return masked_scores.numpy(), top_scoring_ticker_ids
@@ -204,8 +213,8 @@ class StockRecommenderFromSavedScores(StockRecommender):
 class StockRecommenderFromModel(StockRecommender):
 	def __init__(
 		self,
-		single_run: "SingleRun",
-		model_or_path: "List[torch_interface.nn.Module | str] | str",  # type: ignore[name-defined]
+		single_run: SingleRun,
+		model_or_path: List[torch_interface.nn.Module | str] | str,  # type: ignore[name-defined]
 		output_directory: Optional[str] = None,
 		model_dict: Optional[dict] = None,
 		device: str = "auto",
@@ -226,7 +235,7 @@ class StockRecommenderFromModel(StockRecommender):
 				model instance is accepted for backward compatibility and wrapped into a list.
 			device: "auto" (cuda if available else cpu), "cpu", or "cuda".
 			load_models: If False, models will not be loaded from disk if model_or_path is a string.
-			             Only metadata (input/output size) will be initialized.
+						 Only metadata (input/output size) will be initialized.
 		"""
 		super().__init__(single_run)
 		if not TORCH_AVAILABLE:
@@ -249,24 +258,25 @@ class StockRecommenderFromModel(StockRecommender):
 		self.output_directory = output_directory
 
 		# Unified path: either load from string source, or build from provided models
-		if isinstance(model_or_path, str):
-			models, _ = self._load_models_from_source(model_or_path)
-			self.output_directory = model_path = model_or_path
+		if isinstance(model_or_path, (str, Path)):
+			model_path = str(model_or_path)
+			models, _ = self._load_models_from_source(model_path)
+			self.output_directory = model_path
 			self._construct_from_models(models)
-		elif isinstance(model_or_path, List) and len(model_or_path) > 0 and (isinstance(model_or_path[0], nn.Module) or isinstance(model_or_path[0], str)):
+		elif isinstance(model_or_path, List) and len(model_or_path) > 0 and (isinstance(model_or_path[0], (nn.Module, str, Path))):
 			self._construct_from_models(model_or_path)
 		else:
 			raise ValueError("Must provide either a model path or a list of models.")
 
 	def _construct_from_models(
 		self,
-		models_or_paths: List[Union["torch_interface.nn.Module", str]],  # type: ignore[name-defined]
+		models_or_paths: List[Union["torch_interface.nn.Module", str, Path]],  # type: ignore[name-defined]
 	) -> None:
 		"""Finalize construction from a list of models or paths, ensuring unified manifest.
 		Also decides whether to offload ensemble models to disk to reduce RAM usage.
 		"""
-		in_memory_models = [m for m in models_or_paths if not isinstance(m, str)]
-		provided_paths = [m for m in models_or_paths if isinstance(m, str)]
+		in_memory_models = [m for m in models_or_paths if not isinstance(m, (str, Path))]
+		provided_paths = [str(m) for m in models_or_paths if isinstance(m, (str, Path))]
 
 		if in_memory_models:
 			try:
@@ -579,6 +589,7 @@ class StockRecommenderFromModel(StockRecommender):
 			if self._restricted_memory_mode and str(self._device).startswith("cuda"):
 				network = network.to(self._device)
 
+			inputs = torch.nan_to_num(inputs, nan=0.0, posinf=0.0, neginf=0.0)
 			raw_output = network(inputs)
 			raw_output = torch.nan_to_num(raw_output, nan=0.0, posinf=0.0, neginf=0.0)  # type: ignore[attr-defined]
 			out_flat = raw_output.reshape(-1).to(torch.float32)  # type: ignore[attr-defined]
@@ -590,9 +601,20 @@ class StockRecommenderFromModel(StockRecommender):
 						"StockRecommenderFromModel: applying per-model normalization before ensemble aggregation.",
 					)
 					print_recommendation_type = True
-				total = float(out_flat.sum().item())
-				if total > 0.0:
-					out_flat = out_flat / total
+
+				# Only normalize if all values are non-negative to avoid sign flip or division by zero.
+				# If there are negative values, sum might be negative or zero.
+				if (out_flat >= 0).all():
+					total = float(out_flat.sum().item())
+					if total > 1e-9:
+						out_flat = out_flat / total
+				else:
+					# For mixed or negative values, we could use min-max or softmax,
+					# but to keep it simple and avoid unexpected behavior, we'll just log once and skip.
+					# (If someone wanted a specific normalization for Tanh, they should specify it)
+					if not getattr(self, "_warned_neg_norm", False):
+						print("StockRecommenderFromModel: skipping sum-based normalization because scores contain negative values.")
+						self._warned_neg_norm = True
 
 			if save_to_file:
 				save_dir = None
@@ -630,6 +652,7 @@ class StockRecommenderFromModel(StockRecommender):
 			del raw_output, out_flat
 			return res
 
+	@line_profiler.profile
 	def getBuyRecommendations(
 		self,
 		feature_vector: Optional[ArrayLike] = None,
@@ -653,11 +676,11 @@ class StockRecommenderFromModel(StockRecommender):
 		return_scores: If True, return the full output scores as a NumPy array as first item.
 		index_base: 1 to return ticker ids as 1..T, 0 to return 0..T-1.
 		precalculated_scores: If provided, use these scores instead of running the model.
-		                      feature_vector can be None if precalculated_scores is provided.
+							  feature_vector can be None if precalculated_scores is provided.
 		provider: If provided and feature_vector is None, use this provider to load the feature vector
-		          for current_date_id.
+				  for current_date_id.
 		precalculated_transactions: If provided, use these transaction counts instead of fetching from DB.
-		                             Mapping: ticker_id -> transactions
+									 Mapping: ticker_id -> transactions
 		...
 		"""
 
@@ -742,7 +765,8 @@ class StockRecommenderFromModel(StockRecommender):
 								str(self._single_run.activation),
 								int(self._single_run.prior_days),
 								device=self._device,
-								map_location="cpu"
+								map_location="cpu",
+								final_activation=str(self._single_run.final_activation)
 							)
 							_accumulate_from_model(m, net_idx=idx)
 							del m

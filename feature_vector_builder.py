@@ -103,6 +103,7 @@ class FeatureVectorBuilder:
         self.num_features = num_features
         self.num_days = num_days
         self.model_ticker_ids = model_ticker_ids
+        self.db_ticker_ids = db_ticker_ids
 
         # Align X_flat to match model_ticker_ids
         if model_ticker_ids and list(model_ticker_ids) != list(db_ticker_ids):

@@ -17,7 +17,8 @@ def load_model_from_checkpoint(
     activation: str,
     prior_days: int,
     device: torch.device = torch.device("cpu"),
-    map_location: str = "cpu"
+    map_location: str = "cpu",
+    final_activation: Optional[str] = None
 ) -> tuple[nn.Module, Optional[dict], Optional[dict]]:
     """
     Unified loader for models from checkpoints.
@@ -38,6 +39,9 @@ def load_model_from_checkpoint(
         optimizer_state = None
         scaler_state = None
 
+    if final_activation is None:
+        final_activation = str(getattr(family_run, "final_activation_type", None) or getattr(family_run, "final_activation", None))
+
     model = make_model(
         arch=str(family_run.neural_network_type),
         input_size=int(input_size),
@@ -45,7 +49,7 @@ def load_model_from_checkpoint(
         hidden_layers=family_run.hidden_layer_size or [int(input_size)],
         num_layers=int(mlp_layers),
         activation=str(activation),
-        final_activation=str(family_run.final_activation_type) if hasattr(family_run, "final_activation_type") else None,
+        final_activation=str(final_activation),
         layer_types=family_run.layer_types,
         sequence_length=int(prior_days) + 1,
     )

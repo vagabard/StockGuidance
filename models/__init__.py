@@ -57,7 +57,9 @@ def resolve_activation_factory(name_or_none: str) -> Module | None:
 	"""
 	# if callable(name_or_none):
 	#     return name_or_none
-	name = str(name_or_none or "relu").lower()
+	name = str(name_or_none or "none").lower()
+	if name in ("none", "identity", ""):
+		return None
 	if name in _ACT_ALIASES:
 		cls, args = _ACT_ALIASES[name]
 		return lambda cls=cls, args=args: cls(*args)  # fresh instance each call

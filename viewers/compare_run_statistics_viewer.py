@@ -204,6 +204,10 @@ def _compute_run_statistics_for_path(run_path: str) -> Dict[str, Any]:
 				stats[f"max_epoch{clean_n}"] = mstats["max_epoch"]
 				stats[f"first5_max{clean_n}"] = mstats["first5_max"]
 				stats[f"first5_epoch{clean_n}"] = mstats["first5_epoch"]
+
+				# Add rank stats if available in JSON
+				if "avg_rank" in mstats:
+					stats[f"rank{clean_n}"] = mstats["avg_rank"]
 			return stats
 		except Exception as e:
 			print(f"[crsv] Error reading summary file {summary_file}: {e}")
@@ -231,6 +235,7 @@ def _compute_run_statistics_for_path(run_path: str) -> Dict[str, Any]:
 
 		# Find any portfolio-like columns and map them to N indices.
 		n_to_col: Dict[Any, str] = {}
+		n_to_rank_col: Dict[Any, str] = {}
 		# Normalise helper: collapse to lowercase and drop spaces/underscores.
 		def _norm(s: str) -> str:
 			return s.lower().replace(" ", "").replace("_", "")
@@ -244,19 +249,27 @@ def _compute_run_statistics_for_path(run_path: str) -> Dict[str, Any]:
 				n_to_col[0] = c
 				continue
 
-			# portfolio_top<K> (Method)
-			m = _re.match(r"^portfolio(?:return|value)top(\d+)(?:\((sum|norm|rank)\))?$", cn)
-			if m:
-				k_val = int(m.group(1))
-				method_val = m.group(2).capitalize() if m.group(2) else ""
-				n_to_col[(k_val, method_val)] = c
-				continue
+		# portfolio_top<K> (Method)
+		m = _re.match(r"^portfolio(?:return|value)top(\d+)(?:\((sum|norm|rank)\))?$", cn)
+		if m:
+			k_val = int(m.group(1))
+			method_val = m.group(2).capitalize() if m.group(2) else ""
+			n_to_col[(k_val, method_val)] = c
+			continue
 
-			# Legacy portfolio_top<N>
-			m = _re.match(r"^portfoliotop(\d+)$", cn)
-			if m:
-				n_to_col[(int(m.group(1)), "")] = c
-				continue
+		# Rank Percent top<K> (Method)
+		mr = _re.match(r"^rankpercenttop(\d+)(?:\((sum|norm|rank)\))?$", cn)
+		if mr:
+			k_val = int(mr.group(1))
+			method_val = mr.group(2).capitalize() if mr.group(2) else ""
+			n_to_rank_col[(k_val, method_val)] = c
+			continue
+
+		# Legacy portfolio_top<N>
+		m = _re.match(r"^portfoliotop(\d+)$", cn)
+		if m:
+			n_to_col[(int(m.group(1)), "")] = c
+			continue
 
 		if not n_to_col and "portfolio_value" in df.columns:
 			n_to_col[0] = "portfolio_value"
@@ -289,6 +302,7 @@ def _compute_run_statistics_for_path(run_path: str) -> Dict[str, Any]:
 	max_epoch: Dict[Any, int] = {}
 	first5_best: Dict[Any, float] = {}
 	first5_best_epoch: Dict[Any, int] = {}
+	avg_ranks: Dict[Any, List[float]] = {}
 
 	for _set_size, epoch, fpath in epoch_files:
 		try:
@@ -301,6 +315,7 @@ def _compute_run_statistics_for_path(run_path: str) -> Dict[str, Any]:
 			continue
 		# Build mapping N -> column name using the same robust detection as above.
 		n_to_col: Dict[Any, str] = {}
+		n_to_rank_col: Dict[Any, str] = {}
 		def _norm(s: str) -> str:
 			return s.lower().replace(" ", "").replace("_", "")
 		for c in df.columns:
@@ -317,6 +332,14 @@ def _compute_run_statistics_for_path(run_path: str) -> Dict[str, Any]:
 				k_val = int(m.group(1))
 				method_val = m.group(2).capitalize() if m.group(2) else ""
 				n_to_col[(k_val, method_val)] = c
+				continue
+
+			# Rank Percent top<K> (Method)
+			mr = _re.match(r"^rankpercenttop(\d+)(?:\((sum|norm|rank)\))?$", cn)
+			if mr:
+				k_val = int(mr.group(1))
+				method_val = mr.group(2).capitalize() if mr.group(2) else ""
+				n_to_rank_col[(k_val, method_val)] = c
 				continue
 
 			# Legacy portfolio_top<K>
@@ -365,6 +388,14 @@ def _compute_run_statistics_for_path(run_path: str) -> Dict[str, Any]:
 					first5_best[n] = head_max
 					first5_best_epoch[n] = epoch
 
+		# Extract ranks for this epoch
+		for n, col in n_to_rank_col.items():
+			try:
+				mean_rank = float(df[col].mean())
+				avg_ranks.setdefault(n, []).append(mean_rank)
+			except Exception:
+				pass
+
 	for n, value in max_val.items():
 		if isinstance(n, tuple):
 			k, m = n
@@ -389,6 +420,16 @@ def _compute_run_statistics_for_path(run_path: str) -> Dict[str, Any]:
 			stats[f"first5_epoch{k}{m}"] = epoch
 		else:
 			stats[f"first5_epoch{n}"] = epoch
+
+	# Finalize rank stats (mean over all epochs/days processed)
+	for n, ranks in avg_ranks.items():
+		if ranks:
+			avg_val = sum(ranks) / len(ranks)
+			if isinstance(n, tuple):
+				k, m = n
+				stats[f"rank{k}{m}"] = avg_val
+			else:
+				stats[f"rank{n}"] = avg_val
 
 	return stats
 
@@ -592,6 +633,19 @@ def _run_as_script() -> None:
 	)
 
 	# ------------------------------------------------------------------
+	# Navigation support from dashboard
+	# ------------------------------------------------------------------
+	# If we have pre-selected families/builds from session state, we use them
+	# but don't force a reset if the user has already interacted with sidebar.
+	if "crsv_families" in st.session_state and "crsv_families_init" not in st.session_state:
+		# First time arriving from dashboard
+		st.session_state["crsv_families_init"] = True
+		# sidebar_family_and_build_selector uses key_prefix_families/builds
+		# The dashboard sets crsv_families and crsv_builds.
+		# But wait, sidebar_family_and_build_selector uses st.session_state[f"{key_prefix}_families"]
+		# So if the dashboard sets it, the selector should pick it up as default.
+
+	# ------------------------------------------------------------------
 	# Sidebar selection: families + builds (shared across viewers)
 	# ------------------------------------------------------------------
 	st.sidebar.button("Refresh runs list")
@@ -599,6 +653,12 @@ def _run_as_script() -> None:
 
 	def update_list_of_runs_selected(selected_runs: List[str]) -> None:
 		st.session_state["crsv_runs_selected"] = list(selected_runs)
+
+	# One important detail: sidebar_family_and_build_selector will default
+	# to 'all builds' if no builds are selected in st.session_state and a family is selected.
+	# If we want it to ONLY show dashboard-selected builds, we must ensure
+	# it doesn't fall back to all.
+	# We can't easily change sidebar_family_and_build_selector's behavior without affecting others.
 
 	selected_builds, selected_families, _available_builds = sidebar_family_and_build_selector(
 		timestamp_names=timestamp_names,
@@ -612,11 +672,27 @@ def _run_as_script() -> None:
 		on_runs_updated=update_list_of_runs_selected,
 	)
 
+	# If we arrived from dashboard, we might have had specific builds.
+	# But sidebar_family_and_build_selector logic:
+	# if (not selected_builds) and selected_families: selected_builds = list(available_builds)
+	# This is likely the culprit.
+
 	# Match the behavior of the other runs viewer: do not populate the grid
 	# or draw charts until at least one run family has been selected.
 	if not selected_families:
 		st.info("Select one or more run families in the sidebar to begin.")
 		return
+
+	# If we arrived from the dashboard, we want to respect the specific builds selected
+	# even if the sidebar selector defaults to 'all' for selected families.
+	if "crsv_builds" in st.session_state and "crsv_builds_applied" not in st.session_state:
+		# Check if the currently selected_builds is actually the full list for these families
+		# which happens if sidebar_family_and_build_selector found no previous selection in state.
+		# Dashboard sets crsv_builds, but the selector looks for crsv_builds. Wait, dashboard sets crsv_builds.
+		# Key prefix is 'crsv', so selector looks for st.session_state['crsv_builds'].
+		# If it's already there, sidebar_family_and_build_selector should have used it!
+		pass
+
 	selected_builds_set = set(selected_builds)
 
 	# Prepare rows for the grid
@@ -686,12 +762,12 @@ def _run_as_script() -> None:
 	# Map selected_run_ids back to timestamps for charts
 	selected_ts: List[str] = []
 	for rid in selected_run_ids:
-		# rid could be "TS [variant]" or just TS depending on what's in 'run' column
-		# runs_to_dataframe_dicts sets 'run' to _ts or _dir.
-		# In CRSV, display_rows has _ts.
-		# Actually selected_run_ids are what we need to use to filter which rows to show in charts.
+		# rid could be "TS [variant]" or just TS or relative path.
+		# In RSD, rid is a relative path like "run_family_.../run_single_.../single_run_0.json"
+		# In CRSV, display_rows are from _cached_build_statistics_rows.
+		# Let's check how rid matches display_rows.
 		for r in display_rows:
-			if (r.get("run_id") or r.get("_ts") or r.get("_dir")) == rid:
+			if (r.get("run") == rid or r.get("run_id") == rid or r.get("_ts") == rid or r.get("_dir") == rid):
 				if r["_ts"] not in selected_ts:
 					selected_ts.append(r["_ts"])
 				break
@@ -983,7 +1059,7 @@ def _run_as_script() -> None:
 
 		for label, run_path in run_paths:
 			# Build data only (no plotting) using the helper for profiling and reuse
-			by_topn, by_topn_first5, by_topn_avgcdf = build_run_epoch_series(run_path)
+			by_topn, by_topn_first5, by_topn_avgcdf, _ = build_run_epoch_series(run_path)
 
 			# Placeholders if nothing collected
 			used_placeholder = False

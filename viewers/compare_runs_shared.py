@@ -18,6 +18,84 @@ def get_preferences_path() -> Path:
 	return cache_dir / "viewer_preferences.json"
 
 
+def get_global_run_ratings_path() -> Path:
+	"""Return the path to the global run ratings JSON file in the cache directory."""
+	root = Path(__file__).resolve().parent.parent
+	cache_dir = root / "cache"
+	cache_dir.mkdir(exist_ok=True)
+	return cache_dir / "global_run_ratings.json"
+
+
+def _get_per_run_extra_fields_filename() -> str:
+	"""Return the filename used to store extra fields within a run directory."""
+	return "extra_fields.json"
+
+
+def load_global_run_ratings(base_dir: Optional[str] = None) -> Dict[str, Dict[str, Any]]:
+	"""Load run-specific extra fields from disk.
+
+	If base_dir is provided, it also attempts to discover and merge
+	per-run extra_fields.json files into the returned mapping.
+	"""
+	path = get_global_run_ratings_path()
+	all_fields: Dict[str, Dict[str, Any]] = {}
+	if path.exists():
+		try:
+			with open(path, "r") as f:
+				all_fields = json.load(f)
+		except Exception:
+			pass
+
+	# Optional: merge from individual run directories if base_dir is known
+	# and we have some runs. This helps restore settings if the cache is lost.
+	if base_dir and os.path.isdir(base_dir):
+		try:
+			# We don't do a full scan here because it's expensive;
+			# instead, this could be triggered by scan_runs or similar if needed.
+			# For now, we rely on the global cache as the primary store.
+			pass
+		except Exception:
+			pass
+
+	return all_fields
+
+
+def save_global_run_rating_field(run_id: str, field_name: str, value: Any, base_dir: Optional[str] = None) -> None:
+	"""Save a single run-specific extra field to disk.
+
+	Updates the global cache and, if base_dir is provided, also saves
+	it into the individual run directory for portability.
+	"""
+	all_fields = load_global_run_ratings()
+	if run_id not in all_fields:
+		all_fields[run_id] = {}
+	all_fields[run_id][field_name] = value
+
+	# 1. Update global cache
+	path = get_global_run_ratings_path()
+	try:
+		with open(path, "w") as f:
+			json.dump(all_fields, f, indent=2)
+	except Exception:
+		pass
+
+	# 2. Update per-run file for portability/backup if base_dir is provided
+	if base_dir and os.path.isdir(base_dir):
+		try:
+			run_path = os.path.join(base_dir, run_id)
+			if os.path.isdir(run_path):
+				per_run_path = os.path.join(run_path, _get_per_run_extra_fields_filename())
+				per_run_data = {}
+				if os.path.exists(per_run_path):
+					with open(per_run_path, "r") as f:
+						per_run_data = json.load(f)
+				per_run_data[field_name] = value
+				with open(per_run_path, "w") as f:
+					json.dump(per_run_data, f, indent=2)
+		except Exception:
+			pass
+
+
 def load_preferences() -> Dict[str, Any]:
 	"""Load preferences from disk."""
 	path = get_preferences_path()
@@ -236,7 +314,6 @@ def _params_from_single_run_json(ts_path: str) -> Dict[str, Any]:
 			"activation_list",
 			"final_activation_list",
 			"optimizer_list",
-			"trading_interval",
 			"ensemble_interval",
 			"architecture",
 			"hidden_layers",
@@ -266,6 +343,10 @@ def scan_runs(base_dir: str) -> List[Tuple[str, Dict[str, Any]]]:
 	if not os.path.isdir(base_dir):
 		return runs
 
+	# Load global cache but also prepare to sync from individual runs
+	global_extra = load_global_run_ratings()
+	sync_required = False
+
 	def _scan_timestamp_dir(parent: str, ts_name: str, prefix: str = "") -> None:
 		"""Scan a single timestamp directory for runs.
 
@@ -274,6 +355,7 @@ def scan_runs(base_dir: str) -> List[Tuple[str, Dict[str, Any]]]:
 		that callers can distinguish runs that live inside a ``run_family_*``
 		container from legacy top-level runs.
 		"""
+		nonlocal sync_required
 
 		ts_path = os.path.join(parent, ts_name)
 		if not os.path.isdir(ts_path):
@@ -332,6 +414,21 @@ def scan_runs(base_dir: str) -> List[Tuple[str, Dict[str, Any]]]:
 				params.setdefault("_ts", ts_name)
 				if prefix:
 					params["_family"] = prefix
+
+				# Check for per-run extra fields and sync to global cache
+				per_run_extra_file = os.path.join(rep_path, _get_per_run_extra_fields_filename())
+				if os.path.exists(per_run_extra_file):
+					try:
+						with open(per_run_extra_file, "r") as f:
+							per_run_data = json.load(f)
+						if per_run_data:
+							existing = global_extra.get(rel, {})
+							if per_run_data != existing:
+								global_extra[rel] = per_run_data
+								sync_required = True
+					except Exception:
+						pass
+
 				runs.append((rel, params))
 		else:
 			if not base_params:
@@ -349,6 +446,21 @@ def scan_runs(base_dir: str) -> List[Tuple[str, Dict[str, Any]]]:
 			params.setdefault("_ts", ts_name)
 			if prefix:
 				params["_family"] = prefix
+
+			# Check for per-run extra fields and sync to global cache
+			per_run_extra_file = os.path.join(ts_path, _get_per_run_extra_fields_filename())
+			if os.path.exists(per_run_extra_file):
+				try:
+					with open(per_run_extra_file, "r") as f:
+						per_run_data = json.load(f)
+					if per_run_data:
+						existing = global_extra.get(rel, {})
+						if per_run_data != existing:
+							global_extra[rel] = per_run_data
+							sync_required = True
+				except Exception:
+					pass
+
 			runs.append((rel, params))
 
 	try:
@@ -377,7 +489,16 @@ def scan_runs(base_dir: str) -> List[Tuple[str, Dict[str, Any]]]:
 			except OSError:
 				continue
 	except Exception:  # pragma: no cover - robust against partial trees
-		return sorted(runs, key=lambda t: t[0])
+		pass
+
+	# If we found individual extra_fields.json files that weren't in the global cache, update it.
+	if sync_required:
+		path = get_global_run_ratings_path()
+		try:
+			with open(path, "w") as f:
+				json.dump(global_extra, f, indent=2)
+		except Exception:
+			pass
 
 	return sorted(runs, key=lambda t: t[0])
 
@@ -792,8 +913,9 @@ def render_run_grid(
 		mask = fdf.astype(str).agg(" ".join, axis=1).str.lower().str.contains(s)
 		fdf = fdf[mask]
 
-	# Reset index so selection indices match fdf
-	fdf = fdf.reset_index(drop=True)
+	# Use 'run' as a stable index to help Streamlit maintain state across reruns
+	if "run" in fdf.columns:
+		fdf = fdf.set_index("run", drop=False)
 
 	# 3. Column visibility
 	all_cols = list(fdf.columns)
@@ -835,37 +957,145 @@ def render_run_grid(
 		grid_cols = ["run"] + grid_cols
 
 	# 4. Render Grid
-	dataframe_viewer_return = st.dataframe(
+	# Selection is handled via a checkbox column. Integer fields 1 and 2
+	# are displayed in the grid as read-only, and can be edited using
+	# sliders below the grid for the selected runs.
+	int_col1 = "Learning Curve"
+	int_col2 = "Prediction Return"
+	select_col = "Select"
+
+	# Try to find base_dir to help save_global_run_rating_field locate run directories
+	base_dir = None
+	if "crv_base_dir" in st.session_state:
+		base_dir = st.session_state["crv_base_dir"]
+	elif "crsv_base_dir" in st.session_state:
+		base_dir = st.session_state["crsv_base_dir"]
+	elif "rsd_base_dir" in st.session_state:
+		base_dir = st.session_state["rsd_base_dir"]
+
+	run_extra = load_global_run_ratings()
+
+	# Add the extra columns to the dataframe if they don't exist
+	if int_col1 not in fdf.columns:
+		fdf[int_col1] = fdf["run"].apply(lambda r: max(1, min(10, int(run_extra.get(str(r), {}).get("int1", 1)))))
+	if int_col2 not in fdf.columns:
+		fdf[int_col2] = fdf["run"].apply(lambda r: max(1, min(10, int(run_extra.get(str(r), {}).get("int2", 1)))))
+
+	# 3.5. Initialize selection
+	# If we have a previous selection, try to restore it in the checkbox column
+	last_sel_key = f"{key_prefix}_last_selection"
+	if select_col not in fdf.columns:
+		if last_sel_key in st.session_state:
+			last_sel = set(st.session_state[last_sel_key])
+			fdf[select_col] = fdf["run"].apply(lambda r: str(r) in last_sel)
+		else:
+			fdf[select_col] = False
+
+	# Re-evaluate visible columns to include these new ones if they are not already in grid_cols
+	# but only if they are not explicitly excluded by the user's multiselect.
+	if int_col1 not in grid_cols:
+		grid_cols = [int_col1] + grid_cols
+	if int_col2 not in grid_cols:
+		grid_cols = [int_col2] + grid_cols
+
+	# Define column configurations
+	# All columns except selection and integer fields should be disabled (read-only)
+	column_config = {
+		int_col1: st.column_config.SelectboxColumn(
+			int_col1,
+			help="User-editable learning curve (1 to 10)",
+			options=list(range(1, 11)),
+			disabled=False,
+			required=True,
+		),
+		int_col2: st.column_config.SelectboxColumn(
+			int_col2,
+			help="User-editable prediction return (1 to 10)",
+			options=list(range(1, 11)),
+			disabled=False,
+			required=True,
+		),
+		select_col: st.column_config.CheckboxColumn(
+			select_col,
+			help="Select runs for comparison",
+			default=False,
+		),
+	}
+
+	# Mark other visible columns as disabled
+	for col in grid_cols:
+		if col not in [int_col1, int_col2, select_col]:
+			column_config[col] = st.column_config.Column(disabled=True)
+
+	grid_cols = [select_col] + [c for c in grid_cols if c != select_col]
+
+	# Select All / Deselect All buttons
+	col_sel1, col_sel2, _ = st.columns([1, 1, 4])
+	if col_sel1.button("Select All", key=f"{key_prefix}_select_all"):
+		st.session_state[last_sel_key] = [str(r) for r in fdf["run"]]
+		if f"{key_prefix}_data_editor" in st.session_state:
+			del st.session_state[f"{key_prefix}_data_editor"]
+		st.rerun()
+
+	if col_sel2.button("Deselect All", key=f"{key_prefix}_deselect_all"):
+		st.session_state[last_sel_key] = []
+		if f"{key_prefix}_data_editor" in st.session_state:
+			del st.session_state[f"{key_prefix}_data_editor"]
+		st.rerun()
+
+	edited_df = st.data_editor(
 		fdf[grid_cols],
-		on_select="rerun",
 		width="stretch",
-		selection_mode="multi-row",
+		key=f"{key_prefix}_data_editor",
+		column_config=column_config,
+		hide_index=True,
 	)
 
-	# 5. Extract Selection
-	try:
-		selection = (dataframe_viewer_return or {}).get("selection") or {}
-		selected_rows = selection.get("rows") or []
-	except Exception:
-		selected_rows = []
+	# Handle edits from data_editor
+	# We use the session state of the data_editor to detect changes
+	editor_state_key = f"{key_prefix}_data_editor"
+	if editor_state_key in st.session_state:
+		edits = st.session_state[editor_state_key].get("edited_rows", {})
+		if edits:
+			for row_id, changed_cols in edits.items():
+				# row_id is either an integer offset (if index is default) or index value.
+				# Since we set a stable index and hide_index=True, Streamlit might use index values if they are strings.
+				# However, usually with hide_index=True, it uses integer positions in the passed dataframe.
+				# Let's handle both cases if possible.
+				try:
+					if row_id in fdf.index:
+						run_id = str(row_id)
+					else:
+						# Fallback to integer offset
+						idx = int(row_id)
+						run_id = str(fdf.iloc[idx]["run"])
+				except (ValueError, IndexError, KeyError):
+					continue
 
-	if selected_rows:
-		try:
-			selected_runs = [
-				str(fdf.loc[i, "run"])
-				for i in selected_rows
-				if i in fdf.index and "run" in fdf.columns
-			]
-		except Exception:
-			selected_runs = []
-	elif return_all_if_none:
+				if int_col1 in changed_cols:
+					save_global_run_rating_field(run_id, "int1", int(changed_cols[int_col1]), base_dir=base_dir)
+				if int_col2 in changed_cols:
+					save_global_run_rating_field(run_id, "int2", int(changed_cols[int_col2]), base_dir=base_dir)
+
+	# 5. Extract Selection
+	# Now we extract selection from the edited_df's checkbox column
+	selected_runs_from_grid = []
+	if edited_df is not None and select_col in edited_df.columns:
+		# If stable index was used, edited_df might preserve it.
+		# Since we use hide_index=True, edited_df has the same index as fdf[grid_cols].
+		selected_runs_from_grid = [
+			str(edited_df.loc[i, "run"])
+			for i in edited_df.index
+			if edited_df.loc[i, select_col]
+		]
+
+	# Persist last selection - only what the user actually checked
+	st.session_state[f"{key_prefix}_last_selection"] = selected_runs_from_grid
+
+	selected_runs = selected_runs_from_grid
+	if not selected_runs and return_all_if_none:
 		# Fallback: nothing selected in grid, return all visible runs
 		selected_runs = [str(r) for r in fdf.get("run", [])]
-	else:
-		selected_runs = []
-
-	# Persist last selection
-	st.session_state[f"{key_prefix}_last_selection"] = selected_runs
 
 	return selected_runs
 
@@ -982,7 +1212,14 @@ def sidebar_family_and_build_selector(
 	# This keeps behavior consistent across viewers: choosing a family should
 	# immediately scope the run grid without requiring a second click.
 	if (not selected_builds) and selected_families:
-		selected_builds = list(available_builds)
+		# check if we have a previous selection for builds in state that was just empty
+		# If the key exists in session state but is empty, it means user explicitly deselected all.
+		# If the key is NOT in session state, it's the first load or reset.
+		if f"{builds_key}" not in st.session_state or st.session_state.get(f"{key_prefix}_families_init"):
+			selected_builds = list(available_builds)
+		else:
+			# user explicitly deselected everything
+			pass
 	elif (not selected_builds) and empty_builds_means_all:
 		selected_builds = list(available_builds)
 

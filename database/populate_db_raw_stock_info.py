@@ -390,7 +390,7 @@ def main(argv: Optional[List[str]] = None) -> None:
 	try:
 		ensure_schema(cursor)
 		ticker_map = load_ticker_map(cursor)
-		print(f"keys in ticker_map: {ticker_map.keys()}")
+		#print(f"keys in ticker_map: {ticker_map.keys()}")
 		# if not ticker_map:
 		# 	print("[ERROR] No tickers loaded in ticker_symbol table. Run populate_db_ticker_info.py first.")
 		# 	return

@@ -50,7 +50,13 @@ VALID_DAY_CENTERS = {
 	"gappednegpos",
 	"binary_negpos",
 	"top_100_binary_negpos",
-	"stock_change_ratio_ranked",
+	"normalized_labels",
+	"proportional_normalized_labels",
+	"normalized_zero_centered",
+	"proportional_normalized_zero_centered",
+	"normalized_half_centered",
+	"proportional_normalized_half_centered",
+	"proportional_normalized_zero_centered_gapped",
 }
 
 

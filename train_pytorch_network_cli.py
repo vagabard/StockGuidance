@@ -334,7 +334,7 @@ def build_parser() -> argparse.ArgumentParser:
 	parser.add_argument(
 		"--final-activation",
 		type=str,
-		default="sigmoid",
+		default="none",
 		help=(
 			"Activation for MLP output layers (ignored for conv_trans). "
 			"Accepts a single value or a comma-separated list. Supported: "

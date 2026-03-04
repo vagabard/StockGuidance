@@ -7,15 +7,15 @@ import os
 import time
 import traceback
 import gc
-from concurrent.futures import ThreadPoolExecutor
 from random import random, Random
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Iterable, Iterator
 
 import psutil
 import line_profiler
 import torch
 import numpy as np
 from torch import nn, Tensor
+from torch.cuda.amp import GradScaler
 from torch.nn import Module, MSELoss
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import ExponentialLR
@@ -47,20 +47,20 @@ from training_instance_provider import TrainingInstanceProvider
 #import apache_tvm
 #print(torch.compiler.list_backends())
 
+criterion = nn.L1Loss()
+#criterion = nn.MSELoss()
+
 
 def backprop_loss_non_amp(xb=None, yb=None, model: nn.Module = None, family_run: FamilyRun = None,
                           optimizer: Optimizer = None,
                           batch_idx=None) -> Tuple[torch.Tensor, torch.Tensor, int | None]:
 	xb, yb = prep_vars(xb, yb)
 	pred = model_and_clean(model, xb)
-	#criterion = nn.L1Loss()
-	criterion = nn.MSELoss()
 
-	loss = set_loss_method(criterion, family_run, pred, yb)
+	loss = set_loss_method(family_run, pred, yb)
 	#		loss = torch.mean((pred - yb.to(pred.dtype)) ** 2)
-
-	if not torch.isfinite(loss):
-		batch_idx = opt_zero_grad(batch_idx, optimizer)
+	batch_idx = opt_zero_grad(loss,batch_idx, optimizer)
+	if batch_idx is not None:
 		return pred, loss, batch_idx
 	do_the_back_prop(loss)
 
@@ -82,13 +82,18 @@ def do_the_back_prop(loss: Tensor):
 	loss.backward()
 
 
-def opt_zero_grad(batch_idx, optimizer: Optimizer | None) -> Any:
-	optimizer.zero_grad(set_to_none=True)
-	batch_idx += 1
-	return batch_idx
+def opt_zero_grad(loss,batch_idx, optimizer: Optimizer | None) -> Any:
+	if not torch.isfinite(loss):
+		optimizer.zero_grad(set_to_none=True)
+		batch_idx += 1
+		return batch_idx
+	else :
+		return None
 
 
-def set_loss_method(criterion: MSELoss, family_run: FamilyRun | None, pred: Tensor, yb: Tensor) -> Tensor:
+def set_loss_method(family_run: FamilyRun | None, pred: Tensor, yb: Tensor) -> Tensor:
+	if "cuda" not in str(pred.device):
+		print("not doing loss calc on cuda")
 	if bool(family_run.use_ranking_error_loss):
 		loss = ranking_surrogate_loss(pred, yb.to(pred.dtype), temperature=float(family_run.rank_temperature))
 	else:
@@ -98,6 +103,8 @@ def set_loss_method(criterion: MSELoss, family_run: FamilyRun | None, pred: Tens
 
 def model_and_clean(model: Module | None, xb: Tensor) -> Tensor:
 	pred = model(xb)
+	if not torch.isfinite(pred).all():
+		print("  WARNING: Model output contains NaNs or Infs during training!")
 	pred = torch.nan_to_num(pred, nan=0.0, posinf=0.0, neginf=0.0)
 	return pred
 
@@ -106,7 +113,6 @@ def prep_vars(xb, yb) -> tuple[Tensor, Tensor]:
 	xb = torch.nan_to_num(xb, nan=0.0, posinf=0.0, neginf=0.0)
 	yb = torch.nan_to_num(yb, nan=0.0, posinf=0.0, neginf=0.0)
 	return xb, yb
-
 
 def back_non_amp_optim(optimizer: Optimizer | None):
 	optimizer.step()
@@ -189,7 +195,7 @@ def _maybe_generate_scores_for_rep(
 		# We use the internal model of stock_recommender to ensure it's loaded if it was a path
 		network = stock_recommender._models[0]
 		for feat_vec, _, feature_date_id in feature_label_date_gen:
-			input_tensor = feat_vec.unsqueeze(0).to(device_to_use)
+			input_tensor = torch.nan_to_num(feat_vec, nan=0.0, posinf=0.0, neginf=0.0).unsqueeze(0).to(device_to_use)
 			stock_recommender.generateStockScoresForNetwork(
 				network=network,
 				inputs=input_tensor,
@@ -206,7 +212,6 @@ def _maybe_generate_scores_for_rep(
 		gc.collect()
 		if str(device_to_use).startswith("cuda"):
 			torch.cuda.empty_cache()
-
 
 def _prepare_data(provider: TrainingInstanceProvider) -> tuple[int, int]:
 	"""Return (input_size, output_size) derived from the first instance."""
@@ -312,7 +317,7 @@ def _build_training_bundles_and_loaders(
 
 	# Determine if we should use caching based on memory usage
 	total_mem = psutil.virtual_memory().total
-	use_caching = False
+	use_caching = True
 
 	for run_idx in range(repeat_count_cfg):
 		m, opt, sc, inner_use_amp, inner_amp_dtype = create_model_and_optimizer(
@@ -487,11 +492,13 @@ def backprop_loss_for_amp(xb=None, yb=None, model: nn.Module = None, family_run:
 		xb = torch.nan_to_num(xb, nan=0.0, posinf=0.0, neginf=0.0)
 		yb = torch.nan_to_num(yb, nan=0.0, posinf=0.0, neginf=0.0)
 		pred = model(xb)
+		if not torch.isfinite(pred).all():
+			print(f"  WARNING: Model output contains NaNs or Infs at batch {batch_idx}!")
 		pred = torch.nan_to_num(pred, nan=0.0, posinf=0.0, neginf=0.0)
 		if bool(family_run.use_ranking_error_loss):
 			loss = ranking_surrogate_loss(pred, yb.to(pred.dtype), temperature=float(family_run.rank_temperature))
 		else:
-			loss = torch.nn.functional.l1_loss(pred, yb.to(pred.dtype))
+			loss = criterion(pred, yb.to(pred.dtype))
 
 	if not torch.isfinite(loss):
 		optimizer.zero_grad(set_to_none=True)
@@ -523,76 +530,22 @@ def _train_one_epoch_for_rep(
 	device,
 	family_run: FamilyRun,
 	epoch: int,
-) -> tuple[float, float, float, float]:
+) -> tuple[float, float, float, float, dict[str, int]]:
 	"""Run training for one epoch for a single repetition and return metrics."""
-	model.train()
-	total = 0
-	train_loss_sum = 0.0
-	train_top10_sum = 0.0
-	batch_idx = 0
-	train_iter = train_loader
-	total_batches = len(train_loader) if hasattr(train_loader, "__len__") else 0
-	non_blocking = bool(family_run.pin_GPU_memory)
-	batch_size = None
+	batch_idx, batch_size, non_blocking, total, total_batches, train_loss_sum, train_top10_sum, counts = _train_one_epoch_for_rep_init(
+		family_run, model, train_loader)
 
-	executor = ThreadPoolExecutor(max_workers=1)
-	futures = []
 	running_loss_sum = [0.0]
-
-	for xb, yb in train_iter:
-		xb, yb = prepare_training_inputs(device, non_blocking, xb, yb)
-		if batch_size is None:
-			batch_size = xb.size(0)
-		# optimizer.zero_grad(set_to_none=True) # Moved to after step()
-		if use_amp:
-			pred, loss, batch_index_update = backprop_loss_for_amp(xb=xb, yb=yb, model=model, family_run=family_run,
-			                                                       optimizer=optimizer, batch_idx=batch_idx,
-			                                                       amp_dtype=amp_dtype, scaler=scaler)
-			if batch_index_update is not None:
-				batch_idx = batch_index_update
-				# Explicitly clear tensors to help GC
-				#del xb, yb, pred, loss
-				continue
-		else:
-			pred, loss, batch_index_update = backprop_loss_non_amp(xb=xb, yb=yb, model=model, family_run=family_run,
-			                                                       optimizer=optimizer, batch_idx=batch_idx)
-			if batch_index_update is not None:
-				batch_idx = batch_index_update
-				# Explicitly clear tensors to help GC
-				#del xb, yb, pred, loss
-				continue
-
-		# Detach and move to CPU to avoid keeping GPU memory or causing issues in thread
-		loss_detached = loss.detach().cpu()
-		pred_detached = pred.detach().cpu()
-		yb_detached = yb.detach().cpu()
-
-		future = executor.submit(calculate_training_statistics, batch_size, batch_idx + 1, epoch,
-		                         family_run, loss_detached, pred_detached, total_batches, yb_detached,
-		                         total, running_loss_sum)
-		futures.append(future)
-
-		total += batch_size
-		batch_idx += 1
-
-		if family_run.log_interval and family_run.log_interval > 0 and (
-			epoch % family_run.log_interval == 0 or epoch == family_run.total_epochs_to_train):
-			# Note: this log might be slightly behind if we use futures, but for simplicity we'll just log here
-			# or we could log inside the thread. The requirement was to avoid blocking.
-			pass
-
-	for future in futures:
-		l_contrib, t_contrib = future.result()
-		train_loss_sum += l_contrib
-		train_top10_sum += t_contrib
-
-	executor.shutdown(wait=True)
+	total, train_loss_sum, train_top10_sum = _train_one_epoch_for_rep_for_loop(amp_dtype, batch_idx, batch_size, device,
+	                                                                           epoch, family_run, model, non_blocking,
+	                                                                           optimizer, running_loss_sum, scaler,
+	                                                                           total, total_batches, train_loader,
+	                                                                           train_loss_sum, train_top10_sum, use_amp, counts)
 
 	# Explicitly clear tensors to help GC
 	#del xb, yb, pred, loss
 
-	train_mse = train_loss_sum / max(1, total)
-	train_top10 = train_top10_sum / max(1, total)
+	train_mse, train_top10 = _train_one_epoch_for_rep_calc_mse_top10(total, train_loss_sum, train_top10_sum)
 
 	# Force GC and clear CUDA cache at the end of the epoch
 	#	if torch.cuda.is_available():
@@ -602,8 +555,9 @@ def _train_one_epoch_for_rep(
 
 	val_mse = 0.0
 	val_top10 = 0.0
+	val_counts = {"label_pos": 0, "label_neg": 0, "label_zero": 0, "pred_pos": 0, "pred_neg": 0, "pred_zero": 0}
 	if val_loader is not None:
-		val_mse, val_top10, _val_rde_unused = eval_epoch(
+		val_mse, val_top10, _val_rde_unused, val_counts = eval_epoch(
 			model,
 			val_loader,
 			device,
@@ -617,40 +571,168 @@ def _train_one_epoch_for_rep(
 		)
 	else:
 		val_mse, val_top10 = 0.0, 0.0
-	return train_mse, val_mse, train_top10, val_top10
+
+	all_counts = {
+		"train": counts,
+		"val": val_counts
+	}
+	return train_mse, val_mse, train_top10, val_top10, all_counts
 
 
-def calculate_training_statistics(batch_size: float, batch_idx: int, epoch: int, family_run: FamilyRun,
+def _get_next_batch(iterator: Iterator) -> tuple[Tensor, Tensor]:
+	return next(iterator)
+
+def _train_one_epoch_for_rep_for_loop(amp_dtype, batch_idx: int, batch_size, device, epoch: int, family_run: FamilyRun,
+                                      model: Module, non_blocking: bool, optimizer: Optimizer,
+                                      running_loss_sum: list[float], scaler: GradScaler, total: int, total_batches: int,
+                                      train_loader: DataLoader, train_loss_sum: float, train_top10_sum: float,
+                                      use_amp: bool, counts: dict[str, int]) -> tuple[int, float, float]:
+	iterator = iter(train_loader)
+	while True:
+		try:
+			xb, yb = iterator.__next__()
+		except StopIteration:
+			break
+		total, train_loss_sum, train_top10_sum = _train_one_epoch_for_rep_for_loop_body(amp_dtype, batch_idx,
+		                                                                                batch_size, device, epoch,
+		                                                                                family_run, model, non_blocking,
+		                                                                                optimizer, running_loss_sum,
+		                                                                                scaler, total, total_batches,
+		                                                                                train_loss_sum, train_top10_sum,
+		                                                                                use_amp, xb, yb, counts)
+	return total, train_loss_sum, train_top10_sum
+
+def _train_one_epoch_for_rep_for_loop_body(amp_dtype, batch_idx: int | Any, batch_size: int | None, device, epoch: int,
+                                           family_run: FamilyRun, model: Module, non_blocking: bool,
+                                           optimizer: Optimizer, running_loss_sum: list[float], scaler: GradScaler,
+                                           total: int, total_batches: int, train_loss_sum: float,
+                                           train_top10_sum: float, use_amp: bool, xb, yb, counts: dict[str, int]) -> tuple[int, float, float]:
+	xb, yb = prepare_training_inputs(device, non_blocking, xb, yb)
+	if batch_size is None:
+		batch_size = xb.size(0)
+	# optimizer.zero_grad(set_to_none=True) # Moved to after step()
+	short_circuit_execution = False
+	if use_amp:
+		pred, loss, batch_index_update = backprop_loss_for_amp(xb=xb, yb=yb, model=model, family_run=family_run,
+		                                                       optimizer=optimizer, batch_idx=batch_idx,
+		                                                       amp_dtype=amp_dtype, scaler=scaler)
+		if batch_index_update is not None:
+			batch_idx = batch_index_update
+			# Explicitly clear tensors to help GC
+			# del xb, yb, pred, loss
+			short_circuit_execution = True
+	else:
+		pred, loss, batch_index_update = backprop_loss_non_amp(xb=xb, yb=yb, model=model, family_run=family_run,
+		                                                       optimizer=optimizer, batch_idx=batch_idx)
+		if batch_index_update is not None:
+			batch_idx = batch_index_update
+			# Explicitly clear tensors to help GC
+			# del xb, yb, pred, loss
+			short_circuit_execution = True
+
+	# Detach and move to CPU to avoid keeping GPU memory
+	# loss_detached = loss.detach().cpu()
+	# pred_detached = pred.detach().cpu()
+	# yb_detached = yb.detach().cpu()
+	if not short_circuit_execution:
+		train_loss_sum, train_top10_sum = calculate_training_statistics(train_loss_sum, train_top10_sum,
+		                                                                batch_size, batch_idx + 1, epoch, family_run,
+		                                                                loss, pred,
+		                                                                total_batches, yb, total, running_loss_sum, counts
+		                                                                )
+		# train_loss_sum += l_contrib
+		# train_top10_sum += t_contrib
+
+		total += batch_size
+		batch_idx += 1
+	return total, train_loss_sum, train_top10_sum
+
+
+def _train_one_epoch_for_rep_calc_mse_top10(total: int, train_loss_sum: int | float, train_top10_sum: int | float) -> \
+tuple[float, float]:
+	train_mse = train_loss_sum / max(1, total)
+	train_top10 = train_top10_sum / max(1, total)
+	return train_mse, train_top10
+
+
+def _train_one_epoch_for_rep_init(family_run: FamilyRun, model: Module, train_loader: DataLoader) -> tuple[
+	int, None, bool, int, int, float, float, dict[str, int]]:
+	model.train()
+	total = 0
+	train_loss_sum = 0.0
+	train_top10_sum = 0.0
+	batch_idx = 0
+	total_batches = len(train_loader) if hasattr(train_loader, "__len__") else 0
+	non_blocking = bool(family_run.pin_GPU_memory)
+	batch_size = None
+	counts = {"label_pos": 0, "label_neg": 0, "label_zero": 0, "pred_pos": 0, "pred_neg": 0, "pred_zero": 0}
+	return batch_idx, batch_size, non_blocking, total, total_batches, train_loss_sum, train_top10_sum, counts
+
+def calculate_training_statistics(train_loss_sum:float, train_top10_sum,   batch_size: float, batch_idx: int, epoch: int, family_run: FamilyRun,
                                   loss_tensor: Tensor, pred: Tensor, total_batches: int,
-                                  yb: Tensor, current_total: int, running_loss_sum: list[float]) -> tuple[float, float]:
+                                  yb: Tensor, current_total: int, running_loss_sum: list[float], counts: dict[str, int]) -> tuple[float, float]:
 	bs = batch_size
-	loss_val = loss_tensor.item()
-	loss_contribution = loss_val * bs
-	top10_contribution = mse_restricted(pred, yb.to(pred.dtype), mode="top", k=10).item() * bs
+	loss_contribution, loss_val, top10_contribution, batch_counts = calc_loss_contrib_top10(bs, loss_tensor, pred, yb)
 
 	if family_run.log_interval and family_run.log_interval > 0 and (
 		epoch % family_run.log_interval == 0 or epoch == family_run.total_epochs_to_train):
-		avg_loss_so_far = (running_loss_sum[0] + loss_contribution) / max(1, current_total + bs)
+		avg_loss_so_far = (running_loss_sum[0] + loss_contribution) / max(1.0, float(current_total) + bs)
 		print(
 			f"Epoch {epoch}/{family_run.total_epochs_to_train} | batch {batch_idx}/{total_batches} | curr_loss={loss_val:.6f} | avg_loss={avg_loss_so_far:.6f}")
 
+	train_loss_sum, train_top10_sum = sum_loss_training_stats(loss_contribution, running_loss_sum, top10_contribution,
+	                                                          train_loss_sum, train_top10_sum, counts, batch_counts)
+	return train_loss_sum, train_top10_sum
+
+
+def sum_loss_training_stats(loss_contribution: float, running_loss_sum: list[float], top10_contribution: float,
+                            train_loss_sum: float, train_top10_sum, counts: dict[str, int], batch_counts: dict[str, int]) -> tuple[float, Any]:
 	running_loss_sum[0] += loss_contribution
-	return loss_contribution, top10_contribution
+	train_loss_sum += loss_contribution
+	train_top10_sum += top10_contribution
+	for k, v in batch_counts.items():
+		counts[k] += v
+	return train_loss_sum, train_top10_sum
 
+def calc_loss_contrib_top10(bs: float, loss_tensor: Tensor, pred: Tensor, yb: Tensor) -> tuple[
+	float, int | float | bool, float, dict[str, int]]:
+	loss_val = loss_tensor.item()
+	loss_contribution = loss_val * bs
+	if "cuda" not in str(pred.device) or "cuda" not in str(yb.device) or "cuda" not in str(loss_tensor.device) :
+		print("not doing loss_contrib_top10_calc on cuda")
+		print(f"calc_loss_contrib_top10 {loss_tensor.device} {pred.device} {yb.device}")
+	top10_contribution = mse_restricted(pred, yb.to(pred.dtype), mode="top", k=10).item() * bs
 
+	with torch.no_grad():
+		label_pos = (yb > 0).sum().item()
+		label_neg = (yb < 0).sum().item()
+		label_zero = (yb == 0).sum().item()
+		pred_pos = (pred > 0).sum().item()
+		pred_neg = (pred < 0).sum().item()
+		pred_zero = (pred == 0).sum().item()
 
+	batch_counts = {
+		"label_pos": int(label_pos),
+		"label_neg": int(label_neg),
+		"label_zero": int(label_zero),
+		"pred_pos": int(pred_pos),
+		"pred_neg": int(pred_neg),
+		"pred_zero": int(pred_zero)
+	}
+
+	return loss_contribution, loss_val, top10_contribution, batch_counts
 
 def prepare_training_inputs(device, non_blocking: bool, xb, yb) -> tuple[Tensor, Tensor]:
 	if not isinstance(xb, torch.Tensor):
 		xb = torch.as_tensor(xb, dtype=torch.float32, device=device)
 	else:
+		#slow
 		xb = xb.to(device=device, dtype=torch.float32, non_blocking=non_blocking)
 	if not isinstance(yb, torch.Tensor):
 		yb = torch.as_tensor(yb, dtype=torch.float32, device=device)
 	else:
 		yb = yb.to(device=device, dtype=torch.float32, non_blocking=non_blocking)
 	return xb, yb
-
 
 def _train_and_log_epoch(
 	model,
@@ -680,7 +762,7 @@ def _train_and_log_epoch(
 
 	epoch_start = time.time()
 
-	train_mse, val_mse, train_top10, val_top10 = _train_one_epoch_for_rep(
+	train_mse, val_mse, train_top10, val_top10, all_counts = _train_one_epoch_for_rep(
 		model=model,
 		optimizer=optimizer,
 		scaler=scaler,
@@ -708,17 +790,32 @@ def _train_and_log_epoch(
 		rem_h = int(time_remaining // 3600)
 		rem_m = int((time_remaining % 3600) // 60)
 		rem_s = int(time_remaining % 60)
+
+		tc = all_counts["train"]
+		vc = all_counts["val"]
+
 		msg = (
 			f"Epoch {epoch:03d} | train_mse={train_mse:.6f} val_mse={val_mse:.6f} "
 			f"train_top10={train_top10:.6f} val_top10={val_top10:.6f} "
 			+ (" [rank_err:on]" if family_run.enable_rank_error_loss_in_training else "")
 			+ f" | time={epoch_dur:.2f}s"
 			+ f" | time remaining={rem_h:02d}:{rem_m:02d}:{rem_s:02d}"
+			+ f"\n         | Train: LBL pos={tc['label_pos']} neg={tc['label_neg']} zero={tc.get('label_zero', 0)} | PRD pos={tc['pred_pos']} neg={tc['pred_neg']} zero={tc.get('pred_zero', 0)}"
+			+ f"\n         | Val:   LBL pos={vc['label_pos']} neg={vc['label_neg']} zero={vc.get('label_zero', 0)} | PRD pos={vc['pred_pos']} neg={vc['pred_neg']} zero={vc.get('pred_zero', 0)}"
 		)
 		print(msg)
 
 	row = [epoch, train_mse, val_mse, train_top10, val_top10, optimizer.param_groups[0]["lr"]]
 	one_file_structure.get_metrics_file_handler_for_rep(rep_index).write_row(row)
+
+	tc = all_counts["train"]
+	vc = all_counts["val"]
+	count_row = [
+		epoch,
+		tc["label_pos"], tc["label_neg"], tc.get("label_zero", 0), tc["pred_pos"], tc["pred_neg"], tc.get("pred_zero", 0),
+		vc["label_pos"], vc["label_neg"], vc.get("label_zero", 0), vc["pred_pos"], vc["pred_neg"], vc.get("pred_zero", 0)
+	]
+	one_file_structure.get_count_metrics_file_handler_for_rep(rep_index).write_row(count_row)
 	_maybe_save_checkpoint(
 		single_run=single_run,
 		one_file_structure=one_file_structure,
@@ -760,7 +857,8 @@ class TrainSingleRun:
 				tranaction_ratio=family_run.transaction_ratio,
 				day_change_centered=day_centered,
 				start_date_id=self.single_run.train_validation_test_sets_start_date_id,
-				end_date_id=self.single_run.train_validation_test_sets_end_date_id
+				end_date_id=self.single_run.train_validation_test_sets_end_date_id,
+				device="cpu"
 			)
 		return self._providers[day_centered]
 
@@ -768,8 +866,8 @@ class TrainSingleRun:
 	# Small helper extractions
 	# ----------------------------
 
-	@line_profiler.profile
-	def run_one(self, save_interval: int = 100) -> None:
+
+	def run_one(self, save_interval: int = 500) -> None:
 		"""Core training loop for a single `SingleRun` configuration."""
 
 		family_run = self.single_run.family_run
@@ -921,6 +1019,8 @@ class TrainSingleRun:
 
 				model = bundle.model
 				if model is not None:
+
+					print(f"model from {next(model.parameters()).device} to device ",device)
 					model.to(device)
 				optimizer = bundle.optimizer
 				if optimizer is not None:
@@ -992,6 +1092,7 @@ class TrainSingleRun:
 								feature_label_date_gen = bundle.testing_instance_provider.get_next_feature_label_date()
 								# Use the model directly from the recommender (it might have been wrapped/moved)
 								for feat_vec, _, feature_date_id in feature_label_date_gen:
+
 									input_tensor = feat_vec.unsqueeze(0).to(device)
 									rec.generateStockScoresForNetwork(
 										network=rec._models[0],
@@ -1173,7 +1274,7 @@ class TrainSingleRun:
 			if test_iter is not None:
 				if model is not None:
 					model.to(device)
-				test_mse, test_top10, test_rde = eval_epoch(
+				test_mse, test_top10, test_rde, test_counts = eval_epoch(
 					model,
 					test_iter,
 					device,
@@ -1186,7 +1287,7 @@ class TrainSingleRun:
 				if model is not None:
 					model.to("cpu")
 			else:
-				test_mse, test_top10, test_rde = 0.0, 0.0, 0.0
+				test_mse, test_top10, test_rde, test_counts = 0.0, 0.0, 0.0, {}
 			print("Final Test Metrics:")
 			print(f"test_mse={test_mse:.6f} test_top10={test_top10:.6f} test_rank_disp={test_rde:.3f}")
 

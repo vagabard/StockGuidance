@@ -214,6 +214,11 @@ class FileStructureSingleRunHandler:
 		metric_handler = MetricFileHandler(rep_metrics_file)
 		return metric_handler
 
+	def get_count_metrics_file_handler_for_rep(self, repeat_index: int) -> MetricFileHandler:
+		rep_count_file = os.path.join(self.get_directory_for_rep(repeat_index), f"{self.suffix}_count_metrics.csv")
+		metric_handler = MetricFileHandler(rep_count_file, header=MetricFileHandler.COUNT_METRICS_HEADER)
+		return metric_handler
+
 	def get_checkpoint_files_for_rep(self, repeat_index: int) -> Tuple[str, str]:
 		model_checkpoint = os.path.join(self.get_directory_for_rep(repeat_index), f"{self.suffix}_model_state.pt")
 		optimizer_checkpoint = os.path.join(self.get_directory_for_rep(repeat_index), f"{self.suffix}_optimizer_state.pt")

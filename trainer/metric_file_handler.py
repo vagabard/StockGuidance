@@ -25,6 +25,23 @@ class MetricFileHandler:
         "current_learning_rate",
     ]
 
+    # Header for per-epoch counts of positive, negative, and zero labels/predictions.
+    COUNT_METRICS_HEADER: List[str] = [
+        "epoch",
+        "train_lbl_pos",
+        "train_lbl_neg",
+        "train_lbl_zero",
+        "train_prd_pos",
+        "train_prd_neg",
+        "train_prd_zero",
+        "val_lbl_pos",
+        "val_lbl_neg",
+        "val_lbl_zero",
+        "val_prd_pos",
+        "val_prd_neg",
+        "val_prd_zero",
+    ]
+
     def __init__(self, path: str, header: Optional[Sequence[str]] = None):
         self.path = path
         # If no header is provided, fall back to the standard training header.

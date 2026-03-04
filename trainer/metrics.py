@@ -21,11 +21,12 @@ def eval_epoch(
 	compute_rank_err: bool = True,
 	compute_rank_disp: bool = True,
 	pin_memory: bool = False,
-) -> Tuple[float, float, float]:
+) -> Tuple[float, float, float, dict[str, int]]:
 	model.eval()
 	total = 0
 	mse_sum = 0.0
 	top10_sum = 0.0
+	counts = {"label_pos": 0, "label_neg": 0, "label_zero": 0, "pred_pos": 0, "pred_neg": 0, "pred_zero": 0}
 	from contextlib import nullcontext
 	amp_cm = (
 		torch.amp.autocast('cuda', dtype=amp_dtype) if (amp_enabled and device.type == "cuda") else nullcontext()  # type: ignore[attr-defined]
@@ -46,10 +47,20 @@ def eval_epoch(
 				# print(xb.shape)
 				# print(yb.shape)
 				pred = model(xb)
+				if not torch.isfinite(pred).all():
+					print("  WARNING: Model output contains NaNs or Infs during evaluation!")
 				pred = torch.nan_to_num(pred, nan=0.0, posinf=0.0, neginf=0.0)
 				label_to_pred_dtype = yb.to(pred.dtype)
 				mse = torch.mean((pred - label_to_pred_dtype) ** 2)
 				top10 = mse_restricted(pred, label_to_pred_dtype, mode="top", k=10)
+
+				counts["label_pos"] += int((yb > 0).sum().item())
+				counts["label_neg"] += int((yb < 0).sum().item())
+				counts["label_zero"] += int((yb == 0).sum().item())
+				counts["pred_pos"] += int((pred > 0).sum().item())
+				counts["pred_neg"] += int((pred < 0).sum().item())
+				counts["pred_zero"] += int((pred == 0).sum().item())
+
 				if compute_rank_disp:
 					rde = rank_range_displacement(pred, yb.to(pred.dtype), rank_lower, rank_upper)
 				else:
@@ -76,7 +87,7 @@ def eval_epoch(
 	denom = max(1, total)
 	rde_avg = rde_sum / denom
 	#rank_err_avg = rank_err_sum / denom
-	return mse_sum / denom, top10_sum / denom, rde_avg # , rank_err_avg
+	return mse_sum / denom, top10_sum / denom, rde_avg, counts # , rank_err_avg
 
 
 __all__ = [

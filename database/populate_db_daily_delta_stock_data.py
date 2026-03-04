@@ -224,7 +224,7 @@ def populate_deltas(conn, date_ids: List[int], start_date_id: Optional[int] = No
 		# Pass 2: Next Day Change
 		for i in range(total):
 			curr_id = date_ids[i]
-			if (start_date_id is not None and curr_id < start_date_id) or (end_date_id is not None and curr_id > end_date_id):
+			if (start_date_id is not None and curr_id < start_date_id - 1) or (end_date_id is not None and curr_id > end_date_id):
 				continue
 			next_id = date_ids[i + 1] if i < total - 1 else None
 			_update_next_day_change_for_date(cursor, curr_id, next_id, ticker_id=ticker_id)
@@ -233,7 +233,7 @@ def populate_deltas(conn, date_ids: List[int], start_date_id: Optional[int] = No
 		# Pass 3: Remaining Metrics
 		for i in range(total):
 			curr_id = date_ids[i]
-			if (start_date_id is not None and curr_id < start_date_id) or (end_date_id is not None and curr_id > end_date_id):
+			if (start_date_id is not None and curr_id < start_date_id - 1) or (end_date_id is not None and curr_id > end_date_id):
 				continue
 			_update_remaining_metrics_for_date(cursor, curr_id, ticker_id=ticker_id)
 		conn.commit()
@@ -288,7 +288,7 @@ def bring_up_to_date(conn):
 		# Pass 2: Next Day Change
 		for i in range(total):
 			curr_id = date_ids[i]
-			if curr_id in missing_date_ids:
+			if curr_id in missing_date_ids or (i + 1 < total and date_ids[i + 1] in missing_date_ids):
 				next_id = date_ids[i + 1] if i < total - 1 else None
 				_update_next_day_change_for_date(cursor, curr_id, next_id)
 		conn.commit()
@@ -296,7 +296,7 @@ def bring_up_to_date(conn):
 		# Pass 3: Remaining Metrics
 		for i in range(total):
 			curr_id = date_ids[i]
-			if curr_id in missing_date_ids:
+			if curr_id in missing_date_ids or (i + 1 < total and date_ids[i + 1] in missing_date_ids):
 				_update_remaining_metrics_for_date(cursor, curr_id)
 		conn.commit()
 	except Exception as e:

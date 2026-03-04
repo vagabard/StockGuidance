@@ -239,6 +239,7 @@ def _run_as_script():
 	# Prefer project default path if running elsewhere
 	win_default = r"C:\\Projects\\StockGuidance\\data"
 	base_dir = st.sidebar.text_input("Base data directory", value=(win_default if os.path.isdir(win_default) else default_base))
+	st.session_state["crv_base_dir"] = base_dir
 
 	runs = scan_runs(base_dir)
 
@@ -290,6 +291,12 @@ def _run_as_script():
 
 	st.title("Compare Training Runs")
 	st.caption("Scan a data folder of timestamped run directories and compare run parameters.")
+
+	# ------------------------------------------------------------------
+	# Navigation support from dashboard
+	# ------------------------------------------------------------------
+	if "crv_families" in st.session_state and "crv_families_init" not in st.session_state:
+		st.session_state["crv_families_init"] = True
 
 	# --- Persistent viewer/session state ---
 	if "viewer_metric_checks" not in st.session_state:
@@ -470,9 +477,13 @@ def _run_as_script():
 
 	selected_runs = selected_runs_from_grid
 
-	# Update chosen_params based on grid selection
-	# We need to map selected_runs back to the full parameter dictionaries
-	chosen_params = [r for r in display_rows if (r.get("_ts") or r.get("_dir")) in selected_runs]
+	# Map selected_runs back to the full parameter dictionaries
+	chosen_params = []
+	for rid in selected_runs:
+		for r in display_rows:
+			if (r.get("run") == rid or r.get("run_id") == rid or r.get("_ts") == rid or r.get("_dir") == rid):
+				chosen_params.append(r)
+				break
 	if not chosen_params:
 		# Fallback to all if nothing selected
 		chosen_params = display_rows
@@ -647,105 +658,105 @@ def _run_as_script():
 		# If no named x, use DataFrame index later
 
 		# Checkbox controls for metrics (top of viewer)
-		st.subheader("Metrics to show")
-		# Global toggle for logarithmic Y-axis across all charts in the viewer.
-		# Persisted via session_state so it survives tab switches and reruns.
-		if "viewer_log_y" not in st.session_state:
-			st.session_state["viewer_log_y"] = prefs.get("viewer_log_y", False)
-		log_y = st.checkbox(
-			"Logarithmic Y-axis",
-			value=st.session_state["viewer_log_y"],
-			key="viewer_log_y",
-			on_change=lambda: save_preference("viewer_log_y", st.session_state["viewer_log_y"]),
-		)
+		with st.expander("Metrics to show", expanded=True):
+			# Global toggle for logarithmic Y-axis across all charts in the viewer.
+			# Persisted via session_state so it survives tab switches and reruns.
+			if "viewer_log_y" not in st.session_state:
+				st.session_state["viewer_log_y"] = prefs.get("viewer_log_y", False)
+			log_y = st.checkbox(
+				"Logarithmic Y-axis",
+				value=st.session_state["viewer_log_y"],
+				key="viewer_log_y",
+				on_change=lambda: save_preference("viewer_log_y", st.session_state["viewer_log_y"]),
+			)
 
-		# Number of initial points to ignore from the beginning of each run's series.
-		# Implemented as a small dropdown (0..20) so it's quick to adjust and consistent
-		# across all charts. Persisted in session_state.
-		if "viewer_ignore_head" not in st.session_state:
-			st.session_state["viewer_ignore_head"] = prefs.get("viewer_ignore_head", 0)
-		ignore_head_val = int(st.session_state["viewer_ignore_head"] or 0)
-		ignore_head_val = max(0, min(20, ignore_head_val))
-		ignore_head = st.selectbox(
-			"Ignore first N points",
-			options=list(range(0, 21)),
-			index=ignore_head_val,
-			help="Number of leading data points to drop from each run before plotting.",
-			key="viewer_ignore_head",
-			#width=100,  # selectbox doesn't take width
-			on_change=lambda: save_preference("viewer_ignore_head", st.session_state["viewer_ignore_head"]),
-		)
+			# Number of initial points to ignore from the beginning of each run's series.
+			# Implemented as a small dropdown (0..20) so it's quick to adjust and consistent
+			# across all charts. Persisted in session_state.
+			if "viewer_ignore_head" not in st.session_state:
+				st.session_state["viewer_ignore_head"] = prefs.get("viewer_ignore_head", 0)
+			ignore_head_val = int(st.session_state["viewer_ignore_head"] or 0)
+			ignore_head_val = max(0, min(20, ignore_head_val))
+			ignore_head = st.selectbox(
+				"Ignore first N points",
+				options=list(range(0, 21)),
+				index=ignore_head_val,
+				help="Number of leading data points to drop from each run before plotting.",
+				key="viewer_ignore_head",
+				#width=100,  # selectbox doesn't take width
+				on_change=lambda: save_preference("viewer_ignore_head", st.session_state["viewer_ignore_head"]),
+			)
 
-		# Layout toggle: either one chart per run (original behaviour) or
-		# a single combined chart that overlays all selected runs to make
-		# comparisons easier.
-		if "viewer_single_chart" not in st.session_state:
-			st.session_state["viewer_single_chart"] = prefs.get("viewer_single_chart", False)
-		single_chart = st.checkbox(
-			"Single chart (overlay all selected runs)",
-			value=st.session_state["viewer_single_chart"],
-			key="viewer_single_chart",
-			help=(
-				"When enabled, show all selected runs together in a single chart. "
-				"Each run/metric pair will appear as a separate line in the legend."
-			),
-			on_change=lambda: save_preference("viewer_single_chart", st.session_state["viewer_single_chart"]),
-		)
+			# Layout toggle: either one chart per run (original behaviour) or
+			# a single combined chart that overlays all selected runs to make
+			# comparisons easier.
+			if "viewer_single_chart" not in st.session_state:
+				st.session_state["viewer_single_chart"] = prefs.get("viewer_single_chart", False)
+			single_chart = st.checkbox(
+				"Single chart (overlay all selected runs)",
+				value=st.session_state["viewer_single_chart"],
+				key="viewer_single_chart",
+				help=(
+					"When enabled, show all selected runs together in a single chart. "
+					"Each run/metric pair will appear as a separate line in the legend."
+				),
+				on_change=lambda: save_preference("viewer_single_chart", st.session_state["viewer_single_chart"]),
+			)
 
-		# Sum rep errors toggle: when multiple reps exist for a given run configuration,
-		# this option aggregates their error values at each point and graphs the sum
-		# rather than individual lines. This makes it easier to compare different
-		# hyperparameters when repetitions are used.
-		if "viewer_sum_rep_errors" not in st.session_state:
-			st.session_state["viewer_sum_rep_errors"] = prefs.get("viewer_sum_rep_errors", False)
-		sum_rep_errors = st.checkbox(
-			"Sum rep errors",
-			value=st.session_state["viewer_sum_rep_errors"],
-			key="viewer_sum_rep_errors",
-			help="Sum metrics containing 'mse', 'loss', or 'error' across repetitions for each run.",
-			on_change=lambda: save_preference("viewer_sum_rep_errors", st.session_state["viewer_sum_rep_errors"]),
-		)
+			# Sum rep errors toggle: when multiple reps exist for a given run configuration,
+			# this option aggregates their error values at each point and graphs the sum
+			# rather than individual lines. This makes it easier to compare different
+			# hyperparameters when repetitions are used.
+			if "viewer_sum_rep_errors" not in st.session_state:
+				st.session_state["viewer_sum_rep_errors"] = prefs.get("viewer_sum_rep_errors", False)
+			sum_rep_errors = st.checkbox(
+				"Sum rep errors",
+				value=st.session_state["viewer_sum_rep_errors"],
+				key="viewer_sum_rep_errors",
+				help="Sum metrics containing 'mse', 'loss', or 'error' across repetitions for each run.",
+				on_change=lambda: save_preference("viewer_sum_rep_errors", st.session_state["viewer_sum_rep_errors"]),
+			)
 
-		if "viewer_linear_interp" not in st.session_state:
-			st.session_state["viewer_linear_interp"] = prefs.get("viewer_linear_interp", False)
-		linear_interp = st.checkbox(
-			"Linear interpolation",
-			value=st.session_state["viewer_linear_interp"],
-			key="viewer_linear_interp",
-			help="Display linear interpolation of the graphs based on displayed points.",
-			on_change=lambda: save_preference("viewer_linear_interp", st.session_state["viewer_linear_interp"]),
-		)
+			if "viewer_linear_interp" not in st.session_state:
+				st.session_state["viewer_linear_interp"] = prefs.get("viewer_linear_interp", False)
+			linear_interp = st.checkbox(
+				"Linear interpolation",
+				value=st.session_state["viewer_linear_interp"],
+				key="viewer_linear_interp",
+				help="Display linear interpolation of the graphs based on the final 10% of displayed points.",
+				on_change=lambda: save_preference("viewer_linear_interp", st.session_state["viewer_linear_interp"]),
+			)
 
-		if not all_metric_cols:
-			st.warning("No metric CSVs found for selected runs. Ensure each run contains a *_training_metrics.csv file.")
-		# Initialize missing keys from preferences
-		for col in all_metric_cols:
-			if col == x_axis:
-				continue
-			key = f"metric_check_{col}"
-			if key not in st.session_state:
-				# Default current_learning_rate to False so it doesn't squash the MSE curves by default
-				if col == "current_learning_rate":
-					st.session_state[key] = prefs.get(key, False)
-				else:
-					st.session_state[key] = prefs.get(key, True)
-
-		# Render checkboxes in 4 columns
-		if all_metric_cols:
-			cols = st.columns(4)
-			for i, col in enumerate([c for c in all_metric_cols if c != x_axis]):
-				with cols[i % 4]:
-					key = f"metric_check_{col}"
-					if key not in st.session_state:
+			if not all_metric_cols:
+				st.warning("No metric CSVs found for selected runs. Ensure each run contains a *_training_metrics.csv file.")
+			# Initialize missing keys from preferences
+			for col in all_metric_cols:
+				if col == x_axis:
+					continue
+				key = f"metric_check_{col}"
+				if key not in st.session_state:
+					# Default current_learning_rate to False so it doesn't squash the MSE curves by default
+					if col == "current_learning_rate":
+						st.session_state[key] = prefs.get(key, False)
+					else:
 						st.session_state[key] = prefs.get(key, True)
-					st.checkbox(
-						col,
-						key=key,
-						value=st.session_state[key],
-						on_change=lambda k=key: save_preference(k, st.session_state[k]),
-					)
 
-		selected_metrics = [c for c in all_metric_cols if c != x_axis and st.session_state.get(f"metric_check_{c}", False)]
+			# Render checkboxes in 4 columns
+			if all_metric_cols:
+				cols = st.columns(4)
+				for i, col in enumerate([c for c in all_metric_cols if c != x_axis]):
+					with cols[i % 4]:
+						key = f"metric_check_{col}"
+						if key not in st.session_state:
+							st.session_state[key] = prefs.get(key, True)
+						st.checkbox(
+							col,
+							key=key,
+							value=st.session_state[key],
+							on_change=lambda k=key: save_preference(k, st.session_state[k]),
+						)
+
+			selected_metrics = [c for c in all_metric_cols if c != x_axis and st.session_state.get(f"metric_check_{c}", False)]
 
 		if not selected_metrics:
 			st.info("No metrics selected. Check one or more metric types above to display graphs.")
@@ -754,93 +765,93 @@ def _run_as_script():
 		# ------------------------------------------------------------------
 		# Run comparison (replicate summary)
 		# ------------------------------------------------------------------
-		st.subheader("Run comparison (replicate summary)")
-		if not all_metric_cols:
-			st.info("No metrics available for comparison yet.")
-		else:
-			import numpy as np
-			import pandas as pd
+		with st.expander("Metric table", expanded=True):
+			if not all_metric_cols:
+				st.info("No metrics available for comparison yet.")
+			else:
+				import numpy as np
+				import pandas as pd
 
-			comp_metric_candidates = [c for c in all_metric_cols if c != x_axis]
-			default_metric = None
-			for key in ["mse", "loss", "error", "err", "rank"]:
-				for cand in comp_metric_candidates:
-					if key in str(cand).lower():
-						default_metric = cand
-						break
-				if default_metric:
-					break
-			if default_metric is None and comp_metric_candidates:
-				default_metric = comp_metric_candidates[0]
+				comp_metric_candidates = [c for c in all_metric_cols if c != x_axis]
+				default_metric = None
+				for key in ["mse", "loss", "error", "err", "rank"]:
+					for cand in comp_metric_candidates:
+						if key in str(cand).lower():
+							default_metric = cand
+							break
+						if default_metric:
+							break
+				if default_metric is None and comp_metric_candidates:
+					default_metric = comp_metric_candidates[0]
 
-			comp_col, summary_col, direction_col = st.columns([2, 2, 2])
-			with comp_col:
-				comparison_metric = st.selectbox(
-					"Metric",
-					options=comp_metric_candidates,
-					index=comp_metric_candidates.index(default_metric) if default_metric in comp_metric_candidates else 0,
-					help="Metric to summarise per replicate and compare across argument sets.",
-				)
-			with summary_col:
-				summary_mode = st.selectbox(
-					"Summary",
-					options=["final", "mean_tail", "min", "max"],
-					format_func=lambda v: {
-						"final": "Final value",
-						"mean_tail": "Mean of last N",
-						"min": "Minimum",
-						"max": "Maximum",
-					}.get(v, v),
-					help="How to summarise each replicate's metric series.",
-				)
-			with direction_col:
-				default_lower_better = any(k in str(comparison_metric).lower() for k in ["mse", "loss", "error", "err"]) if comparison_metric else True
-				lower_is_better = st.checkbox(
-					"Lower is better",
-					value=default_lower_better,
-					help="Toggle when higher values indicate better performance.",
-				)
+				comp_col, summary_col, direction_col = st.columns([2, 2, 2])
+				with comp_col:
+					comparison_metric = st.selectbox(
+						"Metric",
+						options=comp_metric_candidates,
+						index=comp_metric_candidates.index(default_metric) if default_metric in comp_metric_candidates else 0,
+						help="Metric to summarise per replicate and compare across argument sets.",
+					)
+				with summary_col:
+					summary_mode = st.selectbox(
+						"Summary",
+						options=["final", "mean_tail", "min", "max"],
+						format_func=lambda v: {
+							"final": "Final value",
+							"mean_tail": "Mean of last N",
+							"min": "Minimum",
+							"max": "Maximum",
+						}.get(v, v),
+						help="How to summarise each replicate's metric series.",
+					)
+				with direction_col:
+					default_lower_better = any(k in str(comparison_metric).lower() for k in ["mse", "loss", "error", "err"]) if comparison_metric else True
+					lower_is_better = st.checkbox(
+						"Lower is better",
+						value=default_lower_better,
+						help="Toggle when higher values indicate better performance.",
+					)
 
-			tail_n = 5
-			if summary_mode == "mean_tail":
-				tail_n = st.selectbox(
-					"Tail window (N)",
-					options=list(range(3, 31)),
-					index=2,
-					help="Number of most recent points to average for each replicate.",
-				)
+				tail_n = 5
+				if summary_mode == "mean_tail":
+					tail_n = st.selectbox(
+						"Tail window (N)",
+						options=list(range(3, 31)),
+						index=2,
+						help="Number of most recent points to average for each replicate.",
+					)
 
-			def _summarise_series(series) -> float | None:
-				if series is None or series.empty:
-					return None
-				try:
-					if summary_mode == "final":
-						return float(series.iloc[-1])
-					if summary_mode == "min":
-						return float(series.min())
-					if summary_mode == "max":
-						return float(series.max())
-					return float(series.tail(int(tail_n)).mean())
-				except Exception:
-					return None
+				def _summarise_series(series) -> float | None:
+					if series is None or series.empty:
+						return None
+					try:
+						if summary_mode == "final":
+							return float(series.iloc[-1])
+						if summary_mode == "min":
+							return float(series.min())
+						if summary_mode == "max":
+							return float(series.max())
+						return float(series.tail(int(tail_n)).mean())
+					except Exception:
+						return None
 
-			def _bootstrap_diff(a_vals: List[float], b_vals: List[float], n_boot: int = 1000) -> Tuple[float | None, Tuple[float | None, float | None]]:
-				if not a_vals or not b_vals:
-					return None, (None, None)
-				rng = np.random.default_rng(0)
-				a = np.asarray(a_vals, dtype=float)
-				b = np.asarray(b_vals, dtype=float)
-				diffs = np.empty(n_boot, dtype=float)
-				for i in range(n_boot):
-					a_s = rng.choice(a, size=len(a), replace=True)
-					b_s = rng.choice(b, size=len(b), replace=True)
-					diffs[i] = float(np.mean(a_s) - np.mean(b_s))
-				ci_low, ci_high = np.percentile(diffs, [2.5, 97.5])
-				if lower_is_better:
-					confidence = float(np.mean(diffs > 0))
-				else:
-					confidence = float(np.mean(diffs < 0))
-				return confidence, (float(ci_low), float(ci_high))
+				def _bootstrap_diff(a_vals: List[float], b_vals: List[float], n_boot: int = 1000) -> Tuple[float | None, Tuple[float | None, float | None]]:
+					if not a_vals or not b_vals:
+						return None, (None, None)
+					rng = np.random.default_rng(0)
+					a = np.asarray(a_vals, dtype=float)
+					b = np.asarray(b_vals, dtype=float)
+					diffs = np.empty(n_boot, dtype=float)
+					for i in range(n_boot):
+						a_s = rng.choice(a, size=len(a), replace=True)
+						b_s = rng.choice(b, size=len(b), replace=True)
+						diffs[i] = float(np.mean(a_s) - np.mean(b_s))
+					ci_low, ci_high = np.percentile(diffs, [2.5, 97.5])
+					if lower_is_better:
+						confidence = float(np.mean(diffs > 0))
+					else:
+						confidence = float(np.mean(diffs < 0))
+					return confidence, (float(ci_low), float(ci_high))
 
 			run_summaries: List[Dict[str, Any]] = []
 			for run_id in selected_runs:
@@ -1066,12 +1077,15 @@ def _run_as_script():
 							valid_pts = [(x, y) for x, y in zip(local_x, y_vals) if x is not None and y is not None]
 							if len(valid_pts) >= 2:
 								import numpy as np
-								xs_arr = np.array([p[0] for p in valid_pts])
-								ys_arr = np.array([p[1] for p in valid_pts])
+								# Use only the final 10% of points for the fit
+								fit_pts = valid_pts[-max(2, len(valid_pts) // 10):]
+								xs_fit = np.array([p[0] for p in fit_pts])
+								ys_fit = np.array([p[1] for p in fit_pts])
 								# Fit a first-degree polynomial (linear)
-								coeffs = np.polyfit(xs_arr, ys_arr, 1)
+								coeffs = np.polyfit(xs_fit, ys_fit, 1)
 								poly = np.poly1d(coeffs)
-								# Generate interpolation values across the same x range
+								# Generate interpolation values across the WHOLE displayed x range
+								xs_arr = np.array([p[0] for p in valid_pts])
 								y_interp = poly(xs_arr).tolist()
 								series.append((local_x, y_interp, f"{label} (linear interp)"))
 						except Exception as e:
@@ -1087,7 +1101,8 @@ def _run_as_script():
 				from plotly.subplots import make_subplots # type: ignore
 
 				# Check if we should use a secondary Y-axis (e.g. for learning rate)
-				use_secondary_y = "current_learning_rate" in selected_metrics
+				# We always use the dual-axis Plotly chart to keep a consistent graph type
+				use_secondary_y = True
 
 				if use_secondary_y:
 					fig = make_subplots(specs=[[{"secondary_y": True}]])
@@ -1174,7 +1189,8 @@ def _run_as_script():
 				from plotly.subplots import make_subplots # type: ignore
 
 				# Check if we should use a secondary Y-axis (e.g. for learning rate)
-				use_secondary_y = "current_learning_rate" in plot_df.columns and "current_learning_rate" in selected_metrics
+				# We always use the dual-axis Plotly chart to keep a consistent graph type
+				use_secondary_y = True
 
 				if use_secondary_y:
 					fig = make_subplots(specs=[[{"secondary_y": True}]])
@@ -1392,26 +1408,28 @@ def _run_as_script():
 								# Linear interpolation: y = mx + c
 								valid_pts = plot_df[[x_enc, col]].dropna()
 								if len(valid_pts) >= 2:
-									xs_arr = valid_pts[x_enc].values
-									ys_arr = valid_pts[col].values
-									coeffs = np.polyfit(xs_arr, ys_arr, 1)
+									# Use only the final 10% of points for the fit
+									fit_pts = valid_pts.tail(max(2, len(valid_pts) // 10))
+									xs_fit = fit_pts[x_enc].values
+									ys_fit = fit_pts[col].values
+									coeffs = np.polyfit(xs_fit, ys_fit, 1)
 									poly = np.poly1d(coeffs)
+									# Generate interpolation values across the WHOLE displayed range
 									new_cols[f"{col} (linear interp)"] = poly(plot_df[x_enc].values)
 							if new_cols:
 								plot_df = pd.concat([plot_df, pd.DataFrame(new_cols, index=plot_df.index)], axis=1)
 						except Exception as e:
 							print(f"[compare_runs_viewer] Linear interp failed in grid charts: {e}")
 
-					# Check for secondary Y axis support if using Altair
-					use_secondary_y = "current_learning_rate" in plot_df.columns and "current_learning_rate" in selected_metrics
+					# Check for secondary Y axis support
+					# We always use the dual-axis chart type (via fallback to _plot_lines) to keep it consistent
+					use_secondary_y = True
 
 					# Melt to long for Altair
 					try:
-						# If we have secondary Y, we might want to handle it differently in Altair,
-						# but standard melt will put everything on the same axis.
-						# Altair secondary axis is complex, let's see if we can just use the fallback for that case.
-						if use_secondary_y and alt is not None:
-							# Force fallback to _plot_lines for secondary axis to keep it simple and consistent with Plotly implementation
+						# If we have secondary Y, we always use the fallback to _plot_lines (Plotly)
+						# to keep the graph type consistent with the dual-axis Plotly implementation
+						if use_secondary_y:
 							_plot_lines(plot_df, x_enc, height=260)
 							continue
 

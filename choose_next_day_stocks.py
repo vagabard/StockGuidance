@@ -214,6 +214,34 @@ def _lookup_transaction_date_for_date_id(
 			pass
 
 
+def _lookup_date_id_for_transaction_date(
+    target_date: date,
+    *,
+    dbinfo_file: str = "dbinfo.id",
+) -> Optional[int]:
+	"""Return the ``date_id`` corresponding to a given ``transaction_date``.
+
+	Returns ``None`` if no matching row is found.
+	"""
+
+	conn = get_connection(dbinfo_file=dbinfo_file)
+	try:
+		cur = conn.cursor()
+		cur.execute(
+			"SELECT id FROM transaction_dates WHERE transaction_date = %s",
+			(target_date,),
+		)
+		row = cur.fetchone()
+		if not row:
+			return None
+		return int(row[0])
+	finally:
+		try:
+			conn.close()
+		except Exception:
+			pass
+
+
 def _load_ticker_symbols(
     ticker_ids: list[int],
     *,
@@ -451,6 +479,29 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 			"across all models to form the ensemble scores."
 		),
 	)
+	parser.add_argument(
+		"--pretrained-dir",
+		default=None,
+		help=(
+			"If provided, use an existing model from this directory "
+			"instead of training a new one. The execution flow remains "
+			"the same, using this model for recommendations."
+		),
+	)
+	parser.add_argument(
+		"--target-date",
+		default=None,
+		help=(
+			"Optional ISO date (YYYY-MM-DD). If provided, this date will be "
+			"used as the 'current' date for recommendations and data "
+			"processing. If omitted, uses the latest date in the database."
+		),
+	)
+	parser.add_argument(
+		"--log-features",
+		action="store_true",
+		help="If set, log the full feature vector to a CSV file in the run directory.",
+	)
 	return parser
 
 
@@ -503,6 +554,21 @@ def main(argv: Optional[List[str]] = None) -> int:
 	parser = _build_arg_parser()
 	args = parser.parse_args(argv)
 
+	target_date_obj = None
+	target_date_id = None
+	if args.target_date:
+		try:
+			target_date_obj = date.fromisoformat(args.target_date)
+		except ValueError:
+			print(f"Error: Invalid --target-date format '{args.target_date}'. Use YYYY-MM-DD.")
+			return 1
+
+		target_date_id = _lookup_date_id_for_transaction_date(target_date_obj, dbinfo_file=args.dbinfo_file)
+		if target_date_id is None:
+			print(f"Error: Target date {args.target_date} not found in transaction_dates table.")
+			return 1
+		print(f"Using target date {args.target_date} (date_id: {target_date_id})")
+
 	# Determine the latest date already present in raw_stock_data so we can
 	# later backfill any newer NDJSON files into the database.
 	latest_date_id, latest_date = _load_latest_raw_stock_data_date(dbinfo_file=args.dbinfo_file)
@@ -517,7 +583,21 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 	data_dir = Path(args.data_dir)
 
-	range_of_days_of_stock_data_downloaded_from_massive = _compute_range(data_dir, args.start_date, args.end_date)
+	effective_end_date = args.end_date
+	if target_date_obj:
+		# If target_date is provided, we don't need to fetch anything past it
+		if effective_end_date is None:
+			effective_end_date = target_date_obj.isoformat()
+		else:
+			# If user provided end_date, use the earlier of the two
+			try:
+				user_end_date = date.fromisoformat(effective_end_date)
+				if user_end_date > target_date_obj:
+					effective_end_date = target_date_obj.isoformat()
+			except ValueError:
+				pass
+
+	range_of_days_of_stock_data_downloaded_from_massive = _compute_range(data_dir, args.start_date, effective_end_date)
 	if range_of_days_of_stock_data_downloaded_from_massive is None:
 		# Either there is nothing to do (already up to date for the requested
 		# window) or there are no existing files and no explicit start date.
@@ -602,6 +682,10 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 	latest_after_date_id, _ = latest_after
 
+	if target_date_id is not None:
+		print(f"Target date_id {target_date_id} overrides latest_after_date_id {latest_after_date_id} for processing.")
+		latest_after_date_id = target_date_id
+
 	# Determine the latest date_id already present in daily_delta_stock_data so
 	# that we only backfill rows strictly after that point. This avoids
 	# incorrectly using the latest raw_stock_data date as the starting point,
@@ -629,127 +713,203 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 	print(
 		"Populating daily_delta_stock_data for date_id range "
-		f"{latest_delta_date_id + 1} through {latest_after_date_id}...",
+		f"{latest_delta_date_id} through {latest_after_date_id}...",
 	)
 
 	_populate_daily_delta_stock_data_range(
-		latest_delta_date_id + 1,
+		latest_delta_date_id-5,
 		latest_after_date_id,
 		dbinfo_file=args.dbinfo_file,
 	)
 
 	print("Done populating daily_delta_stock_data.")
+
+	# Default hyperparameters
 	prior_days = 12
-	hidden_layers = "20000,5000,2500"
-	mlp_layers = 4
-	activation = "sigmoid"
+	hidden_layers = "6000"
+	mlp_layers = 3
+	activation = "leaky_relu"
 	final_activation = "tanh"
-	day_change_centered = "zero"
-#	day_change_centered = "stock_change_ratio_ranked"
+	day_change_centered = "proportional_normalized_zero_centered"
 	precision = "fp32"
 	learning_rate = "0.000001"
 	layer_types = "linear"
-	learning_rate_adjustment_parameter = "0.993"
-	batch_size = 256
-	epochs = 800
+	learning_rate_adjustment_parameter = "0.996"
+	batch_size = 512
+	epochs = 1600
 	period_to_train_on = 2110
 	optimizer = "adamw"
 
+	pretrained_dir = args.pretrained_dir
+	run_dir = None
+	single_run = None
+
+	if pretrained_dir:
+		run_dir = Path(pretrained_dir)
+		if not run_dir.exists():
+			print(f"Error: Pretrained directory {pretrained_dir} does not exist.")
+			return 1
+		print(f"Using pretrained model from: {run_dir}")
+		sr_path = find_single_run_json(run_dir)
+		single_run = SingleRun.load(str(sr_path))
+		# Use hyperparameters from the pretrained model
+		prior_days = single_run.prior_days
+		mlp_layers = single_run.mlp_layers
+		activation = single_run.activation
+		final_activation = single_run.final_activation
+		day_change_centered = single_run.day_change_centered
+		learning_rate = str(single_run.lr)
+		learning_rate_adjustment_parameter = str(single_run.learning_rate_adjustment_parameter)
+		optimizer = single_run.optimizer
+
+		# If the pretrained model has training dates, use them to ensure the ticker pool is identical
+		train_start_id = single_run.train_validation_test_sets_start_date_id
+		train_end_id = single_run.train_validation_test_sets_end_date_id
+
+		# period_to_train_on is not directly in SingleRun, but we can estimate it or just use the default
+		# since it's only used for determining the training window which is skipped if using pretrained.
 
 	# ------------------------------------------------------------------
 	# 4. Train a PyTorch network on the most recent 1000 days
 	# ------------------------------------------------------------------
 	# Hyperparameters for this automated training run.
 
-	print(f"Preparing to train PyTorch model on most recent {period_to_train_on} days of data...")
-
-	window = _get_recent_date_id_window_from_daily_delta_stock_data(
-		period_to_train_on,
-		dbinfo_file=args.dbinfo_file,
-	)
-	if window is None:
-		print("No date_id window available in daily_delta_stock_data; skipping training.")
-		return 0
-
-	# The most recent trading day does not yet have a usable "next day" label,
-	# so restrict the effective training window to end at the second to last date.
-	conn = get_connection(dbinfo_file=args.dbinfo_file)
-	try:
-		cur = conn.cursor()
-		cur.execute("SELECT DISTINCT date_id FROM daily_delta_stock_data ORDER BY date_id DESC LIMIT 2")
-		rows = cur.fetchall()
-		if len(rows) < 2:
-			print("Not enough labeled days available to train a model; skipping training.")
+	if not pretrained_dir:
+		print(f"Preparing to train PyTorch model on most recent {period_to_train_on} days of data...")
+		window = _get_recent_date_id_window_from_daily_delta_stock_data(
+			period_to_train_on,
+			dbinfo_file=args.dbinfo_file,
+		)
+		if window is None:
+			print("No date_id window available in daily_delta_stock_data; skipping training.")
 			return 0
-		train_end_id = int(rows[1][0])
-		# The window from _get_recent_date_id_window_from_daily_delta_stock_data(1001)
-		# might have a start_id that we want to keep, but we need to ensure it's
-		# <= train_end_id.
-		train_start_id = window[0]
-		if train_start_id > train_end_id:
-			train_start_id = train_end_id # fallback
-	finally:
-		conn.close()
+
+		# The most recent trading day does not yet have a usable "next day" label,
+		# so restrict the effective training window to end at the second to last date.
+		conn = get_connection(dbinfo_file=args.dbinfo_file)
+		try:
+			cur = conn.cursor()
+			if target_date_id is not None:
+				# If target_date is specified, the training window must end at or before target_date_id - 1
+				# (because target_date_id doesn't have a label yet relative to itself, or rather,
+				# target_date_id - 1 is the last day that HAS a label if target_date_id is our "latest")
+				cur.execute(
+					"SELECT DISTINCT date_id FROM daily_delta_stock_data WHERE date_id <= %s ORDER BY date_id DESC LIMIT 2",
+					(target_date_id,)
+				)
+			else:
+				cur.execute("SELECT DISTINCT date_id FROM daily_delta_stock_data ORDER BY date_id DESC LIMIT 2")
+			rows = cur.fetchall()
+			if len(rows) < 2:
+				print("Not enough labeled days available to train a model; skipping training.")
+				return 0
+			train_end_id = int(rows[1][0])
+			# The window from _get_recent_date_id_window_from_daily_delta_stock_data(1001)
+			# might have a start_id that we want to keep, but we need to ensure it's
+			# <= train_end_id.
+			train_start_id = window[0]
+			if train_start_id > train_end_id:
+				train_start_id = train_end_id # fallback
+		finally:
+			conn.close()
+	else:
+		print(f"Skipping training; using pretrained model. Input features based on model's prior_days={prior_days}...")
+		# Validation for pretrained model training dates
+		if train_start_id is None or train_end_id is None:
+			print("Warning: Pretrained model does not have explicit training dates. Falling back to current window for ticker pool.")
+			window = _get_recent_date_id_window_from_daily_delta_stock_data(
+				period_to_train_on,
+				dbinfo_file=args.dbinfo_file,
+			)
+			if window is None:
+				print("No date_id window available in daily_delta_stock_data; skipping training.")
+				return 0
+			conn = get_connection(dbinfo_file=args.dbinfo_file)
+			try:
+				cur = conn.cursor()
+				if target_date_id is not None:
+					cur.execute(
+						"SELECT DISTINCT date_id FROM daily_delta_stock_data WHERE date_id <= %s ORDER BY date_id DESC LIMIT 2",
+						(target_date_id,)
+					)
+				else:
+					cur.execute("SELECT DISTINCT date_id FROM daily_delta_stock_data ORDER BY date_id DESC LIMIT 2")
+				rows = cur.fetchall()
+				if len(rows) >= 2:
+					train_end_id = int(rows[1][0])
+				else:
+					train_end_id = window[1]
+				train_start_id = window[0]
+				if train_start_id > train_end_id:
+					train_start_id = train_end_id
+			finally:
+				conn.close()
 
 	print(
-		"Training window (date_id) for model (up to second most recent day): "
+		"Reference window (date_id) for model (up to second most recent day): "
 		f"{train_start_id} through {train_end_id} (inclusive).",
 	)
 
-	train_argv = [
-		"--mode=train",
-		f"--prior-days={prior_days}",
-		f"--epochs={epochs}",
-		f"--batch-size={batch_size}",
-		f"--lr={learning_rate}",
-		f"--learning-rate-adjustment-parameter={learning_rate_adjustment_parameter}",
-		"--train-percent=1.0",
-		"--val-percent=0.0",
-		f"--hidden-layers={hidden_layers}",
-		f"--mlp-layers={mlp_layers}",
-		f"--activation={activation}",
-		f"--final-activation={final_activation}",
-		f"--layer-types={layer_types}",
-		f"--day-change-centered={day_change_centered}",
-		f"--precision={precision}",
-		f"--raw-train-start-with-special-characters={train_start_id}",
-		f"--raw-train-end-with-special-characters={train_end_id}",
-		f"--optimizer={optimizer}",
-		"--split-mode=sequential",
-		"--shuffle"
-	]
-	# If an ensemble size > 1 was requested, pass this through as run repeats so
-	# that TrainPytorchNetwork creates rep1/rep2/... subdirectories that can be
-	# loaded as an ensemble later.
-	ensemble_size = int(getattr(args, "ensemble", 1) or 1)
-	if ensemble_size > 1:
-		train_argv.append(f"--run-repeats={ensemble_size}")
-	print("Starting training with arguments:", " ".join(train_argv))
-	trainer = TrainPytorchNetwork(train_argv)
-	exit_code = trainer.run()
-	if exit_code != 0:
-		print(f"Training failed with exit code {exit_code}; aborting recommendations.")
-		return int(exit_code)
+	if not pretrained_dir:
+		train_argv = [
+			"--mode=train",
+			f"--prior-days={prior_days}",
+			f"--epochs={epochs}",
+			f"--batch-size={batch_size}",
+			f"--lr={learning_rate}",
+			f"--learning-rate-adjustment-parameter={learning_rate_adjustment_parameter}",
+			"--train-percent=1.0",
+			"--val-percent=0.0",
+			f"--hidden-layers={hidden_layers}",
+			f"--mlp-layers={mlp_layers}",
+			f"--activation={activation}",
+			f"--final-activation={final_activation}",
+			f"--layer-types={layer_types}",
+			f"--day-change-centered={day_change_centered}",
+			f"--precision={precision}",
+			f"--raw-train-start-with-special-characters={train_start_id}",
+			f"--raw-train-end-with-special-characters={train_end_id}",
+			f"--optimizer={optimizer}",
+			"--split-mode=sequential",
+			"--shuffle"
+		]
+		print(day_change_centered)
 
-	run_dir = trainer.training_directory
-	if not run_dir:
-		print("Training did not report a run directory; cannot load model for recommendations.")
-		return 0
+		# If an ensemble size > 1 was requested, pass this through as run repeats so
+		# that TrainPytorchNetwork creates rep1/rep2/... subdirectories that can be
+		# loaded as an ensemble later.
+		ensemble_size = int(getattr(args, "ensemble", 1) or 1)
+		if ensemble_size > 1:
+			train_argv.append(f"--run-repeats={ensemble_size}")
+		print("Starting training with arguments:", " ".join(train_argv))
+		trainer = TrainPytorchNetwork(train_argv)
+		exit_code = trainer.run()
+		if exit_code != 0:
+			print(f"Training failed with exit code {exit_code}; aborting recommendations.")
+			return int(exit_code)
 
-	print(f"Training complete. Using run directory for recommendations: {run_dir}")
+		run_dir = trainer.training_directory
+		if not run_dir:
+			print("Training did not report a run directory; cannot load model for recommendations.")
+			return 0
+
+		print(f"Training complete. Using run directory for recommendations: {run_dir}")
+	else:
+		print(f"Using pretrained model from: {run_dir}")
 
 	# ------------------------------------------------------------------
 	# 5. Build feature vector for the latest date and get top-5 stocks
 	# ------------------------------------------------------------------
 	print("Fetching grouped features from database for recommendation step...")
 
-	# Load SingleRun
-	sr_path = find_single_run_json(run_dir)
-	single_run = SingleRun.load(str(sr_path))
-
+	# Load SingleRun if not already loaded
+	if single_run is None:
+		sr_path = find_single_run_json(run_dir)
+		single_run = SingleRun.load(str(sr_path))
+	print("about to make stock from model ",single_run.day_change_centered)
 	rec = StockRecommenderFromModel(
 		single_run,
-		run_dir,
+		str(run_dir),
 		device="auto",
 		ensemble_normalize=bool(getattr(args, "ensemble_normalize", False)),
 	)
@@ -766,6 +926,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 		dbinfo_file=args.dbinfo_file,
 		start_date_id=train_start_id,
 		end_date_id=latest_after_date_id,
+		ticker_pool_start_date_id=train_start_id,
 		ticker_pool_end_date_id=train_end_id,
 	)
 
@@ -788,10 +949,76 @@ def main(argv: Optional[List[str]] = None) -> int:
 			f"date_id {feature_date_id} (transaction_date lookup returned no row)...",
 		)
 
+	# Force inclusion of the latest (current) day in the feature window so
+	# recommendations use the most up-to-date datapoint. If the model was
+	# trained without including the current day, this will raise a clear size
+	# mismatch error rather than silently dropping the latest day.
 	feat_vec, feature_date_id = builder.build_for_date(
+		date_id=latest_after_date_id,
 		expected_input_size=int(rec.input_size),
-		prefer_prior_only=True
+		prefer_prior_only=False
 	)
+
+	print(f"DEBUG: Ticker pool size in builder: {len(builder.model_ticker_ids) if builder.model_ticker_ids is not None else 'None'}")
+	print(f"DEBUG: DB Ticker ids size: {len(builder.db_ticker_ids) if hasattr(builder, 'db_ticker_ids') and builder.db_ticker_ids is not None else 'Unknown'}")
+	print(f"DEBUG: Feature vector size: {feat_vec.size}")
+	print(f"DEBUG: Expected input size: {rec.input_size}")
+
+	# Write the collected recommendation output to a timestamped file in the
+	# training run directory.
+	timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+
+	if getattr(args, "log_features", False):
+		# Log each feature value alongside ticker_id and date_id
+		# Feature vector layout: [d, d-1, ..., d-prior]
+		# Each day: [ticker1_features, ticker2_features, ...]
+		# Each ticker_features: [f1, f2, ..., fn]
+
+		num_features = rec.get_num_features_per_ticker()
+		ticker_ids = builder.model_ticker_ids if builder.model_ticker_ids is not None else builder.db_ticker_ids
+
+		if ticker_ids is not None:
+			num_tickers = len(ticker_ids)
+			num_days = int(feat_vec.size // (num_tickers * num_features))
+
+			# We need the actual date_ids for the window
+			# date_idx was used in build_for_date. We can reconstruct the sequence of IDs.
+			# Since builder.build_for_date used date_id=None (latest),
+			# the window is dates[last_idx], dates[last_idx-1], ...
+
+			# Find the index of feature_date_id in builder.dates
+			matches = np.where(builder.dates == feature_date_id)[0]
+			if matches.size > 0:
+				base_idx = int(matches[0])
+				window_date_ids = []
+				for off in range(num_days):
+					idx = base_idx - off
+					if idx >= 0:
+						window_date_ids.append(int(builder.dates[idx]))
+					else:
+						window_date_ids.append(-1) # Should not happen with valid window
+
+				log_lines = []
+				# feat_vec is flat. We iterate by day, then ticker, then feature
+				current_flat_idx = 0
+				for day_idx in range(num_days):
+					d_id = window_date_ids[day_idx]
+					for t_idx in range(num_tickers):
+						t_id = ticker_ids[t_idx]
+						for f_idx in range(num_features):
+							val = float(feat_vec[current_flat_idx])
+							# value,ticker_id,date_id
+							log_lines.append(f"{val:.10f},{t_id},{d_id}")
+							current_flat_idx += 1
+
+				feature_log_file = Path(run_dir) / f"features-{timestamp}.csv"
+				try:
+					feature_log_file.write_text("\n".join(log_lines) + "\n", encoding="utf-8")
+					print(f"Feature vector logged to {feature_log_file}")
+				except Exception as e:
+					print(f"Failed to write feature log {feature_log_file}: {e}")
+		else:
+			print("Warning: Could not log features because ticker IDs are unknown.")
 
 	# Request top-5 ticker recommendations from the trained model.
 	scores, top_ids = rec.getBuyRecommendations(
@@ -813,7 +1040,8 @@ def main(argv: Optional[List[str]] = None) -> int:
 	# to a timestamped recommendations-<timestamp>.txt file.
 	rec_output_lines: list[str] = []
 
-	header = f"Top 5 stock recommendations from freshly trained model for date_id {feature_date_id}:"
+	header_type = "freshly trained" if not pretrained_dir else "pretrained"
+	header = f"Top 5 stock recommendations from {header_type} model for date_id {feature_date_id}:"
 	if recent_tx_date is not None:
 		header = header +f", transaction_date {recent_tx_date}:"
 
@@ -831,7 +1059,6 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 	# Write the collected recommendation output to a timestamped file in the
 	# training run directory.
-	timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
 	rec_file = Path(run_dir) / f"recommendations-{timestamp}.txt"
 	try:
 		rec_file.write_text("\n".join(rec_output_lines) + "\n", encoding="utf-8")

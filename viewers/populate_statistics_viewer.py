@@ -10,21 +10,48 @@ def _find_epoch_files(run_path: str) -> List[Tuple[int, int, str]]:
     files: List[Tuple[int, int, str]] = []
     try:
         for fname in os.listdir(run_path):
-            m = _re.match(r"stock_simulation_(\d+)_epoch_(\d+)\.csv$", fname)
+            # Matches:
+            # - stock_simulation_ensemble_22days_epoch_100.csv
+            # - stock_simulation_22days_epoch_100.csv
+            # - stock_simulation_100_epoch_100.csv (old format)
+            # Group 1: the epoch number
+            m = _re.match(r"stock_simulation_(?:ensemble_)?(?:.*?_)?epoch_(\d+)\.csv$", fname)
             if m:
-                files.append((int(m.group(1)), int(m.group(2)), os.path.join(run_path, fname)))
+                # We don't really have a 'set_size' in the filename anymore for ensemble or individual reps,
+                # so we can use 0 for ensemble or just return the epoch twice if it expects a certain structure.
+                # The old regex was: stock_simulation_(\d+)_epoch_(\d+)\.csv$
+                # Where group 1 was the set_size (often 0 or 22 or similar).
+                # Since the current return type is Tuple[int, int, str] (set_size, epoch, path),
+                # let's try to extract set_size if it looks like an integer, otherwise use 0.
+                set_size = 0
+                # Try to find a number in the part before _epoch_
+                m_size = _re.search(r"(\d+)days", fname)
+                if m_size:
+                    set_size = int(m_size.group(1))
+                else:
+                    # Fallback to old integer-based set_size if present
+                    m_old = _re.match(r"stock_simulation_(\d+)_epoch_(\d+)\.csv$", fname)
+                    if m_old:
+                        set_size = int(m_old.group(1))
+
+                epoch_val = int(m.group(1))
+                files.append((set_size, epoch_val, os.path.join(run_path, fname)))
+            elif (m := _re.match(r"stock_simulation_(\d+)\.csv$", fname)):
+                # Handle cases without epoch in name if they exist, though unlikely to be "series"
+                files.append((int(m.group(1)), 0, os.path.join(run_path, fname)))
     except Exception:
         pass
     return files
 
 
-def build_run_epoch_series(run_path: str) -> Tuple[Dict[Any, Dict[int, float]], Dict[Any, Dict[int, float]], Dict[Any, Dict[int, float]]]:
+def build_run_epoch_series(run_path: str) -> Tuple[Dict[Any, Dict[int, float]], Dict[Any, Dict[int, float]], Dict[Any, Dict[int, float]], Dict[Any, Dict[int, float]]]:
     """Build per-epoch series for a single run directory.
 
-    Returns three mappings:
+    Returns four mappings:
       - by_topn:        key -> {epoch -> final_value}
       - by_topn_first5: key -> {epoch -> best_first5_value}
       - by_topn_avgcdf: key -> {epoch -> avg_cdf_value}
+      - by_topn_rank:   key -> {epoch -> mean_rank_score}
 
     Keys use the same format as the viewers: 0 for ensemble total portfolio, or
     tuples (K, Method) where Method is one of "", "Sum", "Norm", "Rank".
@@ -32,6 +59,7 @@ def build_run_epoch_series(run_path: str) -> Tuple[Dict[Any, Dict[int, float]], 
     by_topn: Dict[Any, Dict[int, float]] = {}
     by_topn_first5: Dict[Any, Dict[int, float]] = {}
     by_topn_avgcdf: Dict[Any, Dict[int, float]] = {}
+    by_topn_rank: Dict[Any, Dict[int, float]] = {}
 
     # Prefer precomputed JSON if present
     summary_file = os.path.join(run_path, "run_summary_stats.json")
@@ -72,13 +100,25 @@ def build_run_epoch_series(run_path: str) -> Tuple[Dict[Any, Dict[int, float]], 
                 int_epochs_map = {int(k): float(v) for k, v in epochs_map.items()}
                 key = _parse_series_key(n_str)
                 by_topn_first5[key] = int_epochs_map
+
+            rank_series_data = summary.get("rank_series", {})
+            if rank_series_data:
+                for n_str, epochs_map in rank_series_data.items():
+                    int_epochs_map = {int(k): float(v) for k, v in epochs_map.items()}
+                    key = _parse_series_key(n_str)
+                    by_topn_rank[key] = int_epochs_map
+            else:
+                # Fallback for old summary files or if not in JSON: try to build from by_topn_rank if CSV logic was used
+                pass
         except Exception:
             # fall back to CSVs
             pass
 
-    if not by_topn and not by_topn_first5:
-        # Build from per-epoch CSVs
-        for _set_size, epoch, fpath in (_find_epoch_files(run_path) or []):
+    # If some data is still missing, try to build from per-epoch CSVs
+    # (Existing by_topn might be from JSON, but might not have simulation metrics)
+    epoch_files = _find_epoch_files(run_path) or []
+    if epoch_files:
+        for _set_size, epoch, fpath in epoch_files:
             try:
                 df_ep = read_csv(fpath)
             except Exception:
@@ -90,6 +130,7 @@ def build_run_epoch_series(run_path: str) -> Tuple[Dict[Any, Dict[int, float]], 
                 return s.lower().replace(" ", "").replace("_", "")
 
             n_to_col: Dict[Any, str] = {}
+            n_to_rank_col: Dict[Any, str] = {}
             for c in df_ep.columns:
                 if not isinstance(c, str):
                     continue
@@ -97,20 +138,31 @@ def build_run_epoch_series(run_path: str) -> Tuple[Dict[Any, Dict[int, float]], 
                 if cn == "portfoliovalue":
                     n_to_col[0] = c
                     continue
+                # Match "Portfolio return topN" or "Portfolio value topN"
+                # Optional (Sum), (Norm), (Rank)
+                # Note: "Portfolio return top1" normalized is "portfolioreturntop1"
                 m = _re.match(r"^portfolio(?:return|value)top(\d+)(?:\((sum|norm|rank)\))?$", cn)
                 if m:
                     k_val = int(m.group(1))
                     method_val = m.group(2).capitalize() if m.group(2) else ""
                     n_to_col[(k_val, method_val)] = c
                     continue
-                m = _re.match(r"^portfoliotop(\d+)$", cn)
-                if m:
-                    n_to_col[(int(m.group(1)), "")] = c
-                    continue
+
+                # Match "Rank Percent topN"
+                mr = _re.match(r"^rankpercenttop(\d+)(?:\((sum|norm|rank)\))?$", cn)
+                if mr:
+                    k_val = int(mr.group(1))
+                    method_val = mr.group(2).capitalize() if mr.group(2) else ""
+                    n_to_rank_col[(k_val, method_val)] = c
+
             if not n_to_col and "portfolio_value" in df_ep.columns:
                 n_to_col[0] = "portfolio_value"
 
             for n, col in n_to_col.items():
+                # Only add if not already present for this epoch from JSON
+                if n in by_topn and epoch in by_topn[n]:
+                    continue
+
                 series = df_ep[col]
                 try:
                     final_val = float(series.iloc[-1])
@@ -137,7 +189,19 @@ def build_run_epoch_series(run_path: str) -> Tuple[Dict[Any, Dict[int, float]], 
                     if avgcdf_val is not None:
                         by_topn_avgcdf.setdefault(n, {})[epoch] = avgcdf_val
 
-    return by_topn, by_topn_first5, by_topn_avgcdf
+            for n, col in n_to_rank_col.items():
+                if n in by_topn_rank and epoch in by_topn_rank[n]:
+                    continue
+
+                series = df_ep[col]
+                try:
+                    avg_rank = float(series.mean()) if len(series) > 0 else None
+                except Exception:
+                    avg_rank = None
+                if avg_rank is not None:
+                    by_topn_rank.setdefault(n, {})[epoch] = avg_rank
+
+    return by_topn, by_topn_first5, by_topn_avgcdf, by_topn_rank
 
 
 def main(argv: List[str] | None = None) -> int:
@@ -155,9 +219,9 @@ def main(argv: List[str] | None = None) -> int:
     t0 = time.perf_counter()
     total = 0
     for rp in args:
-        b1, b2, b3 = build_run_epoch_series(rp)
+        b1, b2, b3, b4 = build_run_epoch_series(rp)
         # Lightweight sanity print to keep output small
-        print(f"{os.path.basename(rp)}: final={sum(len(v) for v in b1.values())} pts, first5={sum(len(v) for v in b2.values())} pts, avgcdf={sum(len(v) for v in b3.values())} pts")
+        print(f"{os.path.basename(rp)}: final={sum(len(v) for v in b1.values())} pts, first5={sum(len(v) for v in b2.values())} pts, avgcdf={sum(len(v) for v in b3.values())} pts, rank={sum(len(v) for v in b4.values())} pts")
         total += 1
     dt = time.perf_counter() - t0
     print(f"Processed {total} runs in {dt:.3f}s")
