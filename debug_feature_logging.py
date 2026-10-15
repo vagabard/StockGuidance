@@ -11,14 +11,18 @@ import numpy as np
 _CACHE_DEBUG_VALUE = False
 _CACHE_DEBUG_VALUE_SAVED = False
 
-def _infer_dims(X_flat: np.ndarray, labels: Optional[np.ndarray]) -> tuple[int, int]:
+def _infer_dims(X_flat: np.ndarray, labels: Optional[np.ndarray], ticker_ids: Optional[Sequence[int]] = None) -> tuple[int, int]:
 	"""Return (T, F) inferred from X_flat and labels.
 
-	T is taken from labels width when available; otherwise we try to infer by
-	finding the greatest T that divides X_flat.shape[1]. If ambiguous, fall back
-	to 1.
+	T is taken from ticker_ids length if provided, then labels width; otherwise
+	we try to infer by finding the greatest T that divides X_flat.shape[1].
+	If ambiguous, fall back to 1.
 	"""
 	TF = int(X_flat.shape[1])
+	if ticker_ids is not None and len(ticker_ids) > 0:
+		T = len(ticker_ids)
+		if TF % T == 0:
+			return T, TF // T
 	if labels is not None and labels.ndim == 2 and labels.shape[1] > 0:
 		T = int(labels.shape[1])
 		if T > 0 and TF % T == 0:
@@ -28,6 +32,235 @@ def _infer_dims(X_flat: np.ndarray, labels: Optional[np.ndarray]) -> tuple[int, 
 		if TF % T == 0:
 			return T, TF // T
 	return 1, TF
+
+
+def _get_window_indices(dates: np.ndarray, d: int, num_prior: int, include_current: bool) -> tuple[list[int], list[int]]:
+	"""Return indices and date_ids for the window."""
+	if include_current:
+		rng = range(0, max(0, num_prior) + 1)
+	else:
+		rng = range(1, max(0, num_prior) + 1)
+	indices = [d - off for off in rng]
+	indices = [i for i in indices if 0 <= i < int(dates.shape[0])]
+	date_ids = [int(dates[i]) for i in indices]
+	return indices, date_ids
+
+
+def dump_feature_table(
+	*,
+	X_flat: np.ndarray,
+	dates: np.ndarray,
+	d: int,
+	num_prior: int,
+	ticker_ids: Optional[Sequence[int]] = None,
+	header_note: str = "",
+	feature_names: Optional[Sequence[str]] = None,
+	vec_size: Optional[int] = None,
+) -> None:
+	"""Print a table of features for the window."""
+	if not env_feature_debug_enabled():
+		return
+
+	try:
+		T, F = _infer_dims(X_flat, None, ticker_ids)
+		include_current = True
+		if vec_size is not None:
+			if vec_size == (num_prior) * T * F and num_prior > 0:
+				include_current = False
+
+		indices, date_ids = _get_window_indices(dates, d, num_prior, include_current)
+		if not date_ids: return
+
+		note = f" ({header_note})" if header_note else ""
+		_feature_debug_write(f"\n=== FEATURE Table{note} ===")
+		if ticker_ids is None: ticker_ids = list(range(1, T + 1))
+
+		header = f"{'Ticker':<10} | {'Feature':<25} | " + " | ".join(f"{did:^12}" for did in date_ids)
+		_feature_debug_write(header)
+		_feature_debug_write("-" * len(header))
+
+		for t_idx, t_id in enumerate(ticker_ids):
+			if t_idx >= T: break
+			for f_idx in range(F):
+				f_name = feature_names[f_idx] if feature_names and f_idx < len(feature_names) else f"F{f_idx}"
+				row = f"{str(t_id):<10} | {f_name:<25} | "
+				vals = [f"{X_flat[i, t_idx * F + f_idx]:12.6f}" for i in indices]
+				row += " | ".join(vals)
+				_feature_debug_write(row)
+			_feature_debug_write("-" * len(header))
+		_feature_debug_write("=== End Feature Table ===\n")
+	except Exception as e:
+		_feature_debug_write(f"[feature-debug] error in dump_feature_table: {e}")
+
+
+def dump_label_table(
+	*,
+	labels: np.ndarray,
+	dates: np.ndarray,
+	d: int,
+	num_prior: int,
+	ticker_ids: Optional[Sequence[int]] = None,
+	header_note: str = "",
+	include_current: bool = True,
+) -> None:
+	"""Print a table of labels for the window."""
+	if not env_feature_debug_enabled():
+		return
+
+	try:
+		if labels is None or labels.ndim != 2: return
+		T = labels.shape[1]
+		indices, date_ids = _get_window_indices(dates, d, num_prior, include_current)
+		if not date_ids: return
+
+		note = f" ({header_note})" if header_note else ""
+		_feature_debug_write(f"\n=== LABEL Table{note} ===")
+		if ticker_ids is None: ticker_ids = list(range(1, T + 1))
+
+		header = f"{'Ticker':<10} | {'Label':<25} | " + " | ".join(f"{did:^12}" for did in date_ids)
+		_feature_debug_write(header)
+		_feature_debug_write("-" * len(header))
+
+		for t_idx, t_id in enumerate(ticker_ids):
+			if t_idx >= T: break
+			row = f"{str(t_id):<10} | {'LABEL':<25} | "
+			vals = [f"{labels[i, t_idx]:12.6f}" if 0 <= i < labels.shape[0] else f"{'N/A':^12}" for i in indices]
+			row += " | ".join(vals)
+			_feature_debug_write(row)
+			_feature_debug_write("-" * len(header))
+		_feature_debug_write("=== End Label Table ===\n")
+	except Exception as e:
+		_feature_debug_write(f"[feature-debug] error in dump_label_table: {e}")
+
+
+def dump_output_table(
+	*,
+	outputs: np.ndarray,
+	date_id: int,
+	ticker_ids: Optional[Sequence[int]] = None,
+	header_note: str = "",
+) -> None:
+	"""Print a table of model outputs (scores) for a single date."""
+	if not env_feature_debug_enabled():
+		return
+
+	try:
+		# outputs can be (T,) or (1, T)
+		if outputs.ndim == 2:
+			outputs = outputs[0]
+		T = outputs.shape[0]
+
+		note = f" ({header_note})" if header_note else ""
+		_feature_debug_write(f"\n=== OUTPUT (Scores) Table{note} ===")
+		if ticker_ids is None: ticker_ids = list(range(1, T + 1))
+
+		header = f"{'Ticker':<10} | {'Output':<25} | {date_id:^12}"
+		_feature_debug_write(header)
+		_feature_debug_write("-" * len(header))
+
+		for t_idx, t_id in enumerate(ticker_ids):
+			if t_idx >= T: break
+			row = f"{str(t_id):<10} | {'SCORE':<25} | {outputs[t_idx]:12.6f}"
+			_feature_debug_write(row)
+			_feature_debug_write("-" * len(header))
+		_feature_debug_write("=== End Output Table ===\n")
+	except Exception as e:
+		_feature_debug_write(f"[feature-debug] error in dump_output_table: {e}")
+
+
+def dump_feature_window_table(
+	*,
+	X_flat: np.ndarray,
+	dates: np.ndarray,
+	labels: Optional[np.ndarray],
+	d: int,
+	num_prior: int,
+	current_day_change_used: bool,
+	ticker_ids: Optional[Sequence[int]] = None,
+	header_note: str = "",
+	feature_names: Optional[Sequence[str]] = None,
+	vec_size: Optional[int] = None,
+) -> None:
+	"""Print a table of features and labels for all tickers in the window.
+
+	Each date in the window is a column.
+	Features (and labels) are rows.
+	"""
+	if not env_feature_debug_enabled():
+		return
+
+	try:
+		T, F = _infer_dims(X_flat, labels)
+		if T <= 0 or F <= 0:
+			_feature_debug_write("[feature-debug] Could not infer T/F; skipping table dump.")
+			return
+
+		# Determine whether current day is included
+		include_current = True
+		if vec_size is not None:
+			expected_prior_only = (num_prior) * T * F
+			if vec_size == expected_prior_only and num_prior > 0:
+				include_current = False
+
+		# Window indices and date_ids
+		if include_current:
+			rng = range(0, max(0, num_prior) + 1)
+		else:
+			rng = range(1, max(0, num_prior) + 1)
+		indices = [d - off for off in rng]
+		indices = [i for i in indices if 0 <= i < int(dates.shape[0])]
+		date_ids = [int(dates[i]) for i in indices]
+
+		if not date_ids:
+			return
+
+		# Header
+		note = f" ({header_note})" if header_note else ""
+		_feature_debug_write(f"\n=== Feature and Label Table{note} ===")
+		_feature_debug_write(f"tickers T: {T}; per-ticker feature width F: {F}")
+
+		# Ticker IDs for row labels
+		if ticker_ids is None:
+			ticker_ids = list(range(1, T + 1))
+
+		# For each ticker, we'll print its features and labels across the date window
+		# Header row for the table: Features/Labels, Ticker, Date1, Date2, ...
+		header = f"{'Ticker':<10} | {'Feature':<25} | " + " | ".join(f"{did:^12}" for did in date_ids)
+		_feature_debug_write(header)
+		_feature_debug_write("-" * len(header))
+
+		for t_idx, t_id in enumerate(ticker_ids):
+			if t_idx >= T: break
+
+			# Print features
+			for f_idx in range(F):
+				f_name = feature_names[f_idx] if feature_names and f_idx < len(feature_names) else f"F{f_idx}"
+				row = f"{str(t_id):<10} | {f_name:<25} | "
+				vals = []
+				for i in indices:
+					val = X_flat[i, t_idx * F + f_idx]
+					vals.append(f"{val:12.6f}")
+				row += " | ".join(vals)
+				_feature_debug_write(row)
+
+			# Print label if available
+			if labels is not None and labels.ndim == 2 and t_idx < labels.shape[1]:
+				row = f"{'':<10} | {'LABEL':<25} | "
+				vals = []
+				for i in indices:
+					if 0 <= i < labels.shape[0]:
+						val = labels[i, t_idx]
+						vals.append(f"{val:12.6f}")
+					else:
+						vals.append(f"{'N/A':^12}")
+				row += " | ".join(vals)
+				_feature_debug_write(row)
+
+			_feature_debug_write("-" * len(header))
+
+		_feature_debug_write("=== End Table ===\n")
+	except Exception as e:
+		_feature_debug_write(f"[feature-debug] error while dumping table: {e}")
 
 
 def dump_feature_window(

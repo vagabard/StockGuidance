@@ -103,7 +103,7 @@ ORDER BY ddsd.date_id ASC, ddsd.ticker_id ASC	"""
 
 
 
-def SELECT_VARIABLE_DATA_SQL(day_change_centered: str, current_day_change = False, volume_ratio = False, vwap_ratio = False, tranaction_ratio = False, only_use_tickers_without_missing_dates = True, start_date_id:Optional[int] = -1, end_date_id:Optional[int] = -1, ticker_pool_start_date_id:Optional[int] = None, ticker_pool_end_date_id:Optional[int] = None) -> str:
+def SELECT_VARIABLE_DATA_SQL(day_change_centered: str, current_day_change = False, volume_ratio = False, vwap_ratio = False, tranaction_ratio = False, only_use_tickers_without_missing_dates = True, start_date_id:Optional[int] = -1, end_date_id:Optional[int] = -1, ticker_pool_start_date_id:Optional[int] = None, ticker_pool_end_date_id:Optional[int] = None, ticker_limit: Optional[int] = None) -> str:
 	"""Build SQL that selects only close ratio as the single feature plus the chosen label.
 
 	day_change_centered:
@@ -138,7 +138,7 @@ FROM daily_delta_stock_data ddsd """
 	ticker_pool_start = ticker_pool_start_date_id if ticker_pool_start_date_id is not None else start_date_id
 	full_query += f"""
 	INNER JOIN (
-	""" + create_ticker_id_selection_sql(only_use_tickers_without_missing_dates, ticker_pool_start, ticker_pool_end) + f"""
+	""" + create_ticker_id_selection_sql(only_use_tickers_without_missing_dates, ticker_pool_start, ticker_pool_end, ticker_limit=ticker_limit) + f"""
 	) AS boundary_tickers ON ddsd.ticker_id = boundary_tickers.ticker_id """
 
 	if start_date_id is not None or end_date_id is not None :
@@ -154,7 +154,9 @@ FROM daily_delta_stock_data ddsd """
 """
 	return full_query
 
-def create_ticker_id_selection_sql(only_use_tickers_without_missing_dates = True, start_date_id:Optional[int] = "", end_date_id:Optional[int] = "", only_use_tickers_with_common_stock_type:bool = True) -> str:
+def create_ticker_id_selection_sql(only_use_tickers_without_missing_dates = True, start_date_id:Optional[int] = "", end_date_id:Optional[int] = "", only_use_tickers_with_common_stock_type:bool = True, ticker_limit: Optional[int] = None) -> str:
+	# if ticker_limit is not None and ticker_limit > 0:
+	# 	ticker_id_selection_query += f""" ORDER BY LIMIT {int(ticker_limit)} """
 
 	# Limit to tickers present on both start and end date
 	ticker_id_selection_query = f"""
@@ -180,6 +182,8 @@ def create_ticker_id_selection_sql(only_use_tickers_without_missing_dates = True
 		ticker_id_selection_query += f"""AND ts.missing_dates = FALSE """
 	if only_use_tickers_with_common_stock_type:
 		ticker_id_selection_query += f"""AND ts.type = 'CS' """
+	if ticker_limit is not None and ticker_limit > 0:
+		ticker_id_selection_query += f"""ORDER BY ticker_id LIMIT {int(ticker_limit)} """
 	return ticker_id_selection_query
 
 
@@ -265,7 +269,6 @@ def create_ticker_id_selection_sql(only_use_tickers_without_missing_dates = True
 # 		# 	pass
 
 
-_DISK_GROUPED_CACHE_CLEARED_ONCE = False
 
 
 def get_latest_date_id(*, dbinfo_file: str = "dbinfo.id") -> int:
@@ -310,10 +313,15 @@ def get_recent_date_id_window(
 			""",
 			(max_days,),
 		)
-		rows = cur.fetchall()
-		if not rows:
+		date_ids = []
+		while True:
+			rows = cur.fetchmany(1000)
+			if not rows:
+				break
+			for r in rows:
+				date_ids.append(int(r[0]))
+		if not date_ids:
 			return None
-		date_ids = [int(r[0]) for r in rows]
 		return min(date_ids), max(date_ids)
 	finally:
 		try:
@@ -326,6 +334,7 @@ def fetch_grouped_by_date(
 	*,
 	dbinfo_file: str = "dbinfo.id",
 	limit: Optional[int] = None,
+	ticker_limit: Optional[int] = None,
 	return_2d: bool = False,
 	current_day_change: bool = False,
 	volume_ratio: bool = False,
@@ -337,6 +346,7 @@ def fetch_grouped_by_date(
 	ticker_pool_start_date_id: Optional[int] = None,
 	ticker_pool_end_date_id: Optional[int] = None,
 	primary_feature_field: str = "change_in_price_over_day",
+	cache_dir: Optional[str] = None,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, List[int]]:
 	"""Fetch rows and pack features into a fixed layout per date.
 
@@ -356,7 +366,6 @@ def fetch_grouped_by_date(
 	available date_id entries are kept, effectively selecting the most recent dates.
 	"""
 
-	global _DISK_GROUPED_CACHE_CLEARED_ONCE
 
 	print(f"date id information start_date_id={start_date_id} end_date_id={end_date_id} ticker_pool_start_date_id={ticker_pool_start_date_id} ticker_pool_end_date_id={ticker_pool_end_date_id}")
 
@@ -377,24 +386,15 @@ def fetch_grouped_by_date(
 		cache_base += f"_pool_start_{ticker_pool_start_date_id}"
 	if ticker_pool_end_date_id is not None:
 		cache_base += f"_pool_end_{ticker_pool_end_date_id}"
+	if ticker_limit is not None:
+		cache_base += f"_ticker_limit_{ticker_limit}"
 	cache_base+=f".npz"
-	cache_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache")
+	if cache_dir is None:
+		cache_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache")
 	cache_file = os.path.join(cache_dir, cache_base)
 	legacy_cache_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), cache_base)
 
-	# On the first call in this Python process, delete any existing cache file so
-	# that this run always recomputes fresh data once before reusing the disk cache.
-	if not _DISK_GROUPED_CACHE_CLEARED_ONCE:
-		for path in (cache_file, legacy_cache_file):
-			try:
-				if os.path.exists(path):
-					os.remove(path)
-			except Exception:
-				# Best-effort: ignore failures deleting stale cache.
-				pass
-		_DISK_GROUPED_CACHE_CLEARED_ONCE = True
-
-	# Try to load from disk cache if it exists after the initial invalidation.
+	# Try to load from disk cache if it exists.
 	try:
 		load_path: Optional[str] = None
 		if os.path.exists(cache_file):
@@ -433,6 +433,7 @@ def fetch_grouped_by_date(
 			end_date_id,
 			ticker_pool_start_date_id=ticker_pool_start_date_id,
 			ticker_pool_end_date_id=ticker_pool_end_date_id,
+			ticker_limit=ticker_limit,
 		)
 		if limit is not None and limit > 0:
 			sql = f"{sql}\nLIMIT {int(limit)}"
@@ -563,7 +564,8 @@ def fetch_grouped_by_date(
 		# Save to cache file for future processes.
 		ticker_ids_list = sorted(list(tickers_found))
 		try:
-			os.makedirs(cache_dir, exist_ok=True)
+			if not os.path.exists(cache_dir):
+				os.makedirs(cache_dir, exist_ok=True)
 			np.savez(cache_file, dates=dates_list, X=X, Y=Y, ticker_ids=ticker_ids_list)
 		except Exception:
 			# Caching is a best-effort optimization; ignore failures.
@@ -629,6 +631,7 @@ def parse_args(argv: Optional[list[str]] = None):
 	p.add_argument("--end-date-id", type=int, default=None)
 	p.add_argument("--ticker-start-date", type=int, default=None, help="Start date_id for ticker pool selection")
 	p.add_argument("--ticker-end-date", type=int, default=None, help="End date_id for ticker pool selection")
+	p.add_argument("--ticker-limit", type=int, default=None, help="Limit number of tickers in pool")
 	p.add_argument("--save-csv", default=None, help="Path to save features to CSV as (feature value, ticker_id, date_id)")
 	return p.parse_args(argv)
 
@@ -682,6 +685,7 @@ def main(argv: Optional[list[str]] = None) -> None:
 	dates_np, X_np, Y_np, _ticker_ids = fetch_grouped_by_date(
 		dbinfo_file=args.dbinfo_file,
 		limit=args.limit,
+		ticker_limit=args.ticker_limit,
 		return_2d=return_2d,
 		day_change_centered=args.day_change_centered,
 		current_day_change=args.current_day_change,

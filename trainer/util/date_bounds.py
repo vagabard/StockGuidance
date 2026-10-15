@@ -18,8 +18,11 @@ class DateBoundResolver:
 	nested function inside `train_pytorch_network._run_one`.
 	"""
 
-	def __init__(self, feature_vector_day_size_buffer:Optional[int]=None):
-		(lowest_bound, highest_bound) = database_date_id_queries.load_date_id_range(dbinfo_file="dbinfo.id", feature_vector_day_size_buffer=feature_vector_day_size_buffer)
+	def __init__(self, feature_vector_day_size_buffer:Optional[int]=None, *, dbinfo_file: str):
+		if not isinstance(dbinfo_file, str) or not dbinfo_file.strip():
+			raise ValueError("Legacy date resolution requires an explicit database configuration file")
+		self.dbinfo_file = dbinfo_file
+		(lowest_bound, highest_bound) = database_date_id_queries.load_date_id_range(dbinfo_file=dbinfo_file, feature_vector_day_size_buffer=feature_vector_day_size_buffer)
 		self.lowest_date_id = lowest_bound
 		self.highest_date_id = highest_bound
 
@@ -34,8 +37,6 @@ class DateBoundResolver:
 		  N steps back from the last available date.
 		"""
 
-		print(raw_bound, "   is type ", type(raw_bound))
-
 		if raw_bound is None:
 			return int(self.lowest_date_id if which == DateBoundType.START else self.highest_date_id)
 		raw_bound = raw_bound.lower().strip()
@@ -43,11 +44,15 @@ class DateBoundResolver:
 			relative_sign = raw_bound[0]
 			offset = int(raw_bound)
 			if relative_sign == '+':
+				if offset == 0:
+					return int(self.lowest_date_id)
 				# '+N' (or 'N' with leading '+'): index from start, 0-based
-				offset_date_id = get_offset_date_id(base_value=self.lowest_date_id, offset=offset)
+				offset_date_id = get_offset_date_id(dbinfo_file=self.dbinfo_file, base_value=self.lowest_date_id, offset=offset)
 			else:
+				if offset == 0:
+					return int(self.highest_date_id)
 				# '-N': N steps back from the end
-				offset_date_id = get_offset_date_id(base_value=self.highest_date_id, offset=offset)
+				offset_date_id = get_offset_date_id(dbinfo_file=self.dbinfo_file, base_value=self.highest_date_id, offset=offset)
 			return int(offset_date_id)
 		else :
 			return int(raw_bound)

@@ -1,38 +1,17 @@
-"""Update local Polygon market summary data up to today.
-
-This helper script is intended to be a light wrapper around the existing
-`polygon_fetch` utilities.  It looks at the on-disk
-``data/market_summary`` tree, determines the most recent date for which a
-summary file already exists, and then uses `polygon_fetch.fetch_market_summary_day`
-to fetch all missing days up to (and including) today.
-
-The intended usage matches the issue description:
-
-	- "from the current day to the day that is already present in the directory"
-
-In practice this implementation:
-
-	* Scans ``<data-dir>/market_summary/<year>`` for ``YYYY-MM-DD.ndjson`` files.
-	* Finds the latest date present (regardless of file size).
-	* Starts fetching from the NEXT calendar day after that date.
-	* Stops at today (UTC) by default, or at an optional user-specified end date.
-
-Non‑trading days are handled gracefully: if Polygon returns no results for a
-given day, no file is written for that date and the script simply logs this and
-continues.
-
-This script deliberately avoids touching any of the ticker‑level fetching logic
-in `polygon_fetch.py` – it only updates the daily market grouped summary.
-"""
+"""Legacy recommendation frontend using the recoverable market-data updater."""
 
 from __future__ import annotations
 
 import argparse
 import os
-from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import List, Optional
+
+from stockguidance.database.dates import normalize_session_date as _normalize_db_transaction_date
+from stockguidance.cli.update_arguments import add_update_policy_arguments
+from stockguidance.cli.update_setup import assemble_and_update
+from stockguidance.workflows.failures import StageExecutionError
 
 import numpy as np
 
@@ -43,105 +22,8 @@ from trainer.state.single_run import SingleRun
 from load_latest_raw_stock_data_date import (
     get_latest_raw_stock_data,
 )
-from polygon_fetch import (
-	fetch_market_summary_day,
-	market_summary_file_path,
-	iso_date,
-)
-from database.populate_db_daily_delta_stock_data import (
-	get_ordered_date_ids,
-	populate_deltas,
-)
-from database.populate_db_raw_stock_info import main as populate_raw_stock_main
 from train_pytorch_network import TrainPytorchNetwork
 
-# Time (UTC) after which the current day's market data is considered stable
-# enough to download grouped daily summaries. Before this cutoff, the
-# current calendar day is treated as "not yet available" and will be
-# excluded from the default end of the update window.
-MARKET_CLOSE_CUTOFF_UTC = time(20, 15)
-
-
-@dataclass
-class RangeConfig:
-	"""Configuration for the date range to update."""
-
-	start_date: date  # first date to *attempt* fetching (inclusive)
-	end_date: date  # last date to *attempt* fetching (inclusive)
-
-
-def _normalize_db_transaction_date(raw: object) -> date:
-	"""Normalize a DB ``transaction_date`` value into a ``datetime.date``.
-
-	``get_latest_raw_stock_data`` may return the date column in different
-	driver‑specific types (e.g. :class:`bytes`, :class:`str`,
-	:class:`datetime.date`, or :class:`datetime.datetime`).  This helper
-	converts any supported representation into a plain ``datetime.date``.
-	"""
-
-	# Already a date (but not a datetime) – just return it.
-	if isinstance(raw, date) and not isinstance(raw, datetime):
-		return raw
-
-	# Datetime -> strip time component.
-	if isinstance(raw, datetime):
-		return raw.date()
-
-	# Bytes or string – assume an ISO "YYYY-MM-DD" representation.
-	if isinstance(raw, (bytes, str)):
-		if isinstance(raw, bytes):
-			raw = raw.decode("utf-8")
-		return datetime.fromisoformat(raw).date()
-
-	raise TypeError(f"Unsupported transaction_date type from DB: {type(raw)!r}")
-
-
-def _load_latest_raw_stock_data_date(*, dbinfo_file: str = "dbinfo.id") -> tuple[int, date]:
-	"""Call ``load_latest_raw_stock_data_date`` logic and parse its return.
-
-	Uses the same default connection parameters as the helper script
-	``load_latest_raw_stock_data_date.py`` (environment variables such as
-	``MYSQL_HOST``, ``MYSQL_DB``, etc.).  The returned second element is
-	always a plain ``datetime.date`` instance.
-	"""
-
-	result = get_latest_raw_stock_data(dbinfo_file=dbinfo_file)
-	if result is None:
-		raise RuntimeError("No rows found in raw_stock_data when loading latest date.")
-
-	date_id, transaction_date = result
-	normalized_date = _normalize_db_transaction_date(transaction_date)
-	return date_id, normalized_date
-
-
-def _populate_daily_delta_stock_data_range(
-    start_date_id: int,
-    end_date_id: int,
-    *,
-    dbinfo_file: str = "dbinfo.id",
-) -> None:
-	"""Call the stored procedure to backfill ``daily_delta_stock_data``.
-
-	This iterates through dates and calls
-	``populate_daily_delta_stock_data(IN p_date_id INT, IN p_prior_date_id INT, IN p_next_date_id INT)``
-	to populate/update rows in ``daily_delta_stock_data`` based on
-	``raw_stock_data``.
-	"""
-
-	if start_date_id > end_date_id:
-		# Nothing to do
-		return
-
-	conn = get_connection(dbinfo_file=dbinfo_file)
-	try:
-		print(f"Populating daily_delta_stock_data range [{start_date_id}, {end_date_id}]")
-		date_ids = get_ordered_date_ids(conn.cursor())
-		populate_deltas(conn, date_ids, start_date_id=start_date_id, end_date_id=end_date_id)
-	finally:
-		try:
-			conn.close()
-		except Exception:
-			pass
 
 
 def _get_recent_date_id_window_from_daily_delta_stock_data(
@@ -302,123 +184,12 @@ def _score_for_ticker_id(scores: np.ndarray, ticker_id: int, rec: StockRecommend
 		return float("nan")
 
 
-def _parse_iso_date(d: str) -> date:
-	"""Parse an ISO date (YYYY-MM-DD) into a ``datetime.date``.
-
-	Raises ``ValueError`` on invalid format.
-	"""
-
-	return datetime.fromisoformat(d).date()
-
-
-def _find_latest_market_summary_date(base_dir: Path) -> Optional[date]:
-	"""Return the latest date for which a market summary file exists.
-
-	Looks under ``base_dir / "market_summary" / <year>`` for
-	``YYYY-MM-DD.ndjson`` files and returns the maximum calendar date
-	represented by any such filename.  If no files are found, returns ``None``.
-
-	Notes
-	-----
-	* Files are considered "existing" regardless of their size.  In particular,
-	  any zero‑byte or very small files (e.g. from prior weekend/holiday runs)
-	  are treated as already processed days and will *not* be refetched.
-	"""
-
-	root = base_dir / "market_summary"
-	if not root.exists():
-		return None
-
-	latest: Optional[date] = None
-
-	# Year subdirectories are named as 4‑digit years (e.g. "2025").
-	for year_dir in sorted(root.iterdir()):
-		if not year_dir.is_dir():
-			continue
-		try:
-			int(year_dir.name)
-		except ValueError:
-			continue
-
-		for f in year_dir.iterdir():
-			if not f.is_file():
-				continue
-			if not f.name.endswith(".ndjson"):
-				continue
-			stem = f.stem  # "YYYY-MM-DD"
-			try:
-				d = _parse_iso_date(stem)
-			except ValueError:
-				continue
-			if latest is None or d > latest:
-				latest = d
-
-	return latest
-
-
-def _compute_range(
-	data_dir: Path,
-	start_date_arg: Optional[str],
-	end_date_arg: Optional[str],
-) -> Optional[RangeConfig]:
-	"""Determine the date range we need to update.
-
-	If ``start_date_arg`` is provided, we start exactly from that date.
-	Otherwise we inspect the ``market_summary`` directory and start from the
-	*day after* the most recent existing summary file.
-
-	If ``end_date_arg`` is provided it is used as the inclusive end date;
-	otherwise today (UTC) is used, **except** that we avoid including the
-	current calendar day in the range unless it is already after 21:30 UTC.
-	"""
-
-	now_utc = datetime.now(timezone.utc)
-	today_utc = now_utc.date()
-
-	# Determine end date first so we can bail out early when appropriate.
-	if end_date_arg:
-		end_d = _parse_iso_date(end_date_arg)
-	else:
-		# By default we would stop at today (UTC), but we don't want to fetch
-		# Polygon market_summary for the current day unless it's after the
-		# configured market close cutoff. Before that cutoff, grouped daily
-		# data may still be incomplete.
-		end_d = today_utc
-		if now_utc.time() < MARKET_CLOSE_CUTOFF_UTC:
-			# Before the cutoff, treat "today" as not yet available and instead
-			# only fetch up through yesterday. This ensures the main loop in
-			# ``main`` never attempts to fetch the current day's
-			# market_summary before the cutoff.
-			end_d = today_utc - timedelta(days=1)
-
-	if start_date_arg:
-		start_d = _parse_iso_date(start_date_arg)
-	else:
-		latest = _find_latest_market_summary_date(data_dir)
-		if latest is None:
-			# No existing files; the calling context must decide what to do.
-			return None
-		start_d = latest  + timedelta(days=1)
-
-	if start_d > end_d:
-		# Nothing to do; already up to date for the requested window.
-		return None
-
-	return RangeConfig(start_date=start_d, end_date=end_d)
-
-
-def _iter_dates_inclusive(start_d: date, end_d: date):
-	cur = start_d
-	while cur <= end_d:
-		yield cur
-		cur = cur + timedelta(days=1)
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
 	parser = argparse.ArgumentParser(
 		description=(
-			"Bring Polygon market_summary NDJSON files up to date by fetching "
-			"any missing days between the on-disk latest date and today."
+			"Reconcile declared Polygon history and corrections before legacy recommendations."
 		)
 	)
 	parser.add_argument(
@@ -437,14 +208,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 	parser.add_argument(
 		"--data-dir",
 		default="data",
-		help="Root data directory (containing the market_summary subdirectory).",
+		help="Root directory for request-scoped history, source responses, and manifests.",
 	)
 	parser.add_argument(
 		"--start-date",
 		default=None,
 		help=(
-			"Optional ISO date (YYYY-MM-DD). If omitted, starts from the day "
-			"after the latest existing market_summary file."
+			"Optional inclusive start date; defaults to the persisted supported-history boundary."
 		),
 	)
 	parser.add_argument(
@@ -500,8 +270,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 	parser.add_argument(
 		"--log-features",
 		action="store_true",
-		help="If set, log the full feature vector to a CSV file in the run directory.",
+		help="If set, log the full feature vector to a CSV file and show the feature window table.",
 	)
+	parser.add_argument(
+		"--random-dates",
+		default=None,
+		help="If set, format 'x,y'. Pick x random dates from 2015-01-01 to 2025-12-31, get recommendations, and print values at y random output locations.",
+	)
+	add_update_policy_arguments(parser)
 	return parser
 
 
@@ -563,181 +339,48 @@ def main(argv: Optional[List[str]] = None) -> int:
 			print(f"Error: Invalid --target-date format '{args.target_date}'. Use YYYY-MM-DD.")
 			return 1
 
+	args.data_root = args.data_dir
+	if target_date_obj is not None:
+		requested_end = date.fromisoformat(args.end_date) if args.end_date else target_date_obj
+		args.end_date = min(requested_end, target_date_obj).isoformat()
+	try:
+		update_result = assemble_and_update(args)
+	except StageExecutionError as error:
+		print(str(error))
+		return 1
+	except Exception:
+		print("Required market-data update setup failed.")
+		return 1
+	if not update_result.successful:
+		print("Required market-data coverage is incomplete or unverified.")
+		return 1
+	latest_after = get_latest_raw_stock_data(dbinfo_file=args.dbinfo_file)
+	if latest_after is None:
+		print("No tradable raw data is available after reconciliation.")
+		return 1
+	latest_after_date_id, _ = latest_after
+	if target_date_obj is not None:
 		target_date_id = _lookup_date_id_for_transaction_date(target_date_obj, dbinfo_file=args.dbinfo_file)
 		if target_date_id is None:
-			print(f"Error: Target date {args.target_date} not found in transaction_dates table.")
+			print("Target session is unavailable after ingestion.")
 			return 1
-		print(f"Using target date {args.target_date} (date_id: {target_date_id})")
-
-	# Determine the latest date already present in raw_stock_data so we can
-	# later backfill any newer NDJSON files into the database.
-	latest_date_id, latest_date = _load_latest_raw_stock_data_date(dbinfo_file=args.dbinfo_file)
-	print(f"Latest raw_stock_data date_id: {latest_date_id}")
-
-	api_key = args.api_key
-	if not api_key:
-		print(
-			"Error: API key is required. Provide --api-key or POLYGON_API_KEY env.",
-		)
-		return 1
-
-	data_dir = Path(args.data_dir)
-
-	effective_end_date = args.end_date
-	if target_date_obj:
-		# If target_date is provided, we don't need to fetch anything past it
-		if effective_end_date is None:
-			effective_end_date = target_date_obj.isoformat()
-		else:
-			# If user provided end_date, use the earlier of the two
-			try:
-				user_end_date = date.fromisoformat(effective_end_date)
-				if user_end_date > target_date_obj:
-					effective_end_date = target_date_obj.isoformat()
-			except ValueError:
-				pass
-
-	range_of_days_of_stock_data_downloaded_from_massive = _compute_range(data_dir, args.start_date, effective_end_date)
-	if range_of_days_of_stock_data_downloaded_from_massive is None:
-		# Either there is nothing to do (already up to date for the requested
-		# window) or there are no existing files and no explicit start date.
-		latest = _find_latest_market_summary_date(data_dir)
-		if latest is None:
-			print(
-				"No existing market_summary files found and no --start-date "
-				"provided; nothing to update.",
-			)
-		else:
-			print(
-				f"Market summary already up to date through {latest.isoformat()} "
-				f"(no dates after this and up to requested end need fetching).",
-			)
-		#return 0
-	else :
-		print(
-			f"Updating market_summary from {range_of_days_of_stock_data_downloaded_from_massive.start_date.isoformat()} "
-			f"through {range_of_days_of_stock_data_downloaded_from_massive.end_date.isoformat()} (inclusive) in {data_dir}...",
-		)
-
-	# Iterate forward in time – this is more natural for log reading and for
-	# the "bring up to date" semantics.
-		for d in _iter_dates_inclusive(range_of_days_of_stock_data_downloaded_from_massive.start_date, range_of_days_of_stock_data_downloaded_from_massive.end_date):
-			day_dt = datetime(d.year, d.month, d.day, tzinfo=timezone.utc)
-			out_file = market_summary_file_path(data_dir, day_dt)
-
-			if out_file.exists():
-				# Treat *any* existing file as already processed, regardless of size.
-				print(f"SKIP {iso_date(day_dt)}: file already exists at {out_file}")
-				continue
-
-			print(f"FETCH {iso_date(day_dt)} -> {out_file}")
-			try:
-				count = fetch_market_summary_day(
-					api_key=api_key,
-					day=day_dt,
-					out_file=out_file,
-					max_retries=int(args.max_retries),
-				)
-			except Exception as e:  # pragma: no cover - defensive logging
-				print(f"FAIL {iso_date(day_dt)}: {e}")
-				continue
-
-			if count <= 0:
-				# Non‑trading day or no results; fetch_market_summary_day will have
-				# avoided writing an empty file.  We just log and move on.
-				print(
-					f"NO DATA {iso_date(day_dt)}: Polygon returned no results; "
-					"likely a non‑trading day.",
-				)
-			else:
-				print(
-					f"OK {iso_date(day_dt)}: grouped market summary saved "
-					f"({count} line(s)).",
-				)
-
-		print("Done updating market_summary.")
-
-	# After ensuring on-disk market_summary files are up to date, populate the
-	# database with any days strictly more recent than the last date already
-	# present in raw_stock_data.
-
-	populate_argv = [
-		f"--dbinfo-file={args.dbinfo_file}",
-		f"--start-date={latest_date.isoformat()}",
-	]
-
-	print(
-		"Populating raw_stock_data for NDJSON files after "
-		f"{latest_date.isoformat()}...",
-	)
-	populate_raw_stock_main(populate_argv)
-
-	# Now that raw_stock_data has been updated, call the stored procedure to
-	# populate daily_delta_stock_data for the new date_id range.
-	latest_after = get_latest_raw_stock_data(dbinfo_file=args.dbinfo_file)
-
-	if latest_after is None:
-		print("No rows found in raw_stock_data after population; skipping delta population.")
-		return 0
-
-	latest_after_date_id, _ = latest_after
-
-	if target_date_id is not None:
-		print(f"Target date_id {target_date_id} overrides latest_after_date_id {latest_after_date_id} for processing.")
 		latest_after_date_id = target_date_id
 
-	# Determine the latest date_id already present in daily_delta_stock_data so
-	# that we only backfill rows strictly after that point. This avoids
-	# incorrectly using the latest raw_stock_data date as the starting point,
-	# which could cause us to skip necessary backfill if daily_delta_stock_data
-	# is lagging behind raw_stock_data.
-	delta_window = _get_recent_date_id_window_from_daily_delta_stock_data(
-		1,
-		dbinfo_file=args.dbinfo_file,
-	)
-	if delta_window is None:
-		# No existing daily_delta_stock_data rows; start from the very first
-		# possible date_id (1). The stored procedure is expected to be
-		# idempotent for ranges that partially or entirely precede available
-		# raw_stock_data.
-		latest_delta_date_id = 0
-	else:
-		_, latest_delta_date_id = delta_window
-
-	# if latest_after_date_id <= latest_date_id:
-	#     print(
-	#         "No new raw_stock_data dates were added; "
-	#         "skipping populate_daily_delta_stock_data call.",
-	#     )
-	#     return 0
-
-	print(
-		"Populating daily_delta_stock_data for date_id range "
-		f"{latest_delta_date_id} through {latest_after_date_id}...",
-	)
-
-	_populate_daily_delta_stock_data_range(
-		latest_delta_date_id-5,
-		latest_after_date_id,
-		dbinfo_file=args.dbinfo_file,
-	)
-
-	print("Done populating daily_delta_stock_data.")
-
 	# Default hyperparameters
-	prior_days = 12
-	hidden_layers = "6000"
-	mlp_layers = 3
+	prior_days = 10
+	hidden_layers = "500"
+	mlp_layers = 2
 	activation = "leaky_relu"
 	final_activation = "tanh"
 	day_change_centered = "proportional_normalized_zero_centered"
 	precision = "fp32"
-	learning_rate = "0.000001"
+	learning_rate = "0.01"
 	layer_types = "linear"
-	learning_rate_adjustment_parameter = "0.996"
-	batch_size = 512
+	learning_rate_adjustment_parameter = "1"
+	batch_size = 256
 	epochs = 1600
-	period_to_train_on = 2110
+	layer_normalization = False
+	period_to_train_on = 5080
 	optimizer = "adamw"
 
 	pretrained_dir = args.pretrained_dir
@@ -852,7 +495,6 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 	if not pretrained_dir:
 		train_argv = [
-			"--mode=train",
 			f"--prior-days={prior_days}",
 			f"--epochs={epochs}",
 			f"--batch-size={batch_size}",
@@ -860,7 +502,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 			f"--learning-rate-adjustment-parameter={learning_rate_adjustment_parameter}",
 			"--train-percent=1.0",
 			"--val-percent=0.0",
-			f"--hidden-layers={hidden_layers}",
+			f"--hidden-layer-size-list={hidden_layers}",
 			f"--mlp-layers={mlp_layers}",
 			f"--activation={activation}",
 			f"--final-activation={final_activation}",
@@ -871,6 +513,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 			f"--raw-train-end-with-special-characters={train_end_id}",
 			f"--optimizer={optimizer}",
 			"--split-mode=sequential",
+			f"--layer-normalization={layer_normalization}",
 			"--shuffle"
 		]
 		print(day_change_centered)
@@ -930,6 +573,203 @@ def main(argv: Optional[List[str]] = None) -> int:
 		ticker_pool_end_date_id=train_end_id,
 	)
 
+	if args.random_dates:
+		try:
+			x_str, y_str = args.random_dates.split(",")
+			num_random_dates = int(x_str)
+			num_random_outputs = int(y_str)
+		except ValueError:
+			print(f"Error: Invalid --random-dates format '{args.random_dates}'. Use 'x,y'.")
+			return 1
+
+		# Define the range 1-1-2015 to 31-12-2025
+		start_range = date(2015, 1, 1)
+		end_range = date(2025, 12, 31)
+
+		# Get all date_ids within this range that are also in builder.dates
+		valid_date_ids = []
+		conn = get_connection(dbinfo_file=args.dbinfo_file)
+		try:
+			cur = conn.cursor()
+			cur.execute(
+				"SELECT id FROM transaction_dates WHERE transaction_date >= %s AND transaction_date <= %s",
+				(start_range, end_range)
+			)
+			rows = cur.fetchall()
+			db_date_ids = {int(r[0]) for r in rows}
+			# Intersect with dates available in the builder (which has features)
+			builder_dates = set(builder.dates.tolist())
+			valid_date_ids = sorted(list(db_date_ids.intersection(builder_dates)))
+		finally:
+			conn.close()
+
+		if not valid_date_ids:
+			print(f"Error: No valid dates found between {start_range} and {end_range} with available features.")
+			return 1
+
+		import random
+		selected_date_ids = random.sample(valid_date_ids, min(num_random_dates, len(valid_date_ids)))
+		print(f"Selected {len(selected_date_ids)} random dates for evaluation.")
+
+		# Determine y random output locations once for all dates
+		y_indices = []
+		# We need at least one model run to know the number of outputs, or we can use rec.output_size
+		num_outputs = int(rec.output_size)
+		if num_outputs > 0:
+			y_indices = random.sample(range(num_outputs), min(num_random_outputs, num_outputs))
+			print(f"Randomly selected {len(y_indices)} output indices to monitor for all dates: {y_indices}")
+
+		# Select 2*y random feature vector locations once for all dates
+		num_features_total = int(rec.input_size)
+		num_random_features = 2 * num_random_outputs
+		f_indices = []
+		if num_features_total > 0:
+			f_indices = random.sample(range(num_features_total), min(num_random_features, num_features_total))
+			print(f"Randomly selected {len(f_indices)} feature indices to monitor for all dates: {f_indices}")
+
+		# Load all ticker symbols for the model pool once
+		ticker_ids_pool = rec.ticker_ids if rec.ticker_ids is not None else []
+		ticker_symbols_pool = _load_ticker_symbols(ticker_ids_pool, dbinfo_file=args.dbinfo_file)
+
+		for d_id in selected_date_ids:
+			tx_date = _lookup_transaction_date_for_date_id(d_id, dbinfo_file=args.dbinfo_file)
+			print(f"\n--- Recommendations for date_id {d_id}, date {tx_date} ---")
+
+			try:
+				f_vec, _, labels = builder.build_for_date(
+					date_id=d_id,
+					expected_input_size=int(rec.input_size),
+					prefer_prior_only=False
+				)
+
+				# Print feature/label table for random dates as well
+				num_features = rec.get_num_features_per_ticker()
+				ticker_ids = builder.model_ticker_ids if builder.model_ticker_ids is not None else builder.db_ticker_ids
+				if ticker_ids is not None:
+					num_tickers = len(ticker_ids)
+					num_days = int(f_vec.size // (num_tickers * num_features))
+					matches = np.where(builder.dates == d_id)[0]
+					if matches.size > 0:
+						base_idx = int(matches[0])
+						feature_names = ["change_in_price_over_day"]
+						if rec.get_current_day_change_used():
+							feature_names.append("change_in_price_over_day_current")
+						if rec.get_volume_ratio_used():
+							feature_names.append("volume_ratio")
+						if rec.get_vwap_ratio_used():
+							feature_names.append("vwap_ratio")
+						if rec.get_tranaction_ratio_used():
+							feature_names.append("transaction_ratio")
+						if len(feature_names) < num_features:
+							for i in range(len(feature_names), num_features):
+								feature_names.append(f"F{i}")
+						elif len(feature_names) > num_features:
+							feature_names = feature_names[:num_features]
+
+						show_ticker_ids = ticker_ids
+						if num_tickers > 10:
+							show_ticker_ids = ticker_ids[:10]
+
+						from debug_feature_logging import dump_feature_table, dump_label_table, dump_output_table
+						dump_feature_table(
+							X_flat=builder.X_flat,
+							dates=builder.dates,
+							d=base_idx,
+							num_prior=num_days - 1,
+							ticker_ids=show_ticker_ids,
+							feature_names=feature_names,
+							header_note=f"Random Date {tx_date}"
+						)
+						if builder.Y_labels is not None:
+							dump_label_table(
+								labels=builder.Y_labels,
+								dates=builder.dates,
+								d=base_idx,
+								num_prior=num_days - 1,
+								ticker_ids=show_ticker_ids,
+								header_note=f"Random Date {tx_date}"
+							)
+			except Exception as e:
+				print(f"Failed to build feature vector for date_id {d_id}: {e}")
+				continue
+
+			scores, top_ids = rec.getBuyRecommendations(
+				f_vec,
+				top_k=5,
+				index_base=1,
+				current_date_id=d_id,
+				dbinfo_file=args.dbinfo_file,
+			)
+
+			dump_output_table(
+				outputs=scores,
+				date_id=d_id,
+				ticker_ids=show_ticker_ids,
+				header_note=f"Random Date {tx_date}"
+			)
+
+			top_ticker_ids = [int(t) for t in top_ids]
+			ticker_map = _load_ticker_symbols(top_ticker_ids, dbinfo_file=args.dbinfo_file)
+
+			for rank, tid in enumerate(top_ids, start=1):
+				tid_int = int(tid)
+				ticker = ticker_map.get(tid_int, f"ticker_id={tid_int}")
+				score = _score_for_ticker_id(scores, tid_int, rec)
+				print(f"#{rank}: {ticker} (score={score:.6f})")
+
+			# Print values at the pre-selected y random outputs
+			if y_indices:
+				print(f"Values at {len(y_indices)} selected output locations:")
+				for idx in y_indices:
+					val = float(scores[idx])
+					# Get ticker symbol for output location if possible
+					ticker_info = ""
+					if ticker_ids_pool and idx < len(ticker_ids_pool):
+						t_id = ticker_ids_pool[idx]
+						t_symbol = ticker_symbols_pool.get(t_id, f"ticker_id={t_id}")
+						ticker_info = f" ({t_symbol})"
+					print(f"  Index {idx}{ticker_info}: {val:.6f}")
+
+				# Check variability of output labels at the same y locations
+				if labels is not None:
+					print(f"Labels at the same {len(y_indices)} output locations:")
+					for idx in y_indices:
+						# Ensure idx is within labels bounds (should be if y was sampled from range(num_outputs))
+						if idx < len(labels):
+							l_val = float(labels[idx])
+							# Get ticker symbol for output location if possible
+							ticker_info = ""
+							if ticker_ids_pool and idx < len(ticker_ids_pool):
+								t_id = ticker_ids_pool[idx]
+								t_symbol = ticker_symbols_pool.get(t_id, f"ticker_id={t_id}")
+								ticker_info = f" ({t_symbol})"
+							print(f"  Index {idx}{ticker_info}: {l_val:.6f}")
+						else:
+							print(f"  Index {idx}: OUT OF BOUNDS for labels")
+
+			# Print values at the pre-selected 2*y random features
+			if f_indices:
+				print(f"Values at {len(f_indices)} selected feature locations:")
+				num_tickers = len(ticker_ids_pool)
+				for idx in f_indices:
+					f_val = float(f_vec[idx])
+					# Calculate ticker, day offset, and feature index from flattened vector index
+					ticker_info = ""
+					if num_tickers > 0 and num_features > 0:
+						day_offset = idx // (num_tickers * num_features)
+						ticker_idx = (idx // num_features) % num_tickers
+						feature_idx = idx % num_features
+
+						if ticker_idx < len(ticker_ids_pool):
+							t_id = ticker_ids_pool[ticker_idx]
+							t_symbol = ticker_symbols_pool.get(t_id, f"ticker_id={t_id}")
+							f_name = feature_names[feature_idx] if feature_idx < len(feature_names) else f"F{feature_idx}"
+							ticker_info = f" ({t_symbol}, {f_name}, day -{day_offset})"
+
+					print(f"  Index {idx}{ticker_info}: {f_val:.6f}")
+
+		return 0
+
 	dates = builder.dates
 	# Use the most recent available feature date.
 	last_idx = int(len(dates) - 1)
@@ -953,7 +793,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 	# recommendations use the most up-to-date datapoint. If the model was
 	# trained without including the current day, this will raise a clear size
 	# mismatch error rather than silently dropping the latest day.
-	feat_vec, feature_date_id = builder.build_for_date(
+	feat_vec, feature_date_id, _labels = builder.build_for_date(
 		date_id=latest_after_date_id,
 		expected_input_size=int(rec.input_size),
 		prefer_prior_only=False
@@ -968,7 +808,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 	# training run directory.
 	timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
 
-	if getattr(args, "log_features", False):
+	if args.random_dates or getattr(args, "log_features", False):
 		# Log each feature value alongside ticker_id and date_id
 		# Feature vector layout: [d, d-1, ..., d-prior]
 		# Each day: [ticker1_features, ticker2_features, ...]
@@ -998,25 +838,74 @@ def main(argv: Optional[List[str]] = None) -> int:
 					else:
 						window_date_ids.append(-1) # Should not happen with valid window
 
-				log_lines = []
-				# feat_vec is flat. We iterate by day, then ticker, then feature
-				current_flat_idx = 0
-				for day_idx in range(num_days):
-					d_id = window_date_ids[day_idx]
-					for t_idx in range(num_tickers):
-						t_id = ticker_ids[t_idx]
-						for f_idx in range(num_features):
-							val = float(feat_vec[current_flat_idx])
-							# value,ticker_id,date_id
-							log_lines.append(f"{val:.10f},{t_id},{d_id}")
-							current_flat_idx += 1
+				from debug_feature_logging import dump_feature_window_table
+				# Reconstruct a per-date X_flat and Y_labels for dump_feature_window_table
+				# However, builder.X_flat already has this data! We just need to find the window.
+				# X_flat in builder is (D, T*F), dates in builder is (D,).
 
-				feature_log_file = Path(run_dir) / f"features-{timestamp}.csv"
-				try:
-					feature_log_file.write_text("\n".join(log_lines) + "\n", encoding="utf-8")
-					print(f"Feature vector logged to {feature_log_file}")
-				except Exception as e:
-					print(f"Failed to write feature log {feature_log_file}: {e}")
+				feature_names = ["change_in_price_over_day"]
+				if rec.get_current_day_change_used():
+					feature_names.append("change_in_price_over_day_current")
+				if rec.get_volume_ratio_used():
+					feature_names.append("volume_ratio")
+				if rec.get_vwap_ratio_used():
+					feature_names.append("vwap_ratio")
+				if rec.get_tranaction_ratio_used():
+					feature_names.append("transaction_ratio")
+
+				# Ensure feature_names matches F
+				if len(feature_names) < num_features:
+					for i in range(len(feature_names), num_features):
+						feature_names.append(f"F{i}")
+				elif len(feature_names) > num_features:
+					feature_names = feature_names[:num_features]
+
+				# Filter tickers to show only top-10 recommended in the table if too many tickers
+				show_ticker_ids = ticker_ids
+				if num_tickers > 10:
+					show_ticker_ids = ticker_ids[:10]
+					print(f"DEBUG: Showing table for top 10 of {num_tickers} tickers.")
+
+				from debug_feature_logging import dump_feature_table, dump_label_table, dump_output_table
+				dump_feature_table(
+					X_flat=builder.X_flat,
+					dates=builder.dates,
+					d=base_idx,
+					num_prior=num_days - 1,
+					ticker_ids=show_ticker_ids,
+					feature_names=feature_names,
+					header_note="Recommendation Window"
+				)
+				if builder.Y_labels is not None:
+					dump_label_table(
+						labels=builder.Y_labels,
+						dates=builder.dates,
+						d=base_idx,
+						num_prior=num_days - 1,
+						ticker_ids=show_ticker_ids,
+						header_note="Recommendation Window"
+					)
+
+				if getattr(args, "log_features", False):
+					log_lines = []
+					# feat_vec is flat. We iterate by day, then ticker, then feature
+					current_flat_idx = 0
+					for day_idx in range(num_days):
+						d_id = window_date_ids[day_idx]
+						for t_idx in range(num_tickers):
+							t_id = ticker_ids[t_idx]
+							for f_idx in range(num_features):
+								val = float(feat_vec[current_flat_idx])
+								# value,ticker_id,date_id
+								log_lines.append(f"{val:.10f},{t_id},{d_id}")
+								current_flat_idx += 1
+
+					feature_log_file = Path(run_dir) / f"features-{timestamp}.csv"
+					try:
+						feature_log_file.write_text("\n".join(log_lines) + "\n", encoding="utf-8")
+						print(f"Feature vector logged to {feature_log_file}")
+					except Exception as e:
+						print(f"Failed to write feature log {feature_log_file}: {e}")
 		else:
 			print("Warning: Could not log features because ticker IDs are unknown.")
 
@@ -1028,6 +917,15 @@ def main(argv: Optional[List[str]] = None) -> int:
 		current_date_id=feature_date_id,
 		dbinfo_file=args.dbinfo_file,
 	)
+
+	if args.random_dates or getattr(args, "log_features", False):
+		if ticker_ids is not None:
+			dump_output_table(
+				outputs=scores,
+				date_id=feature_date_id,
+				ticker_ids=show_ticker_ids,
+				header_note="Recommendation Window"
+			)
 
 	# Load human-readable ticker symbols for the recommended ids.
 	top_ticker_ids = [int(t) for t in top_ids]

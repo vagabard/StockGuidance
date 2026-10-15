@@ -35,6 +35,7 @@ import torch  # type: ignore
 from numpy import array_equal
 from torch import nn
 
+from database.query_tickers_by_date import query_valid_tickers
 from trainer import torch_interface
 from trainer.state.single_run import SingleRun
 
@@ -155,19 +156,26 @@ class StockRecommenderFromSavedScores(StockRecommender):
 		transactions_vec_tensor = None
 		if precalculated_transactions is not None:
 			arr = np.zeros((T,), dtype=np.float32)
-			if self.ticker_ids is not None and len(self.ticker_ids) > 0:
-				for i, tid in enumerate(self.ticker_ids):
-					val = precalculated_transactions.get(int(tid))
-					if val is not None:
-						arr[i] = float(val)
-			else:
-				possible_tickers = range(1, T + 1)
-				key_source = (possible_tickers if len(possible_tickers) < len(precalculated_transactions.keys()) else precalculated_transactions.keys())
-				key_filter = (precalculated_transactions.keys() if len(possible_tickers) < len(precalculated_transactions.keys()) else possible_tickers)
-				for tid in key_source:
-					if tid in key_filter:
-						val = precalculated_transactions.get(tid)
-						arr[int(tid) - 1] = val
+			if self.ticker_ids is None or len(self.ticker_ids) <= 0 or not len(arr) == len(self.ticker_ids) :
+				self.ticker_ids = [t[0] for t in query_valid_tickers(dbinfo_file, str(self._single_run.train_validation_test_sets_start_date_id),str(self._single_run.train_validation_test_sets_end_date_id ))]
+			for i, tid in enumerate(self.ticker_ids):
+				val = precalculated_transactions.get(int(tid))
+				if val is not None:
+					arr[i] = float(val)
+
+			# if self.ticker_ids is not None and len(self.ticker_ids) > 0:
+			# 	for i, tid in enumerate(self.ticker_ids):
+			# 		val = precalculated_transactions.get(int(tid))
+			# 		if val is not None:
+			# 			arr[i] = float(val)
+			# else:
+			# 	possible_tickers = range(1, T + 1)
+			# 	key_source = (possible_tickers if len(possible_tickers) < len(precalculated_transactions.keys()) else precalculated_transactions.keys())
+			# 	key_filter = (precalculated_transactions.keys() if len(possible_tickers) < len(precalculated_transactions.keys()) else possible_tickers)
+			# 	for tid in key_source:
+			# 		if tid in key_filter:
+			# 			val = precalculated_transactions.get(tid)
+			# 			arr[int(tid) - 1] = val
 			transactions_vec_tensor = torch.from_numpy(arr)
 		elif transactions_per_ticker is not None:
 			if isinstance(transactions_per_ticker, np.ndarray):
@@ -256,6 +264,10 @@ class StockRecommenderFromModel(StockRecommender):
 		self._cached_to_disk: bool = False
 		self._ensemble_cache_paths: list[str] = []
 		self.output_directory = output_directory
+		if self.output_directory is None and self._single_run is not None:
+			if hasattr(self._single_run, "file_structure") and self._single_run.file_structure is not None:
+				# Default to the run_group_dir; we'll refine this once we know if it's a single rep or ensemble
+				self.output_directory = self._single_run.file_structure.run_group_dir
 
 		# Unified path: either load from string source, or build from provided models
 		if isinstance(model_or_path, (str, Path)):
@@ -264,7 +276,13 @@ class StockRecommenderFromModel(StockRecommender):
 			self.output_directory = model_path
 			self._construct_from_models(models)
 		elif isinstance(model_or_path, List) and len(model_or_path) > 0 and (isinstance(model_or_path[0], (nn.Module, str, Path))):
+			if self.output_directory is None and isinstance(model_or_path[0], (str, Path)):
+				self.output_directory = str(model_or_path[0])
 			self._construct_from_models(model_or_path)
+			# Even for runs with a single rep, the runs always happen in a rep directory
+			if not self._is_ensemble and self._single_run is not None:
+				if self.output_directory == self._single_run.file_structure.run_group_dir:
+					self.output_directory = self._single_run.file_structure.get_directory_for_rep(1)
 		else:
 			raise ValueError("Must provide either a model path or a list of models.")
 
@@ -487,7 +505,7 @@ class StockRecommenderFromModel(StockRecommender):
 		from trainer.io_run import create_manifest_dictionary
 		return create_manifest_dictionary(
 			self._single_run,
-			None, None, "",
+			"", "", "",
 			int(self.input_size or 0),
 			int(self.output_size or 0)
 		)
@@ -759,6 +777,7 @@ class StockRecommenderFromModel(StockRecommender):
 							m, _, _ = load_model_from_checkpoint(
 								path,
 								fr,
+								self._single_run,
 								int(self.input_size),
 								int(self.output_size),
 								int(self._single_run.mlp_layers),
@@ -789,6 +808,18 @@ class StockRecommenderFromModel(StockRecommender):
 				del feature_tensor
 
 		out_from_model_flat = out_from_model_flat_cpu
+
+		# Verify if the model itself produced non-finite values (NaN or -inf)
+		# BEFORE we apply the intentional transaction-count mask.
+		if not torch.isfinite(out_from_model_flat).all():
+			non_finite_mask = ~torch.isfinite(out_from_model_flat)
+			indices = torch.where(non_finite_mask)[0]
+			values = out_from_model_flat[indices]
+			raise RuntimeError(
+				f"Model output contains non-finite values (NaN or inf) before masking. "
+				f"Indices: {indices.tolist()[:10]}... Values: {values.tolist()[:10]}..."
+			)
+
 		# This filter is ALWAYS enforced; we obtain transactions from, in priority order:
 		# 1) explicit precalculated_transactions argument
 		# 2) explicit transactions_per_ticker argument
@@ -840,36 +871,39 @@ class StockRecommenderFromModel(StockRecommender):
 					""",
 					(int(current_date_id),),
 				)
-				rows = cur.fetchall() or []
 				# Initialize zeros; missing tickers will be treated as 0 transactions
 				arr = np.zeros((T,), dtype=np.float32)
-				for r in rows:
-					# Access by position (driver-independent); expect (ticker_id, transactions)
-					tid = int(r[0])
-					val = r[1]
+				while True:
+					rows = cur.fetchmany(1000)
+					if not rows:
+						break
+					for r in rows:
+						# Access by position (driver-independent); expect (ticker_id, transactions)
+						tid = int(r[0])
+						val = r[1]
 
-					slot_idx = -1
-					if self.ticker_ids is not None and len(self.ticker_ids) > 0:
-						try:
-							if isinstance(self.ticker_ids, list):
-								slot_idx = self.ticker_ids.index(tid)
-							else:
-								# Assume numpy array or similar
-								matching_indices = np.where(self.ticker_ids == tid)[0]
-								if matching_indices.size > 0:
-									slot_idx = int(matching_indices[0])
-						except (ValueError, IndexError):
-							pass
-					else:
-						# Fallback to 1-based indexing if no ticker_ids list
-						if 1 <= tid <= T:
-							slot_idx = tid - 1
+						slot_idx = -1
+						if self.ticker_ids is not None and len(self.ticker_ids) > 0:
+							try:
+								if isinstance(self.ticker_ids, list):
+									slot_idx = self.ticker_ids.index(tid)
+								else:
+									# Assume numpy array or similar
+									matching_indices = np.where(self.ticker_ids == tid)[0]
+									if matching_indices.size > 0:
+										slot_idx = int(matching_indices[0])
+							except (ValueError, IndexError):
+								pass
+						else:
+							# Fallback to 1-based indexing if no ticker_ids list
+							if 1 <= tid <= T:
+								slot_idx = tid - 1
 
-					if slot_idx != -1 and val is not None:
-						try:
-							arr[slot_idx] = float(val)
-						except Exception:
-							pass
+						if slot_idx != -1 and val is not None:
+							try:
+								arr[slot_idx] = float(val)
+							except Exception:
+								pass
 				transactions_vec_tensor = torch.from_numpy(arr).to(self._device)  # type: ignore[attr-defined]
 			finally:
 				try:

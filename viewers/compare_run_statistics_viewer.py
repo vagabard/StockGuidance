@@ -37,6 +37,7 @@ from viewers.compare_runs_shared import (
 	save_preference,
 	render_run_grid,
 	discover_best_run_dir,
+	RunSelectorSidebar,
 )
 
 
@@ -574,48 +575,19 @@ def _run_as_script() -> None:
 
 	st.set_page_config(page_title="Run Statistics Viewer", layout="wide")
 
-	default_base = os.path.join(os.getcwd(), "../data")
-	win_default = r"C:\\Projects\\StockGuidance\\data"
-	base_dir = st.sidebar.text_input(
-		"Base data directory",
-		value=(win_default if os.path.isdir(win_default) else default_base),
-	)
-
-	runs = scan_runs(base_dir)
-
-	# --- Filtering based on "Runs with simulation" checkbox ---
-	st.sidebar.subheader("Filter options")
-
-	# Initialise session state from preferences on first load
+	# 1) Get preferences
 	prefs = load_preferences()
-	if "crsv_sim_only" not in st.session_state:
-		st.session_state["crsv_sim_only"] = prefs.get("crsv_sim_only", False)
 
-	sim_only = st.sidebar.checkbox(
-		"Runs with simulation",
-		value=st.session_state["crsv_sim_only"],
-		key="crsv_sim_only",
-		on_change=lambda: save_preference("crsv_sim_only", st.session_state["crsv_sim_only"]),
-	)
+	# Use the shared RunSelectorSidebar
+	selector = RunSelectorSidebar(key_prefix="crsv")
+	selected_runs = selector.render()
 
-	if sim_only:
-		filtered_runs = []
-		for rel, params in runs:
-			# Check if either the run directory itself or its parent timestamp directory has simulation files
-			# rel is typically "timestamp/repN" or just "timestamp"
-			run_path = os.path.normpath(os.path.join(base_dir, rel))
-			ts_name = params.get("_ts")
-			ts_path = os.path.normpath(os.path.join(base_dir, ts_name)) if ts_name else None
-
-			if has_any_simulation_files(run_path) or (ts_path and has_any_simulation_files(ts_path)):
-				filtered_runs.append((rel, params))
-		runs = filtered_runs
-
-	if not runs:
-		st.info(
-			"No runs found. Ensure the directory contains timestamped subfolders like YYYYMMDD_HHMMSS."
-		)
+	if selected_runs is None:
+		st.info("Select filters in the sidebar and click 'Show Runs' to compare.")
 		return
+
+	base_dir = st.session_state["crsv_base_dir"]
+	runs = scan_runs(base_dir)
 
 	ts_to_runs = group_runs_by_timestamp(runs)
 	timestamp_names = build_timestamp_list(ts_to_runs)
@@ -625,6 +597,12 @@ def _run_as_script() -> None:
 		runs,
 		require_multiple_param_sets=False,
 	)
+
+	# Filter ts_to_runs to only include selected_runs
+	filtered_ts_to_runs = {ts: ts_to_runs[ts] for ts in selected_runs if ts in ts_to_runs}
+	ts_to_runs = filtered_ts_to_runs
+	# Update timestamp_names to only include those in the filtered set for the rest of the UI
+	timestamp_names = build_timestamp_list(ts_to_runs)
 
 	st.title("Compare Run Statistics")
 	st.caption(
@@ -755,7 +733,7 @@ def _run_as_script() -> None:
 		df=df,
 		key_prefix="crsv",
 		prefs=prefs,
-		default_visible_cols=["run"] + [c for c in df.columns if c not in ["run", "_variant", "_ts", "run_id", "activation", "final_activation", "optimizer", "optimizer_list"]],
+		default_visible_cols=["run", "epochs", "epoch"] + [c for c in df.columns if c not in ["run", "epochs", "epoch", "_variant", "_ts", "run_id", "activation", "final_activation", "optimizer", "optimizer_list"]],
 		return_all_if_none=False
 	)
 
@@ -868,13 +846,14 @@ def _run_as_script() -> None:
 				else:
 					_run_generate_stats(selected_ts, all_stat_rows, base_dir, root_path, force=True)
 
-		col_sim_1, col_sim_2 = st.columns([1, 1])
+		col_sim_1, col_sim_2, col_sim_3 = st.columns([1, 1, 0.5])
 		with col_sim_1:
+			force_sim = st.checkbox("force", help="Force the regeneration of all selected simulations", key="crsv_force_sim")
 			if st.button("Generate simulations from saved scores", help="For selected runs, look for saved scores and generate stock_simulation_*.csv files"):
 				if not selected_ts:
 					st.warning("Please select at least one run in the table above.")
 				else:
-					_run_generate_simulations(selected_ts, all_stat_rows, base_dir, selected_run_ids, force=False)
+					_run_generate_simulations(selected_ts, all_stat_rows, base_dir, selected_run_ids, force=force_sim)
 
 		with col_sim_2:
 			if st.button("Force Generate simulations", help="For selected runs, look for saved scores and generate stock_simulation_*.csv files. Forces regeneration even if files exist."):

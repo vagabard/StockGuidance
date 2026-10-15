@@ -78,6 +78,7 @@ class TrainingInstanceProvider:
 		*,
 		dbinfo_file: str = "dbinfo.id",
 		limit: Optional[int] = None,
+		ticker_limit: Optional[int] = None,
 		use_torch: bool = False,
 		current_day_change: bool = True,
 		volume_ratio: bool = False,
@@ -87,8 +88,9 @@ class TrainingInstanceProvider:
 		start_date_id: Optional[int] = None,
 		end_date_id: Optional[int] = None,
 		device: Optional[str] = None,
+		cache_dir: Optional[str] = None,
 	) -> None:
-		print(f"TrainingInstanceProvider initialized with dbinfo_file={dbinfo_file}, limit={limit}, use_torch={use_torch}, current_day_change={current_day_change}, volume_ratio={volume_ratio}, vwap_ratio={vwap_ratio}, tranaction_ratio={tranaction_ratio}, day_change_centered={day_change_centered}, start_date_id={start_date_id}, end_date_id={end_date_id}, device={device}")
+		print(f"TrainingInstanceProvider initialized with dbinfo_file={dbinfo_file}, limit={limit}, ticker_limit={ticker_limit}, use_torch={use_torch}, current_day_change={current_day_change}, volume_ratio={volume_ratio}, vwap_ratio={vwap_ratio}, tranaction_ratio={tranaction_ratio}, day_change_centered={day_change_centered}, start_date_id={start_date_id}, end_date_id={end_date_id}, device={device}, cache_dir={cache_dir}")
 		"""Load per-date matrices from the database and cache them in memory.
 
 		The underlying fetch returns:
@@ -100,6 +102,7 @@ class TrainingInstanceProvider:
 		dates, ticker_data_list_flat, labels_for_training, ticker_ids = fetch_grouped_by_date(
 			dbinfo_file=dbinfo_file,
 			limit=limit,
+			ticker_limit=ticker_limit,
 			return_2d=False,
 			current_day_change=current_day_change,
 			volume_ratio=volume_ratio,
@@ -108,6 +111,7 @@ class TrainingInstanceProvider:
 			day_change_centered=day_change_centered,
 			start_date_id=start_date_id,
 			end_date_id=end_date_id,
+			cache_dir=cache_dir,
 		)
 
 		if device is None:

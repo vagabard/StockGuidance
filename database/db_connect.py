@@ -68,6 +68,9 @@ def get_connection(
 	the specified file.
 	"""
 
+	if dbinfo_file is None:
+		dbinfo_file = "dbinfo.id"
+
 	search_path = Path(os.getcwd())
 	found_path = None
 

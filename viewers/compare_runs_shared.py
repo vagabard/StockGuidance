@@ -7,6 +7,8 @@ from datetime import datetime
 from typing import Any, Callable, Dict, List, Tuple, Optional
 from pathlib import Path
 
+import streamlit as st
+
 
 def get_preferences_path() -> Path:
 	"""Return the path to the preferences JSON file in the cache directory."""
@@ -272,6 +274,8 @@ def _params_from_single_run_json(ts_path: str) -> Dict[str, Any]:
 		"prior_days": getattr(single_run, "prior_days", None),
 		"mlp_layers": getattr(single_run, "mlp_layers", None),
 		"lr": getattr(single_run, "lr", None),
+		"epochs": getattr(single_run, "epochs", None),
+		"epoch": getattr(single_run, "epoch", None) if hasattr(single_run, "epoch") else None,
 		"activation": getattr(single_run, "activation", None),
 		"final_activation": getattr(single_run, "final_activation", None),
 		"optimizer": getattr(single_run, "optimizer", None),
@@ -289,7 +293,6 @@ def _params_from_single_run_json(ts_path: str) -> Dict[str, Any]:
 	if family_run is not None:
 		for name in [
 			"precision",
-			"total_epochs_to_train",
 			"train_percent",
 			"val_percent",
 			"simulate_top_k",
@@ -318,7 +321,6 @@ def _params_from_single_run_json(ts_path: str) -> Dict[str, Any]:
 			"architecture",
 			"hidden_layers",
 			"batch_size",
-			"epochs",
 		]:
 			if hasattr(family_run, name):
 				params[name] = getattr(family_run, name)
@@ -1081,13 +1083,16 @@ def render_run_grid(
 	# Now we extract selection from the edited_df's checkbox column
 	selected_runs_from_grid = []
 	if edited_df is not None and select_col in edited_df.columns:
-		# If stable index was used, edited_df might preserve it.
-		# Since we use hide_index=True, edited_df has the same index as fdf[grid_cols].
-		selected_runs_from_grid = [
-			str(edited_df.loc[i, "run"])
-			for i in edited_df.index
-			if edited_df.loc[i, select_col]
-		]
+		# Use a more robust check to avoid Series truth value ambiguity.
+		# edited_df[select_col] is a Series of booleans.
+		# If the index is not unique, .loc[i, select_col] can return a Series.
+		# To be safe, we use .iloc for row-by-row extraction which always returns scalars for single column.
+		for i in range(len(edited_df)):
+			try:
+				if bool(edited_df[select_col].iloc[i]):
+					selected_runs_from_grid.append(str(edited_df["run"].iloc[i]))
+			except Exception:
+				continue
 
 	# Persist last selection - only what the user actually checked
 	st.session_state[f"{key_prefix}_last_selection"] = selected_runs_from_grid
@@ -1178,6 +1183,9 @@ def sidebar_family_and_build_selector(
 	)
 
 	# --- Builds selection (multi) ---
+	builds_key = f"{key_prefix}_builds"
+	is_first_builds_render = builds_key not in st.session_state
+
 	if selected_families:
 		# Preserve order as per family_names iteration; de-duplicate timestamps.
 		seen: set[str] = set()
@@ -1191,12 +1199,24 @@ def sidebar_family_and_build_selector(
 	else:
 		available_builds = list(timestamp_names)
 
-	builds_key = f"{key_prefix}_builds"
 	prev_builds = st.session_state.get(builds_key)
 	if not isinstance(prev_builds, list):
 		prev_builds = []
 	prev_builds = [b for b in prev_builds if b in available_builds]
 	if not prev_builds and default_select_all_builds:
+		prev_builds = list(available_builds)
+
+	# Auto-populate builds if we just switched families or it's the first time
+	# rendering this family-scoped builds list.
+	needs_auto_populate = False
+	if selected_families and not prev_builds:
+		if is_first_builds_render or st.session_state.get(f"{key_prefix}_families_init"):
+			needs_auto_populate = True
+			# Immediately consume the init flag
+			if f"{key_prefix}_families_init" in st.session_state:
+				st.session_state[f"{key_prefix}_families_init"] = False
+
+	if needs_auto_populate:
 		prev_builds = list(available_builds)
 
 	selected_builds = st.sidebar.multiselect(
@@ -1208,18 +1228,11 @@ def sidebar_family_and_build_selector(
 	)
 
 	# If at least one family is selected but no builds are selected, treat the
-	# empty selection as "all available builds for the selected families".
-	# This keeps behavior consistent across viewers: choosing a family should
-	# immediately scope the run grid without requiring a second click.
+	# empty selection as "all available builds for the selected families"
+	# ONLY if the user didn't explicitly clear it and we don't have better info.
 	if (not selected_builds) and selected_families:
-		# check if we have a previous selection for builds in state that was just empty
-		# If the key exists in session state but is empty, it means user explicitly deselected all.
-		# If the key is NOT in session state, it's the first load or reset.
-		if f"{builds_key}" not in st.session_state or st.session_state.get(f"{key_prefix}_families_init"):
+		if needs_auto_populate:
 			selected_builds = list(available_builds)
-		else:
-			# user explicitly deselected everything
-			pass
 	elif (not selected_builds) and empty_builds_means_all:
 		selected_builds = list(available_builds)
 
@@ -1241,6 +1254,228 @@ def sidebar_family_and_build_selector(
 				pass
 
 	return selected_builds, selected_families, available_builds
+
+
+from scripts.aggregate_run_options import aggregate_run_options
+
+class RunSelectorSidebar:
+	def __init__(self, key_prefix: str, default_base: Optional[str] = None):
+		self.key_prefix = key_prefix
+		if default_base is None:
+			default_base = r"C:\Projects\StockGuidance\data"
+			if not os.path.isdir(default_base):
+				default_base = os.path.join(os.getcwd(), "data")
+		self.default_base = default_base
+
+	def render(self) -> Optional[List[str]]:
+		"""
+		Renders the sidebar filters and returns a list of matching run IDs (timestamp_ids)
+		if the 'Show Runs' button is clicked or if a previous selection exists.
+		"""
+		st.sidebar.subheader("Data Source")
+		col1, col2 = st.sidebar.columns([3, 1])
+		base_dir = col1.text_input("Base data directory", value=self.default_base, label_visibility="collapsed", key=f"{self.key_prefix}_base_dir_input")
+		show_runs = col2.button("Show Runs", key=f"{self.key_prefix}_show_runs_btn", use_container_width=True)
+		st.session_state[f"{self.key_prefix}_base_dir"] = base_dir
+
+		if not os.path.exists(base_dir):
+			st.error(f"Directory not found: {base_dir}")
+			return None
+
+		# Load aggregated options
+		with st.spinner("Aggregating run options..."):
+			aggregated_options = aggregate_run_options(base_dir)
+
+		if not aggregated_options:
+			st.warning("No runs found with aggregateable options.")
+			return None
+
+		# Sort fields for consistent UI
+		fields = sorted(aggregated_options.keys())
+
+		# 0. Family Run selection
+		family_options = sorted(list(aggregated_options.get("_family", {}).keys()), reverse=True)
+		selected_families = []
+		if family_options:
+			st.sidebar.subheader("Filter by Family Run")
+			selected_families = st.sidebar.multiselect("Select Family Runs (Optional)", options=family_options, key=f"{self.key_prefix}_selected_families")
+
+		# 0b. Filter by Score Files
+		score_file_options = sorted(list(aggregated_options.get("has_score_files", {}).keys()))
+		selected_score_files = []
+		if score_file_options:
+			st.sidebar.subheader("Filter by Score Files")
+			selected_score_files = st.sidebar.multiselect("Has Score Files?", options=score_file_options, key=f"{self.key_prefix}_filter_has_score_files")
+
+		# Fields to skip or put in extended
+		skip_fields = [
+			"run_timestamp", "timestamp_id", "last_save_location",
+			"activation_list", "base_args", "base_args_list", "base_optional_features",
+			"completed", "current_index", "day_change_centered_list", "dbinfo_file", "device",
+			"epochs_list", "final_activation_list", "include_one_feature_list", "initial_run_id", "input_size", "limit",
+			"log_interval", "lr_list", "mlp_layers_list", "optimizer_list",
+			"output_size", "prior_days_list", "ticker_ids", "trading_interval",
+			"file_structure", "single_runs_for_all_combinations", "dbinfo",
+			"_family", "has_score_files",
+			"bias_list", "layer_normalization_list", "learning_rate_adjustment_parameter_list"
+		]
+
+		extended_attributes = [
+			"pin_GPU_memory",
+			"raw_train_end_with_special_characters",
+			"raw_train_start_with_special_characters",
+			"train_percent",
+			"train_validation_test_sets_end_date_id",
+			"train_validation_test_sets_start_date_id",
+			"val_percent"
+		]
+
+		# Gather all unique run IDs to detect missing fields
+		all_run_ids = set()
+		for field_data in aggregated_options.values():
+			for run_list in field_data.values():
+				all_run_ids.update(run_list)
+
+		# Filter all_run_ids by selected families if any
+		if selected_families:
+			filtered_run_ids = set()
+			for family in selected_families:
+				filtered_run_ids.update(aggregated_options.get("_family", {}).get(family, []))
+			all_run_ids &= filtered_run_ids
+
+		# 1. Pre-process ALL fields to include "Not Set"
+		for field in list(aggregated_options.keys()):
+			field_options_dict = aggregated_options[field]
+			runs_with_field = set()
+			for run_list in field_options_dict.values():
+				runs_with_field.update(run_list)
+
+			missing_runs = all_run_ids - runs_with_field
+			if missing_runs:
+				if "Not Set" not in aggregated_options[field]:
+					aggregated_options[field]["Not Set"] = list(missing_runs)
+
+		active_fields = [f for f in fields if f not in skip_fields]
+
+		# Calculate matching runs for currently selected values
+		field_matching_runs = {}
+		for field in active_fields:
+			key = f"{self.key_prefix}_filter_{field}"
+			selected = st.session_state.get(key, [])
+			if selected:
+				matches = set()
+				for val in selected:
+					matches.update(aggregated_options[field].get(val, []))
+				field_matching_runs[field] = matches
+
+		def get_final_dynamic_options(field):
+			others_matches = all_run_ids.copy()
+			for f, matches in field_matching_runs.items():
+				if f != field:
+					others_matches &= matches
+
+			available = []
+			for val, runs in aggregated_options[field].items():
+				if any(r in others_matches for r in runs):
+					available.append(val)
+
+			current_selection = st.session_state.get(f"{self.key_prefix}_filter_{field}", [])
+			for sel in current_selection:
+				if sel not in available:
+					available.append(sel)
+
+			available = sorted(list(set(available)), key=lambda x: str(x))
+			if "Not Set" in available:
+				available.remove("Not Set")
+				available.insert(0, "Not Set")
+			return available
+
+		st.sidebar.subheader("Filter Criteria")
+		selected_criteria = {}
+
+		for field in fields:
+			if field in skip_fields or field in extended_attributes:
+				continue
+
+			options = sorted(list(aggregated_options[field].keys()), key=lambda x: str(x))
+			if len(options) <= 1:
+				continue
+
+			dynamic_options = get_final_dynamic_options(field)
+			selected = st.sidebar.multiselect(f"Select {field}", options=dynamic_options, key=f"{self.key_prefix}_filter_{field}")
+			if selected:
+				selected_criteria[field] = selected
+
+		# Extended Attributes section
+		with st.sidebar.expander("Extended Attributes"):
+			for field in fields:
+				if field not in extended_attributes:
+					continue
+
+				options = sorted(list(aggregated_options[field].keys()), key=lambda x: str(x))
+				if len(options) <= 1:
+					continue
+
+				dynamic_options = get_final_dynamic_options(field)
+				selected = st.multiselect(f"Select {field}", options=dynamic_options, key=f"{self.key_prefix}_filter_{field}")
+				if selected:
+					selected_criteria[field] = selected
+
+		# Score file filtering (apply it to selected_criteria implicitly by filtering all_run_ids or matching_runs_ids)
+		if selected_score_files:
+			selected_criteria["has_score_files"] = selected_score_files
+
+		# Button to trigger grid population
+		# show_runs = st.sidebar.button("Show Runs", key=f"{self.key_prefix}_show_runs_btn") # Moved to top
+
+		show_grid_key = f"{self.key_prefix}_show_grid"
+		last_criteria_key = f"{self.key_prefix}_last_criteria"
+		last_families_key = f"{self.key_prefix}_last_selected_families"
+
+		if show_grid_key not in st.session_state:
+			st.session_state[show_grid_key] = False
+		if last_criteria_key not in st.session_state:
+			st.session_state[last_criteria_key] = {}
+
+		if show_runs:
+			st.session_state[show_grid_key] = True
+			st.session_state[last_criteria_key] = selected_criteria.copy()
+			st.session_state[last_families_key] = list(selected_families)
+
+		# If criteria changed and we are showing the grid, we could either hide it or keep showing old one.
+		if st.session_state[show_grid_key]:
+			current_families = list(selected_families)
+			last_families = st.session_state.get(last_families_key, [])
+			if st.session_state[last_criteria_key] != selected_criteria or last_families != current_families:
+				st.sidebar.warning("Criteria changed. Push 'Show Runs' to update.")
+
+		if st.session_state[show_grid_key]:
+			criteria_to_use = st.session_state[last_criteria_key]
+			matching_runs_ids = None
+
+			last_selected_families = st.session_state.get(last_families_key, [])
+			if last_selected_families:
+				matching_runs_ids = set()
+				for family in last_selected_families:
+					matching_runs_ids.update(aggregated_options.get("_family", {}).get(family, []))
+
+			for field, values in criteria_to_use.items():
+				current_field_matches = set()
+				for val in values:
+					current_field_matches.update(aggregated_options[field][val])
+
+				if matching_runs_ids is None:
+					matching_runs_ids = current_field_matches
+				else:
+					matching_runs_ids &= current_field_matches
+
+			if matching_runs_ids is None:
+				# If no filters applied, return everything within the base_dir (or all_run_ids)
+				return sorted(list(all_run_ids), reverse=True)
+
+			return sorted(list(matching_runs_ids), reverse=True)
+
+		return None
 
 
 def discover_best_run_dir(base_dir: str, ts_name: str, run_list: List[Tuple[str, Dict[str, Any]]]) -> str | None:

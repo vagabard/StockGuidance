@@ -4,49 +4,16 @@ import numpy as np
 from pathlib import Path
 from database.db_connect import get_connection
 from load_database_rows_into_tensors import create_ticker_id_selection_sql
-
-def resolve_date_id(date_str: str, available_dates: list[int]) -> int:
-    """Resolve a date string (+N, -N, or absolute) to a date_id."""
-    if not date_str:
-        return None
-
-    if date_str.startswith('+'):
-        idx = int(date_str[1:])
-        if idx < len(available_dates):
-            return available_dates[idx]
-        else:
-            return available_dates[-1]
-    elif date_str.startswith('-'):
-        offset = int(date_str[1:])
-        idx = len(available_dates) - 1 - offset
-        if idx >= 0:
-            return available_dates[idx]
-        else:
-            return available_dates[0]
-    else:
-        try:
-            return int(date_str)
-        except ValueError:
-            return None
-
-def get_available_dates(conn) -> list[int]:
-    """Fetch all unique date_ids from the database, sorted."""
-    query = "SELECT DISTINCT date_id FROM daily_delta_stock_data ORDER BY date_id ASC"
-    df = pd.read_sql(query, conn)
-    return df['date_id'].tolist()
+from trainer.util.date_bounds import DateBoundResolver, DateBoundType
 
 def calculate_correlations(dbinfo_file: str, output_csv: str, start_date_id_str: str = None, end_date_id_str: str = None):
+    resolver = DateBoundResolver(dbinfo_file=dbinfo_file)
+    start_date_id = resolver.resolve_bound(start_date_id_str, DateBoundType.START) if start_date_id_str else resolver.lowest_date_id
+    end_date_id = resolver.resolve_bound(end_date_id_str, DateBoundType.END) if end_date_id_str else resolver.highest_date_id
+
+    print(f"Calculating correlations for date range: {start_date_id} to {end_date_id}")
     conn = get_connection(dbinfo_file=dbinfo_file)
     try:
-        available_dates = get_available_dates(conn)
-        if not available_dates:
-            print("No dates found in database.")
-            return
-
-        start_date_id = resolve_date_id(start_date_id_str, available_dates) if start_date_id_str else available_dates[0]
-        end_date_id = resolve_date_id(end_date_id_str, available_dates) if end_date_id_str else available_dates[-1]
-
-        print(f"Calculating correlations for date range: {start_date_id} to {end_date_id}")
 
         # Use existing logic to select tickers present in the range
         ticker_sql = create_ticker_id_selection_sql(

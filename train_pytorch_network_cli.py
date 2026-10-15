@@ -17,59 +17,6 @@ def build_parser() -> argparse.ArgumentParser:
 	parser = argparse.ArgumentParser(
 		description="Train a PyTorch dense network on stock instances.",
 	)
-	parser.add_argument(
-		"--resume-directory",
-		type=str,
-		default=None,
-		help=(
-			"Path to a run-family directory to resume. When provided, other hyper-parameter "
-			"arguments are ignored and the script resumes from stored state."
-		),
-	)
-	parser.add_argument(
-		"--mode",
-		type=str,
-		default="train",
-		choices=["train", "memest"],
-		help="Run mode: train or memest (memory estimate only)",
-	)
-	parser.add_argument(
-		"--torch_interface-profiler",
-		action="store_true",
-		default=False,
-		help=(
-			"If set, enable torch_interface.profiler with CUDA memory profiling for a short window "
-			"so you can inspect which ops allocate GPU memory. "
-			"Produces traces viewable in TensorBoard."
-		),
-	)
-	parser.add_argument(
-		"--torch_interface-profiler-dir",
-		type=str,
-		default=os.path.join("data", "torch_profiler"),
-		help=(
-			"Output directory for torch_interface.profiler TensorBoard traces "
-			"(per-run subdirectories will be created under this)."
-		),
-	)
-	parser.add_argument(
-		"--torch_interface-profiler-wait",
-		type=int,
-		default=1,
-		help="Profiler schedule: number of initial steps to skip (wait phase).",
-	)
-	parser.add_argument(
-		"--torch_interface-profiler-warmup",
-		type=int,
-		default=1,
-		help="Profiler schedule: number of warmup steps before active profiling.",
-	)
-	parser.add_argument(
-		"--torch_interface-profiler-active",
-		type=int,
-		default=10,
-		help="Profiler schedule: number of active profiling steps.",
-	)
 	# Accept single int or inclusive range like "2-4" for multiple runs
 	parser.add_argument(
 		"--prior-days",
@@ -83,7 +30,7 @@ def build_parser() -> argparse.ArgumentParser:
 	parser.add_argument(
 		"--optimizer",
 		type=str,
-		default="adam",
+		default="adamw",
 		help=(
 			"Optimizer to use for training. "
 			"Accepts a single value or a comma-separated list for grid runs. "
@@ -91,10 +38,26 @@ def build_parser() -> argparse.ArgumentParser:
 		),
 	)
 	parser.add_argument(
+		"--bias",
+		type=str,
+		default="all",
+		help=(
+			"Bias configuration for the network. Accepts a single value or a "
+			"comma-separated list for grid runs. Supported: "
+			"none (no bias anywhere), "
+			"internal (only hidden layers), "
+			"noinput (internal + output), "
+			"nooutput (input + internal), "
+			"input (only input layer), "
+			"output (only output layer), "
+			"all (bias everywhere)"
+		),
+	)
+	parser.add_argument(
 		"--epochs",
-		type=int,
-		default=80,
-		help="Number of training epochs",
+		type=str,
+		default="80",
+		help="Number of training epochs; accepts a single value or a comma-separated list/range.",
 	)
 	parser.add_argument(
 		"--batch-size",
@@ -115,11 +78,21 @@ def build_parser() -> argparse.ArgumentParser:
 	# Learning rate scheduler adjustment parameter (ExponentialLR gamma)
 	parser.add_argument(
 		"--learning-rate-adjustment-parameter",
-		type=float,
-		default=1.0,
+		type=str,
+		default="1.0",
 		help=(
 			"Learning rate adjustment parameter used as gamma in ExponentialLR. "
-			"Controls per-epoch multiplicative decay of the learning rate."
+			"Controls per-epoch multiplicative decay of the learning rate. "
+			"Accepts a single value or a comma-separated list/range for sweeps."
+		),
+	)
+	parser.add_argument(
+		"--layer-normalization",
+		type=str,
+		default="True",
+		help=(
+			"Whether to include LayerNorm layers after each hidden layer. "
+			"Accepts True|False or a comma-separated list for grid runs."
 		),
 	)
 	parser.add_argument(
@@ -142,13 +115,19 @@ def build_parser() -> argparse.ArgumentParser:
 		help="Optional limit of DB rows during load (for debugging)",
 	)
 	parser.add_argument(
-		"--hidden-layers",
+		"--ticker-limit",
+		type=int,
+		default=None,
+		help="Optional limit of tickers returned (for debugging)",
+	)
+	parser.add_argument(
+		"--hidden-layer-size-list",
 		type=str,
-		default="6000",
+		default=None,
 		help=(
-			"Hidden layer configuration for MLP. Accepts a comma-separated list of "
-			"integers representing the number of nodes in each hidden layer "
-			"(e.g., '6000,3000,1000'). Defaults to input size if <=0 or empty."
+			"A semicolon-separated list of hidden layer configurations for parameter "
+			"sweeps (e.g., '6000,3000;4000,2000;2000'). If provided, it overrides "
+			"--hidden-layers."
 		),
 	)
 	# Accept single int or inclusive range like "2-4" for multiple runs
@@ -164,35 +143,15 @@ def build_parser() -> argparse.ArgumentParser:
 	parser.add_argument(
 		"--train-percent",
 		type=float,
-		default="0.95",
+		default="0.9",
 		help="percent of data to train on",
 	)
 	parser.add_argument(
 		"--val-percent",
 		type=float,
-		default="0.04",
+		default="0.08",
 		help="percent of data to use for validation",
 	)
-	# parser.add_argument(
-	# 	"--data-head-ignore-percent",
-	# 	type=float,
-	# 	default=0.0,
-	# 	help=(
-	# 		"Fraction [0.0-1.0] of the beginning of the dataset to ignore when "
-	# 		"choosing instances for train/val/test (e.g. 0.70 ignores the first "
-	# 		"70 percent of instances)."
-	# 	),
-	# )
-	# parser.add_argument(
-	# 	"--data-tail-ignore-percent",
-	# 	type=float,
-	# 	default=0.0,
-	# 	help=(
-	# 		"Fraction [0.0-1.0] of the *end* of the dataset to ignore when choosing "
-	# 		"instances for train/val/test (e.g. 0.10 ignores the last 10 percent of "
-	# 		"instances)."
-	# 	),
-	# )
 	parser.add_argument(
 		'--raw-train-start-with-special-characters','--train-start-date-id',
 		type=str,
@@ -409,7 +368,7 @@ def build_parser() -> argparse.ArgumentParser:
 	parser.add_argument(
 		"--trading-interval",
 		type=int,
-		default=0,
+		default=10,
 		help=(
 			"If > 0, run simulate_trading periodically during training after every "
 			"N epochs and write per-interval CSVs named "
@@ -443,7 +402,7 @@ def build_parser() -> argparse.ArgumentParser:
 		"--layer-types",
 		type=str,
 		default="linear",
-		help="Comma-separated list of layer types: linear, sparse-structured, sparse-random, transformer (e.g., linear,transformer,linear)",
+		help="Comma-separated list of layer types: linear, sparse-structured, sparse-random, random-percent, transformer (e.g., linear,transformer,linear)",
 	)
 	return parser
 

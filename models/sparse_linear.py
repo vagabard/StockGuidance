@@ -76,24 +76,23 @@ class SparseLinear(nn.Module):
 		return out
 
 
-class RandomPercentSparseLinear(SparseLinear):
+class RandomPercentLinear(nn.Linear):
 	"""
-	A subtype of SparseLinear that creates connections randomly based on a probability.
+	A subtype of nn.Linear that masks connections randomly based on a probability.
+	Each connection (i, j) is enabled independently with probability connection_probability.
 	"""
 	def __init__(self, input_size: int, output_size: int, connection_probability: float, bias: bool = True):
-		self.connection_probability = connection_probability
 		super().__init__(input_size, output_size, bias)
+		self.connection_probability = connection_probability
 
-	def create_indices(self) -> torch.Tensor:
-		num_possible_connections = self.input_size * self.output_size
-		num_connections = int(num_possible_connections * self.connection_probability)
+		# Create a fixed mask
+		# Each connection (i, j) has probability connection_probability of being 1
+		probs = torch.rand(output_size, input_size)
+		mask = (probs < connection_probability).float()
+		self.register_buffer('mask', mask)
 
-		if num_connections == 0:
-			return torch.empty((2, 0), dtype=torch.long)
-
-		output_indices = torch.randint(0, self.output_size, (num_connections,), dtype=torch.long)
-		input_indices = torch.randint(0, self.input_size, (num_connections,), dtype=torch.long)
-
-		indices = torch.stack([output_indices, input_indices])
-		return indices
+	def forward(self, x: torch.Tensor) -> torch.Tensor:
+		# Apply mask to weights before computation
+		masked_weight = self.weight * self.mask
+		return torch.nn.functional.linear(x, masked_weight, self.bias)
 

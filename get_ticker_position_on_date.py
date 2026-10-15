@@ -35,16 +35,19 @@ def get_ticker_positions(
               AND close IS NOT NULL
         """
         cur.execute(sql_all, (date_id,))
-        rows = cur.fetchall()
 
-        if not rows:
-            return {tid: 0.0 for tid in ticker_ids}
+        ticker_to_ratio = {}
+        pool_set = set(pool_ticker_ids) if pool_ticker_ids is not None else None
 
-        if pool_ticker_ids is not None:
-            pool_set = set(pool_ticker_ids)
-            ticker_to_ratio = {int(row[0]): float(row[1]) for row in rows if int(row[0]) in pool_set}
-        else:
-            ticker_to_ratio = {int(row[0]): float(row[1]) for row in rows}
+        while True:
+            rows = cur.fetchmany(1000)
+            if not rows:
+                break
+            for row in rows:
+                tid = int(row[0])
+                if pool_set is not None and tid not in pool_set:
+                    continue
+                ticker_to_ratio[tid] = float(row[1])
 
         if not ticker_to_ratio:
             return {tid: 0.0 for tid in ticker_ids}

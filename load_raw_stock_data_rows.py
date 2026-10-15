@@ -104,15 +104,19 @@ def fetch_as_numpy(
         ticker_ids: List[int] = []
         feats: List[List[float]] = []
 
-        for row in cur.fetchall():
-            # row order: ticker_id, date_id, open, close
-            tkr_id = int(row[0])
-            dt_id = int(row[1])
-            open_v = np.nan if row[2] is None else float(row[2])
-            close_v = np.nan if row[3] is None else float(row[3])
-            date_ids.append(dt_id)
-            ticker_ids.append(tkr_id)
-            feats.append([open_v, close_v])
+        while True:
+            rows = cur.fetchmany(10000)
+            if not rows:
+                break
+            for row in rows:
+                # row order: ticker_id, date_id, open, close
+                tkr_id = int(row[0])
+                dt_id = int(row[1])
+                open_v = np.nan if row[2] is None else float(row[2])
+                close_v = np.nan if row[3] is None else float(row[3])
+                date_ids.append(dt_id)
+                ticker_ids.append(tkr_id)
+                feats.append([open_v, close_v])
 
         keys = (
             np.stack(
@@ -170,11 +174,15 @@ def fetch_open_close_for_date_tickers(
         params = [int(date_id)] + tids
         cur.execute(sql, params)
         out: Dict[int, Tuple[float, float]] = {}
-        for row in cur.fetchall():
-            tkr_id = int(row[0])
-            open_v = np.nan if row[1] is None else float(row[1])
-            close_v = np.nan if row[2] is None else float(row[2])
-            out[tkr_id] = (open_v, close_v)
+        while True:
+            rows = cur.fetchmany(1000)
+            if not rows:
+                break
+            for row in rows:
+                tkr_id = int(row[0])
+                open_v = np.nan if row[1] is None else float(row[1])
+                close_v = np.nan if row[2] is None else float(row[2])
+                out[tkr_id] = (open_v, close_v)
         return out
     finally:
         try:

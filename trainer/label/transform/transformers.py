@@ -11,8 +11,14 @@ def zero_centered(stock_ids_and_features_and_label_by_date: Dict[int, List[Tuple
     """SET zero_centered_next_day_price_change = next_day_change_in_price - 1"""
     transformed = {}
     for date_id, rows in stock_ids_and_features_and_label_by_date.items():
-        transformed[date_id] = [(ticker_id, features, label - 1.0 if label is not None and not np.isnan(label) else label)
-                                for ticker_id, features, label in rows]
+        transformed_rows = []
+        for ticker_id, features, label in rows:
+            new_label = label - 1.0 if label is not None and not np.isnan(label) else label
+            new_features = list(features)
+            if len(new_features) > 0 and new_features[0] is not None and not np.isnan(new_features[0]):
+                new_features[0] = new_features[0] - 1.0
+            transformed_rows.append((ticker_id, new_features, new_label))
+        transformed[date_id] = transformed_rows
     return transformed
 
 def half_centered(stock_ids_and_features_and_label_by_date: Dict[int, List[Tuple[int, List[float], float]]], min_value_found: float = 0.0, max_value_found: float = 0.0) -> Dict[int, List[Tuple[int, List[float], float]]]:
@@ -25,8 +31,14 @@ def half_centered(stock_ids_and_features_and_label_by_date: Dict[int, List[Tuple
     """
     transformed = {}
     for date_id, rows in stock_ids_and_features_and_label_by_date.items():
-        transformed[date_id] = [(ticker_id, features, label - 0.5 if label is not None and not np.isnan(label) else label)
-                                for ticker_id, features, label in rows]
+        transformed_rows = []
+        for ticker_id, features, label in rows:
+            new_label = label - 0.5 if label is not None and not np.isnan(label) else label
+            new_features = list(features)
+            if len(new_features) > 0 and new_features[0] is not None and not np.isnan(new_features[0]):
+                new_features[0] = new_features[0] - 0.5
+            transformed_rows.append((ticker_id, new_features, new_label))
+        transformed[date_id] = transformed_rows
     return transformed
 
 def gapped01(stock_ids_and_features_and_label_by_date: Dict[int, List[Tuple[int, List[float], float]]], min_value_found: float = 0.0, max_value_found: float = 0.0) -> Dict[int, List[Tuple[int, List[float], float]]]:
@@ -47,7 +59,16 @@ def gapped01(stock_ids_and_features_and_label_by_date: Dict[int, List[Tuple[int,
                     new_label = 0.5 + label / (2 * (label + 1))
                 else:
                     new_label = 0.0 + label / (2 * (label + 1))
-            new_rows.append((ticker_id, features, new_label))
+
+            new_features = list(features)
+            if len(new_features) > 0 and new_features[0] is not None and not np.isnan(new_features[0]):
+                f0 = new_features[0]
+                if f0 >= 1:
+                    new_features[0] = 0.5 + f0 / (2 * (f0 + 1))
+                else:
+                    new_features[0] = 0.0 + f0 / (2 * (f0 + 1))
+
+            new_rows.append((ticker_id, new_features, new_label))
         transformed[date_id] = new_rows
     return transformed
 
@@ -55,9 +76,18 @@ def binary_labels(stock_ids_and_features_and_label_by_date: Dict[int, List[Tuple
     """CASE WHEN next_day_change_in_price >= 1 THEN 1 ELSE 0 END"""
     transformed = {}
     for date_id, rows in stock_ids_and_features_and_label_by_date.items():
-        transformed[date_id] = [(ticker_id, features, 1.0 if label >= 1.0 else 0.0)
-                                if label is not None and not np.isnan(label) else (ticker_id, features, label)
-                                for ticker_id, features, label in rows]
+        transformed_rows = []
+        for ticker_id, features, label in rows:
+            new_label = label
+            if label is not None and not np.isnan(label):
+                new_label = 1.0 if label >= 1.0 else 0.0
+
+            new_features = list(features)
+            if len(new_features) > 0 and new_features[0] is not None and not np.isnan(new_features[0]):
+                new_features[0] = 1.0 if new_features[0] >= 1.0 else 0.0
+
+            transformed_rows.append((ticker_id, new_features, new_label))
+        transformed[date_id] = transformed_rows
     return transformed
 
 def top_100_binary_labels(stock_ids_and_features_and_label_by_date: Dict[int, List[Tuple[int, List[float], float]]], min_value_found: float = 0.0, max_value_found: float = 0.0) -> Dict[int, List[Tuple[int, List[float], float]]]:
@@ -69,13 +99,23 @@ def top_100_binary_labels(stock_ids_and_features_and_label_by_date: Dict[int, Li
         valid_rows.sort(key=lambda x: x[2], reverse=True)
         top_100_tickers = {r[0] for r in valid_rows[:100]}
 
+        # Sort rows by feature0 descending for feature transformation
+        valid_rows_feat = [r for r in rows if len(r[1]) > 0 and r[1][0] is not None and not np.isnan(r[1][0])]
+        valid_rows_feat.sort(key=lambda x: x[1][0], reverse=True)
+        top_100_tickers_feat = {r[0] for r in valid_rows_feat[:100]}
+
         new_rows = []
         for ticker_id, features, label in rows:
             if label is None or np.isnan(label):
                 new_label = label
             else:
                 new_label = 1.0 if ticker_id in top_100_tickers else 0.0
-            new_rows.append((ticker_id, features, new_label))
+
+            new_features = list(features)
+            if len(new_features) > 0 and new_features[0] is not None and not np.isnan(new_features[0]):
+                new_features[0] = 1.0 if ticker_id in top_100_tickers_feat else 0.0
+
+            new_rows.append((ticker_id, new_features, new_label))
         transformed[date_id] = new_rows
     return transformed
 
@@ -124,7 +164,16 @@ def normalized_labels(stock_ids_and_features_and_label_by_date: Dict[int, List[T
                 new_label = 0.5 + 0.5 * (label - 1.0) / pos_range if pos_range > 0 else 0.5
             else:
                 new_label = 0.5 - 0.5 * (1.0 - label) / neg_range if neg_range > 0 else 0.5
-            new_rows.append((ticker_id, features, new_label))
+
+            new_features = list(features)
+            if len(new_features) > 0 and new_features[0] is not None and not np.isnan(new_features[0]):
+                f0 = new_features[0]
+                if f0 >= 1.0:
+                    new_features[0] = 0.5 + 0.5 * (f0 - 1.0) / pos_range if pos_range > 0 else 0.5
+                else:
+                    new_features[0] = 0.5 - 0.5 * (1.0 - f0) / neg_range if neg_range > 0 else 0.5
+
+            new_rows.append((ticker_id, new_features, new_label))
         transformed[date_id] = new_rows
     return transformed
 
@@ -142,10 +191,14 @@ def proportional_normalized_labels(stock_ids_and_features_and_label_by_date: Dic
 
     transformed = {}
     for date_id, rows in stock_ids_and_features_and_label_by_date.items():
-        transformed[date_id] = [
-            (ticker_id, features, 0.5 + (label - 1.0) / (2 * max_diff) if label is not None and not np.isnan(label) else label)
-            for ticker_id, features, label in rows
-        ]
+        transformed_rows = []
+        for ticker_id, features, label in rows:
+            new_label = 0.5 + (label - 1.0) / (2 * max_diff) if label is not None and not np.isnan(label) else label
+            new_features = list(features)
+            if len(new_features) > 0 and new_features[0] is not None and not np.isnan(new_features[0]):
+                new_features[0] = 0.5 + (new_features[0] - 1.0) / (2 * max_diff)
+            transformed_rows.append((ticker_id, new_features, new_label))
+        transformed[date_id] = transformed_rows
     return transformed
 
 def normalized_zero_centered(stock_ids_and_features_and_label_by_date: Dict[int, List[Tuple[int, List[float], float]]], min_value_found: float = 0.0, max_value_found: float = 0.0) -> Dict[int, List[Tuple[int, List[float], float]]]:
@@ -153,8 +206,14 @@ def normalized_zero_centered(stock_ids_and_features_and_label_by_date: Dict[int,
     norm_data = normalized_labels(stock_ids_and_features_and_label_by_date, min_value_found, max_value_found)
     transformed = {}
     for date_id, rows in norm_data.items():
-        transformed[date_id] = [(tid, feat, label * 2.0 - 1.0 if label is not None and not np.isnan(label) else label)
-                                for tid, feat, label in rows]
+        transformed_rows = []
+        for tid, feat, label in rows:
+            new_label = label * 2.0 - 1.0 if label is not None and not np.isnan(label) else label
+            new_feat = list(feat)
+            if len(new_feat) > 0 and new_feat[0] is not None and not np.isnan(new_feat[0]):
+                new_feat[0] = new_feat[0] * 2.0 - 1.0
+            transformed_rows.append((tid, new_feat, new_label))
+        transformed[date_id] = transformed_rows
     return transformed
 
 def proportional_normalized_zero_centered(stock_ids_and_features_and_label_by_date: Dict[int, List[Tuple[int, List[float], float]]], min_value_found: float = 0.0, max_value_found: float = 0.0) -> Dict[int, List[Tuple[int, List[float], float]]]:
@@ -162,8 +221,14 @@ def proportional_normalized_zero_centered(stock_ids_and_features_and_label_by_da
     norm_data = proportional_normalized_labels(stock_ids_and_features_and_label_by_date, min_value_found, max_value_found)
     transformed = {}
     for date_id, rows in norm_data.items():
-        transformed[date_id] = [(tid, feat, label * 2.0 - 1.0 if label is not None and not np.isnan(label) else label)
-                                for tid, feat, label in rows]
+        transformed_rows = []
+        for tid, feat, label in rows:
+            new_label = label * 2.0 - 1.0 if label is not None and not np.isnan(label) else label
+            new_feat = list(feat)
+            if len(new_feat) > 0 and new_feat[0] is not None and not np.isnan(new_feat[0]):
+                new_feat[0] = new_feat[0] * 2.0 - 1.0
+            transformed_rows.append((tid, new_feat, new_label))
+        transformed[date_id] = transformed_rows
     return transformed
 
 def proportional_normalized_zero_centered_gapped(stock_ids_and_features_and_label_by_date: Dict[int, List[Tuple[int, List[float], float]]], min_value_found: float = 0.0, max_value_found: float = 0.0) -> Dict[int, List[Tuple[int, List[float], float]]]:
@@ -171,8 +236,14 @@ def proportional_normalized_zero_centered_gapped(stock_ids_and_features_and_labe
     prop_norm_zero = proportional_normalized_zero_centered(stock_ids_and_features_and_label_by_date, min_value_found, max_value_found)
     transformed = {}
     for date_id, rows in prop_norm_zero.items():
-        transformed[date_id] = [(tid, feat, label *0.5 + 0.5*numpy.sign(label) if label is not None and not np.isnan(label) else label)
-                                for tid, feat, label in rows]
+        transformed_rows = []
+        for tid, feat, label in rows:
+            new_label = label * 0.5 + 0.5 * numpy.sign(label) if label is not None and not np.isnan(label) else label
+            new_feat = list(feat)
+            if len(new_feat) > 0 and new_feat[0] is not None and not np.isnan(new_feat[0]):
+                new_feat[0] = new_feat[0] * 0.5 + 0.5 * numpy.sign(new_feat[0])
+            transformed_rows.append((tid, new_feat, new_label))
+        transformed[date_id] = transformed_rows
     return transformed
 
 def normalized_half_centered(stock_ids_and_features_and_label_by_date: Dict[int, List[Tuple[int, List[float], float]]], min_value_found: float = 0.0, max_value_found: float = 0.0) -> Dict[int, List[Tuple[int, List[float], float]]]:

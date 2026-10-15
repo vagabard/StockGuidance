@@ -136,6 +136,12 @@ class FileStructureSingleRunHandler:
 
 		os.makedirs(self.run_group_dir, exist_ok=True)
 
+	def __repr__(self) -> str:
+		return f"FileStructureSingleRunHandler(run_group_dir={self.run_group_dir!r}, suffix={self.suffix!r}, metrics_file={self.metrics_file!r}, wrapper_path={self.wrapper_path!r}, parent_file_structure={self.parent_file_structure!r})"
+
+	def __str__(self) -> str:
+		return self.__repr__()
+
 	def to_dict(self) -> Dict[str, Any]:
 		"""Return a JSON-serialisable snapshot of the file structure.
 
@@ -219,10 +225,6 @@ class FileStructureSingleRunHandler:
 		metric_handler = MetricFileHandler(rep_count_file, header=MetricFileHandler.COUNT_METRICS_HEADER)
 		return metric_handler
 
-	def get_checkpoint_files_for_rep(self, repeat_index: int) -> Tuple[str, str]:
-		model_checkpoint = os.path.join(self.get_directory_for_rep(repeat_index), f"{self.suffix}_model_state.pt")
-		optimizer_checkpoint = os.path.join(self.get_directory_for_rep(repeat_index), f"{self.suffix}_optimizer_state.pt")
-		return model_checkpoint,optimizer_checkpoint
 
 
 __all__ = [FileStructureSingleRunHandler]

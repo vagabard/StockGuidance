@@ -71,6 +71,12 @@ class FileStructureFamilyRunHandler:
 		self.family_state_path = os.path.join(self.family_dir, "family_state.json")
 		os.makedirs(self.family_dir, exist_ok=True)
 
+	def __repr__(self) -> str:
+		return f"FileStructureFamilyRunHandler(family_dir={self.family_dir!r}, family_root_parent={self.family_root_parent!r}, family_state_path={self.family_state_path!r})"
+
+	def __str__(self) -> str:
+		return self.__repr__()
+
 	def to_dict(self) -> Dict[str, Any]:
 		"""Return a JSON-serialisable snapshot of the file structure.
 

@@ -1,7 +1,10 @@
 import argparse
 import os
+import psutil
 import random
 import re
+import subprocess
+import sys
 import threading
 import time
 import traceback
@@ -32,6 +35,8 @@ GLOBAL_DATA_CACHE: Dict[Tuple[str, int, int], Tuple[Dict, Dict, Dict]] = {}
 # Key: score_dir
 # Value: List of (name, is_dir) tuples
 GLOBAL_SCORE_FILE_CACHE: Dict[str, List[Tuple[str, bool]]] = {}
+
+USE_MULTIPROCESSING = True
 
 def _get_cached_entries(score_dir: str, force_refresh: bool = False) -> List[Tuple[str, bool]]:
 	"""Get list of (name, is_dir) in a directory, using a cache to avoid repeated OS calls."""
@@ -101,6 +106,9 @@ def perform_analysis_prefetch_scores(
 	if not all_feature_dates:
 		return {}, {}, {}
 
+	if dbinfo_file is None:
+		dbinfo_file = "dbinfo.id"
+
 	# We need data for feature_date_id (transactions) and trade_date_id (prices)
 	provider = dates_to_handle.provider
 	all_dates_provider = provider.cumulative_dates_for_train_validation_and_test_sets.tolist()
@@ -134,30 +142,34 @@ def perform_analysis_prefetch_scores(
 				   WHERE date_id BETWEEN %s AND %s \
 				   """
 		cur.execute(sql_data, (min_date, max_date))
-		rows = cur.fetchall()
 
-		for r_did, r_tid, r_open, r_close, r_trans in rows:
-			d_id = int(r_did)
-			t_id = int(r_tid)
+		while True:
+			rows = cur.fetchmany(10000)
+			if not rows:
+				break
 
-			# Store transactions for all dates in range
-			if d_id not in transactions_by_date:
-				transactions_by_date[d_id] = {}
-			if r_trans is not None:
-				transactions_by_date[d_id][t_id] = float(r_trans)
+			for r_did, r_tid, r_open, r_close, r_trans in rows:
+				d_id = int(r_did)
+				t_id = int(r_tid)
 
-			# Store price/ratio data if open > 0
-			if r_open is not None and r_open > 0 and r_close is not None:
-				r_o = float(r_open)
-				r_c = float(r_close)
+				# Store transactions for all dates in range
+				if d_id not in transactions_by_date:
+					transactions_by_date[d_id] = {}
+				if r_trans is not None:
+					transactions_by_date[d_id][t_id] = float(r_trans)
 
-				if d_id not in all_ratios_by_date:
-					all_ratios_by_date[d_id] = {}
-				all_ratios_by_date[d_id][t_id] = r_c / r_o
+				# Store price/ratio data if open > 0
+				if r_open is not None and r_open > 0 and r_close is not None:
+					r_o = float(r_open)
+					r_c = float(r_close)
 
-				if d_id not in price_data_by_date:
-					price_data_by_date[d_id] = {}
-				price_data_by_date[d_id][t_id] = (r_o, r_c)
+					if d_id not in all_ratios_by_date:
+						all_ratios_by_date[d_id] = {}
+					all_ratios_by_date[d_id][t_id] = r_c / r_o
+
+					if d_id not in price_data_by_date:
+						price_data_by_date[d_id] = {}
+					price_data_by_date[d_id][t_id] = (r_o, r_c)
 
 		print(f"DEBUG: [perform_analysis_prefetch_scores] Pre-fetched data for {len(transactions_by_date)} dates.")
 
@@ -166,6 +178,8 @@ def perform_analysis_prefetch_scores(
 
 	except Exception as e:
 		print(f"Warning: Failed to pre-fetch data: {e}")
+		traceback.print_exc(e)
+
 	finally:
 		if 'conn' in locals() and conn:
 			conn.close()
@@ -180,6 +194,8 @@ def calculate_scores(
 	dbinfo_file: str = "dbinfo.id",
 ) -> None:
 	"""Step 1: Calculate and save recommendation scores for all dates and networks."""
+	if dbinfo_file is None:
+		dbinfo_file = "dbinfo.id"
 	total_recommenders = len(stock_recommenders)
 	with torch.no_grad():
 		for r_idx, stock_recommender in enumerate(stock_recommenders):
@@ -212,6 +228,8 @@ def perform_analysis(
 	force: bool = False,
 ) -> str:
 	"""Step 2: Use saved scores to generate recommendations and update portfolio."""
+	if dbinfo_file is None:
+		dbinfo_file = "dbinfo.id"
 	out_paths = []
 	epoch_name = str(out_filename_suffix).replace("_epoch_", "") if out_filename_suffix else ""
 
@@ -266,6 +284,7 @@ def perform_analysis(
 		# Single recommender task
 		rec = stock_recommenders[0]
 		out_name = f"stock_simulation_{stock_simulation_size}{out_filename_suffix or ''}.csv"
+		print(f"DEBUG: [perform_analysis] Single recommender task: {out_name} for directory {rec.get_output_directory()}  type of rec {type(rec)}")
 		out_path = os.path.join(rec.get_output_directory(), out_name)
 		tasks.append((out_path, [rec], rec))
 
@@ -459,7 +478,6 @@ def _find_score_file(score_dir: str, feature_date_id: int, epoch_name: str) -> O
 	]
 
 	if not found_files:
-		print(f"Warning: No score file found for date {feature_date_id} in {score_dir} (prefix: {prefix})")
 		return None
 
 	if len(found_files) > 1:
@@ -535,6 +553,8 @@ def simulate(
 	force: bool = False,
 ) -> str:
 	"""Run a trading simulation for a single model or an ensemble of models."""
+	if dbinfo_file is None:
+		dbinfo_file = "dbinfo.id"
 	epoch_name = str(out_filename_suffix).replace("_epoch_", "") if out_filename_suffix else ""
 
 	print(f"Step 1: Calculating scores for epoch {epoch_name}...")
@@ -602,6 +622,11 @@ def parse_args(argv: Optional[List[str]] = None):
 		"--force",
 		action="store_true",
 		help="Force recalculation even if simulation results already exist.",
+	)
+	p.add_argument(
+		"--internal-call",
+		action="store_true",
+		help="Internal flag used during multiprocessing to avoid recursion.",
 	)
 	return p.parse_args(argv)
 
@@ -828,6 +853,15 @@ def generate_simulations_from_directories(
 	Handles family, single run (ensemble), and rep directories.
 	"""
 	all_generated = []
+	all_processes = []
+
+	def _collect(res):
+		paths, proc_info = res
+		all_generated.extend(paths)
+		if proc_info:
+			proc, info = proc_info
+			all_processes.append(proc)
+
 	for d in directories:
 		if not os.path.isdir(d):
 			print(f"Warning: {d} is not a directory. Skipping.")
@@ -843,27 +877,44 @@ def generate_simulations_from_directories(
 			all_generated.extend(temp_generated)
 		elif is_ensemble_directory_given(d, force_refresh=force):
 			print(f"Processing ensemble directory: {d}")
-			# Generate simulations for the ensemble itself and its reps (if requested)
-			temp_generated = handle_single_run_directory(d, top_k, dbinfo_file, only_ensemble, force=force)
-			all_generated.extend(temp_generated)
+			# Find all rep subdirectories and spawn a process for each
+			entries = _get_cached_entries(d)
+			rep_dirs = []
+			for name, is_dir in sorted(entries):
+				if is_dir and name.lower().startswith("rep") and name[3:].isdigit():
+					rep_dirs.append(os.path.join(d, name))
+
+			for rd in rep_dirs:
+				print(f"Processing rep directory within ensemble: {rd}")
+				_collect(handle_single_run_directory(rd, top_k, dbinfo_file, only_ensemble, force=force))
+
+			# Also handle the ensemble directory itself for ensemble-level scores
+			if not only_ensemble:
+				print(f"Processing ensemble itself: {d}")
+				_collect(handle_single_run_directory(d, top_k, dbinfo_file, only_ensemble, force=force))
+			else:
+				print(f"Skipping ensemble itself as only_ensemble is True: {d}")
 		elif is_rep_directory(d, force_refresh=force):
 			# If rep directories, the list should repeatedly call a method to generate simulations from a rep directory.
 			print(f"Processing rep directory: {d}")
-			temp_generated = _run_simulation_for_single_or_ensemble(d, top_k, dbinfo_file, only_ensemble, force=force)
-			all_generated.extend(temp_generated)
+			_collect(handle_single_run_directory(d, top_k, dbinfo_file, only_ensemble, force=force))
+		elif _find_single_run_path(d) or _dir_has_model(d):
+			print(f"Processing single run directory: {d}")
+			_collect(handle_single_run_directory(d, top_k, dbinfo_file, only_ensemble, force=force))
 		else:
 			print(f"INVALID DIRECTORY: {d}")
-			# Or if it's just a plain single run directory without reps.
-			# Try treating it as a single run anyway if it has a manifest or json
-			if _find_single_run_path(d) or _dir_has_model(d):
-				print(f"Processing single run directory: {d}")
-				all_generated.extend(_run_simulation_for_single_or_ensemble(d, top_k, dbinfo_file, only_ensemble, force=force))
-			else:
-				print(f"INVALID DIRECTORY: {d}")
-				# Don't raise error, just skip
-				# raise ValueError(f"Invalid directory: {d}")
+			# Don't raise error, just skip
+
+	# Wait for all processes to finish
+	for p in all_processes:
+		p.wait()
 
 	return all_generated
+
+
+def wait_for_subprocesses():
+	"""No longer needed as jobs are executed synchronously."""
+	pass
 
 
 def run_simulation_from_saved_scores(
@@ -878,6 +929,8 @@ def run_simulation_from_saved_scores(
 	Scans the run_dir for all epochs that have saved scores and generates
 	the corresponding stock_simulation_*.csv files.
 	"""
+	if dbinfo_file is None:
+		dbinfo_file = "dbinfo.id"
 	return generate_simulations_from_directories([run_dir], top_k, dbinfo_file, only_ensemble, force=force)
 
 
@@ -912,17 +965,84 @@ def find_sub_runs_for_given_run_directory(run_dir: str, sub_runs: list[Any]):
 			sub_runs.append(full_entry)
 
 
+def _count_python_processes() -> int:
+	"""Count the number of running Python processes."""
+	count = 0
+	for proc in psutil.process_iter(['name']):
+		try:
+			if proc.info['name'] and 'python' in proc.info['name'].lower():
+				count += 1
+		except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+			pass
+	return count
+
+
 def handle_single_run_directory(
 	run_dir: str,
 	top_k: List[int] = [1, 3, 5, 10],
 	dbinfo_file: str = "dbinfo.id",
 	only_ensemble: bool = False,
 	force: bool = False,
-) -> List[str]:
+) -> Tuple[List[str], Optional[Tuple[subprocess.Popen, Dict[str, Any]]]]:
 	"""
-	Generate simulations for a single run directory, including ensemble if applicable.
+	Executes the simulation subprocess when resources are available.
+	Returns a tuple of (generated_paths, subprocess_info_tuple).
+	subprocess_info_tuple is (subprocess_handle, info_dict).
 	"""
-	return _run_simulation_for_single_or_ensemble(run_dir, top_k, dbinfo_file, only_ensemble, force=force)
+	if not USE_MULTIPROCESSING:
+		print(f"USE_MULTIPROCESSING is False. Running simulation for {run_dir} in current process.")
+		return _run_simulation_for_single_or_ensemble(run_dir, top_k, dbinfo_file, only_ensemble, force=force), None
+
+	# Resource limits
+	MIN_FREE_GB = 10.0
+	MAX_CPU_USAGE = 95.0
+	MAX_PYTHON_PROCS = 30
+
+	while True:
+		mem = psutil.virtual_memory()
+		cpu_usage = psutil.cpu_percent(interval=0.1)
+		free_gb = mem.available / (1024 ** 3)
+		python_proc_count = _count_python_processes()
+
+		can_start = free_gb >= MIN_FREE_GB and cpu_usage < MAX_CPU_USAGE and python_proc_count < MAX_PYTHON_PROCS
+
+		if can_start:
+			print(f"Resources sufficient ({free_gb:.1f}GB free, {cpu_usage}% CPU, {python_proc_count} python procs). Spawning subprocess for {run_dir}...")
+
+			cmd = [
+				sys.executable,
+				os.path.abspath(__file__),
+				run_dir,
+				"--top-k", ",".join(map(str, top_k)),
+				"--dbinfo-file", dbinfo_file,
+				"--from-saved-scores",
+				"--internal-call"
+			]
+			if only_ensemble:
+				cmd.append("--only-ensemble")
+			if force:
+				cmd.append("--force")
+
+			print(f"DEBUG: Starting job for {run_dir} with command: {' '.join(cmd)}")
+			try:
+				p = subprocess.Popen(cmd)
+				print(f"DEBUG: Spawned subprocess PID: {p.pid} for {run_dir}")
+				info = {
+					"run_dir": run_dir,
+					"cmd": cmd,
+					"top_k": top_k,
+					"dbinfo_file": dbinfo_file,
+					"only_ensemble": only_ensemble,
+					"force": force
+				}
+				return [], (p, info)
+			except Exception as e:
+				print(f"Failed to execute subprocess for {run_dir}: {e}")
+				return [], None
+		else:
+			wait_time = random.uniform(0, 2)
+			# print(f"Resources busy ({free_gb:.1f}GB free, {cpu_usage}% CPU, {python_proc_count} procs). Waiting {wait_time:.2f}s...")
+			time.sleep(wait_time)
 
 
 @line_profiler.profile
@@ -934,6 +1054,8 @@ def _run_simulation_for_single_or_ensemble(
 	force: bool = False,
 ) -> List[str]:
 	"""Internal helper to process a single run or an ensemble directory."""
+	if dbinfo_file is None:
+		dbinfo_file = "dbinfo.id"
 	from trainer.state.single_run import SingleRun
 	from trainer.datasets import IndexDataset
 	from training_instance_provider import TrainingInstanceProvider
@@ -983,7 +1105,11 @@ def _run_simulation_for_single_or_ensemble(
 				max_net_idx = max(max_net_idx, int(m.group(1)))
 
 	if max_net_idx >= 0:
-		if is_ensemble_directory_given(run_dir):
+		is_ens = is_ensemble_directory_given(run_dir)
+		is_fam = is_family_directory(run_dir)
+		# If it's an ensemble (has rep directories), we want the first recommender
+		# to represent the ensemble (saving to run_dir).
+		if is_ens or (not is_fam and os.path.isdir(os.path.join(run_dir, "rep1"))):
 			# In an ensemble, the first recommender in the list passed to perform_analysis
 			# is treated as the "parent" where ensemble results are saved.
 			# We want it to point to run_dir.
@@ -1005,6 +1131,7 @@ def _run_simulation_for_single_or_ensemble(
 	# 3. Setup Data Provider
 	first_recommender = recommenders[0]
 	start_prov = time.perf_counter()
+	cache_dir = find_cache_directory(run_dir)
 	provider = TrainingInstanceProvider(
 		dbinfo_file=dbinfo_file,
 		current_day_change=first_recommender.get_current_day_change_used(),
@@ -1014,6 +1141,7 @@ def _run_simulation_for_single_or_ensemble(
 		day_change_centered=first_recommender.get_day_change_centered(),
 		start_date_id=single_run.train_validation_test_sets_start_date_id,
 		end_date_id=single_run.train_validation_test_sets_end_date_id,
+		cache_dir=cache_dir
 	)
 	provider.set_how_many_days_in_past_to_use(first_recommender.get_required_previous_days())
 	print(f"DEBUG: [run_simulation_from_saved_scores] TrainingInstanceProvider initialized in {time.perf_counter() - start_prov:.2f}s")
@@ -1051,6 +1179,30 @@ def _run_simulation_for_single_or_ensemble(
 	return generated_paths
 
 
+def find_cache_directory(model_path: str) -> str:
+	"""
+	Search up the directory tree from model_path to find a directory starting with 'run_family'.
+	Returns the path to the 'cache' subdirectory within that 'run_family' directory.
+	Raises Exception if no such directory is found.
+	"""
+	current = os.path.abspath(model_path)
+	if not os.path.isdir(current):
+		current = os.path.dirname(current)
+
+	while True:
+		basename = os.path.basename(current)
+		if basename.startswith("run_family"):
+			cache_dir = os.path.join(current, "cache")
+			return cache_dir
+
+		parent = os.path.dirname(current)
+		if parent == current: # Reached root
+			break
+		current = parent
+
+	raise Exception("Cache directory not found")
+
+
 def main(argv: Optional[List[str]] = None) -> None:
 	args = parse_args(argv)
 	print(f"Starting simulation with args: {args}")
@@ -1059,13 +1211,22 @@ def main(argv: Optional[List[str]] = None) -> None:
 	top_k_parsed = parse_int_list(args.top_k, "top-k")
 
 	if args.from_saved_scores:
-		generate_simulations_from_directories(
-			[args.model],
-			top_k=top_k_parsed,
-			dbinfo_file=args.dbinfo_file,
-			only_ensemble=args.only_ensemble,
-			force=args.force,
-		)
+		if args.internal_call:
+			_run_simulation_for_single_or_ensemble(
+				args.model,
+				top_k=top_k_parsed,
+				dbinfo_file=args.dbinfo_file,
+				only_ensemble=args.only_ensemble,
+				force=args.force,
+			)
+		else:
+			generate_simulations_from_directories(
+				[args.model],
+				top_k=top_k_parsed,
+				dbinfo_file=args.dbinfo_file,
+				only_ensemble=args.only_ensemble,
+				force=args.force,
+			)
 		return
 
 	model_arg = args.model
@@ -1090,6 +1251,7 @@ def main(argv: Optional[List[str]] = None) -> None:
 	# Note: We don't have start_date_id/end_date_id from CLI, so we load everything
 	# and then filter by date-range if provided.
 	from training_instance_provider import TrainingInstanceProvider
+	cache_dir = find_cache_directory(args.model)
 	provider = TrainingInstanceProvider(
 		dbinfo_file=args.dbinfo_file,
 		limit=args.limit,
@@ -1098,6 +1260,7 @@ def main(argv: Optional[List[str]] = None) -> None:
 		vwap_ratio=first_recommender.get_vwap_ratio_used(),
 		tranaction_ratio=first_recommender.get_tranaction_ratio_used(),
 		day_change_centered=first_recommender.get_day_change_centered(),
+		cache_dir=cache_dir
 	)
 	provider.set_how_many_days_in_past_to_use(first_recommender.get_required_previous_days())
 

@@ -12,7 +12,7 @@ except Exception:  # pragma: no cover
 
 from typing import Callable, List, Optional, Union
 
-from .sparse_linear import SparseLinear, RandomPercentSparseLinear
+from .sparse_linear import SparseLinear, RandomPercentLinear
 
 
 class TransformerLayer(nn.Module):
@@ -112,12 +112,17 @@ class MultiLayerLinearNet(nn.Module):
 		num_layers: int = 3,
 		layer_types: Optional[List[str]] = None,
 		sequence_length: int = 1,
+		bias_mode: str = "all",
+		layer_normalization: bool = True,
 	):
 		super().__init__()
 		self.input_size = input_size
 		self.output_size = output_size
 		self.layer_types = layer_types
 		self.sequence_length = sequence_length
+		self.num_layers = int(num_layers) if num_layers is not None else (len(hidden_layers) + 1 if len(hidden_layers) > 1 else 3)
+		self.bias_mode = bias_mode.lower()
+		self.layer_normalization = layer_normalization
 		# Default activation factory to ReLU if not provided
 		if activation_factory is None:
 			activation_factory = lambda: nn.ReLU()
@@ -136,7 +141,7 @@ class MultiLayerLinearNet(nn.Module):
 
 		# Build sequence of Linear and activation layers according to num_layers
 		layers = []
-		n = int(num_layers) if num_layers is not None else (len(widths) + 1 if len(widths) > 1 else 3)
+		n = self.num_layers
 
 		if n <= 1:
 			# Degenerate case: direct linear mapping
@@ -152,12 +157,12 @@ class MultiLayerLinearNet(nn.Module):
 		first_layer = self._create_layer(input_size, widths[0], 0)
 		layers.append(first_layer)
 		# Add LayerNorm after the very first linear layer if model is massive
-		if input_size > 5000:
+		if self.layer_normalization and input_size > 5000:
 			layers.append(nn.LayerNorm(widths[0]))
 
 		# Peek at first hidden layer activation
 		sample_act = activation_factory()
-		from . import SigmoidRange, xavier_init_weights
+		from . import SigmoidRange
 
 		layers.append(sample_act)
 
@@ -166,22 +171,12 @@ class MultiLayerLinearNet(nn.Module):
 			next_layer = self._create_layer(widths[i], widths[i+1], i + 1)
 			layers.append(next_layer)
 			# Add LayerNorm for massive models to prevent activation explosion/vanishing
-			if input_size > 5000:
+			if self.layer_normalization and input_size > 5000:
 				layers.append(nn.LayerNorm(widths[i+1]))
 			layers.append(activation_factory())
 
 		# Final output layer: widths[-1] -> output
-		last_layer = self._create_layer(widths[-1], output_size, n - 1)
-		layers.append(last_layer)
-
-		# Add a tiny bias if Xavier initialized to prevent all-zeros initially
-		if isinstance(sample_act, (nn.Sigmoid, nn.Tanh, SigmoidRange)):
-			if hasattr(last_layer, 'bias') and last_layer.bias is not None:
-				nn.init.uniform_(last_layer.bias, -1e-4, 1e-4)
-		else:
-			# For ReLU and others, ensure we don't start with all-zero bias if it helps
-			if hasattr(last_layer, 'bias') and last_layer.bias is not None:
-				nn.init.uniform_(last_layer.bias, -1e-4, 1e-4)
+		layers.append(self._create_layer(widths[-1], output_size, n - 1))
 
 		if final_activation is not None:
 			fa = final_activation()
@@ -189,17 +184,37 @@ class MultiLayerLinearNet(nn.Module):
 
 		self.net = nn.Sequential(*layers)
 
-		# Apply Xavier initialization if sigmoid, tanh or sigmoid_range is used
-		# We check if activation_factory produces one of these
-		if isinstance(sample_act, (nn.Sigmoid, nn.Tanh, SigmoidRange)):
-			self.apply(xavier_init_weights)
-			# Re-apply the tiny bias noise because self.apply(xavier_init_weights) zeroed it
-			if hasattr(last_layer, 'bias') and last_layer.bias is not None:
-				nn.init.uniform_(last_layer.bias, -1e-4, 1e-4)
-		else:
-			# For ReLU and others, we already applied the tiny bias above.
-			# But we want to ensure it's not zeroed if any other initialization is added here.
-			pass
+		# Initialize dense linear layers according to the hidden activation family.
+		# Sparse layers are intentionally left to their own reset logic.
+		self._initialize_linear_layers(sample_act, SigmoidRange)
+
+	def _initialize_linear_layers(self, sample_act: nn.Module, sigmoid_range_type: type) -> None:
+		init_family = self._resolve_init_family(sample_act, sigmoid_range_type)
+		for layer in self.net:
+			if not self._is_linear_like(layer) or isinstance(layer, (SparseLinear, RandomPercentLinear, TransformerLayer)):
+				continue
+
+			if init_family == "xavier":
+				nn.init.xavier_uniform_(layer.weight)
+			elif init_family == "kaiming_leaky_relu":
+				negative_slope = float(getattr(sample_act, "negative_slope", 0.01))
+				nn.init.kaiming_uniform_(layer.weight, a=negative_slope, mode="fan_in", nonlinearity="leaky_relu")
+			else:
+				# ReLU-style Kaiming is a practical default for ReLU/GELU/SiLU-like activations.
+				nn.init.kaiming_uniform_(layer.weight, a=0.0, mode="fan_in", nonlinearity="relu")
+
+			if layer.bias is not None:
+				nn.init.zeros_(layer.bias)
+
+	def _resolve_init_family(self, sample_act: nn.Module, sigmoid_range_type: type) -> str:
+		if isinstance(sample_act, (nn.Sigmoid, nn.Tanh, nn.Tanhshrink, sigmoid_range_type)):
+			return "xavier"
+		if isinstance(sample_act, nn.LeakyReLU):
+			return "kaiming_leaky_relu"
+		if isinstance(sample_act, (nn.ReLU, nn.ReLU6, nn.GELU, nn.SiLU, nn.ELU, nn.CELU)):
+			return "kaiming_relu"
+		# Fallback for unknown/novel activations.
+		return "xavier"
 
 	def _create_layer(self, in_features: int, out_features: int, layer_index: int) -> nn.Module:
 		if self.layer_types:
@@ -209,22 +224,46 @@ class MultiLayerLinearNet(nn.Module):
 		else:
 			ltype = "linear"
 
+		# Determine if this layer should have a bias based on bias_mode
+		# bias_mode choices: none, internal, noinput, nooutput, input, output, all
+		is_input_layer = (layer_index == 0)
+		is_output_layer = (layer_index == self.num_layers - 1)
+		is_internal_layer = not (is_input_layer or is_output_layer)
+
+		use_bias = True
+		if self.bias_mode == "none":
+			use_bias = False
+		elif self.bias_mode == "internal":
+			use_bias = is_internal_layer
+		elif self.bias_mode == "noinput":
+			use_bias = not is_input_layer
+		elif self.bias_mode == "nooutput":
+			use_bias = not is_output_layer
+		elif self.bias_mode == "input":
+			use_bias = is_input_layer
+		elif self.bias_mode == "output":
+			use_bias = is_output_layer
+		elif self.bias_mode == "all":
+			use_bias = True
+
 		if ltype == "linear":
-			return nn.Linear(in_features, out_features)
+			return nn.Linear(in_features, out_features, bias=use_bias)
 		elif ltype == "sparse-structured":
-			return SparseLinear(in_features, out_features)
+			return SparseLinear(in_features, out_features, bias=use_bias)
+		elif ltype == "random-percent":
+			# Using a default probability of 0.4 as per issue description example
+			return RandomPercentLinear(in_features, out_features, connection_probability=0.4, bias=use_bias)
 		elif ltype == "sparse-random":
 			# Using a default probability of 0.1 for sparse-random if not specified
-			# The issue didn't specify how to pass parameters to these types
-			return RandomPercentSparseLinear(in_features, out_features, connection_probability=0.1)
+			return RandomPercentLinear(in_features, out_features, connection_probability=0.1, bias=use_bias)
 		elif ltype == "transformer":
 			return TransformerLayer(in_features, out_features, sequence_length=self.sequence_length)
 		else:
 			# Fallback to linear
-			return nn.Linear(in_features, out_features)
+			return nn.Linear(in_features, out_features, bias=use_bias)
 
 	def _is_linear_like(self, layer: nn.Module) -> bool:
-		return isinstance(layer, (nn.Linear, SparseLinear, TransformerLayer))
+		return isinstance(layer, (nn.Linear, SparseLinear, RandomPercentLinear, TransformerLayer))
 
 	def forward(self, x: Tensor) -> Tensor:
 		if x.dim() == 1:

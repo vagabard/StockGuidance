@@ -35,6 +35,7 @@ from viewers.compare_runs_shared import (
 	save_preference,
 	render_run_grid,
 	discover_best_run_dir,
+	RunSelectorSidebar,
 )
 from database.db_connect import get_connection
 
@@ -232,62 +233,39 @@ def _run_as_script():
 		print("Install with: pip install streamlit pandas")
 		return
 
+	# 1) Get preferences
+	prefs = load_preferences()
+
 	st.set_page_config(page_title="Training Runs Viewer", layout="wide")
 
-	# Sidebar: base directory
-	default_base = os.path.join(os.getcwd(), "../data")
-	# Prefer project default path if running elsewhere
-	win_default = r"C:\\Projects\\StockGuidance\\data"
-	base_dir = st.sidebar.text_input("Base data directory", value=(win_default if os.path.isdir(win_default) else default_base))
-	st.session_state["crv_base_dir"] = base_dir
+	# Use the shared RunSelectorSidebar
+	selector = RunSelectorSidebar(key_prefix="crv")
+	selected_runs = selector.render()
 
+	if selected_runs is None:
+		st.info("Select filters in the sidebar and click 'Show Runs' to compare.")
+		return
+
+	base_dir = st.session_state["crv_base_dir"]
 	runs = scan_runs(base_dir)
 
-	# --- Filtering based on "Runs with simulation" checkbox ---
-	st.sidebar.subheader("Filter options")
-
-	# Initialise session state from preferences on first load
-	prefs = load_preferences()
-	if "crv_sim_only" not in st.session_state:
-		st.session_state["crv_sim_only"] = prefs.get("crv_sim_only", False)
-
-	sim_only = st.sidebar.checkbox(
-		"Runs with simulation",
-		value=st.session_state["crv_sim_only"],
-		key="crv_sim_only",
-		on_change=lambda: save_preference("crv_sim_only", st.session_state["crv_sim_only"]),
-	)
-
-	if sim_only:
-		filtered_runs = []
-		for rel, params in runs:
-			# Check if either the run directory itself or its parent timestamp directory has simulation files
-			# rel is typically "timestamp/repN" or just "timestamp"
-			run_path = os.path.join(base_dir, rel)
-			ts_name = params.get("_ts")
-			ts_path = os.path.join(base_dir, ts_name) if ts_name else None
-
-			if has_any_simulation_files(run_path) or (ts_path and has_any_simulation_files(ts_path)):
-				filtered_runs.append((rel, params))
-		runs = filtered_runs
-
-	# Group discovered runs by their timestamp directory so that the UI can
-	# present a single entry per timestamp (e.g. "20251124_031117") even when
-	# multiple rep* sub‑runs exist underneath it. Charts and stock simulation
-	# views can still fan out to all reps within a selected timestamp.
+	# Build a mapping from timestamp to run info for the selected runs
 	ts_to_runs = group_runs_by_timestamp(runs)
 
-	# Use timestamp keys sorted so that the most recent runs appear first.
-	# Since the directories are named using a ``YYYYMMDD_HHMMSS`` pattern,
-	# simple reverse lexicographical ordering corresponds to descending
-	# chronological order.
-	timestamp_names: List[str] = sorted(ts_to_runs.keys(), reverse=True)
-
-	# Derive "run families" based on the first subdirectory level.
+	# Derive "run families" based on the first subdirectory level for the WHOLE dataset
+	# because the sidebar selector might still need them, or the user might want to see
+	# the context of families even if only some runs are selected.
 	family_to_ts, family_names = build_run_families(
 		runs,
 		require_multiple_param_sets=False,
 	)
+	timestamp_names: List[str] = sorted(ts_to_runs.keys(), reverse=True)
+
+	# Filter ts_to_runs to only include selected_runs for the main display
+	filtered_ts_to_runs = {ts: ts_to_runs[ts] for ts in selected_runs if ts in ts_to_runs}
+	ts_to_runs = filtered_ts_to_runs
+	# Update timestamp_names to only include those in the filtered set for the rest of the UI
+	timestamp_names = sorted(ts_to_runs.keys(), reverse=True)
 
 	st.title("Compare Training Runs")
 	st.caption("Scan a data folder of timestamped run directories and compare run parameters.")
@@ -295,8 +273,18 @@ def _run_as_script():
 	# ------------------------------------------------------------------
 	# Navigation support from dashboard
 	# ------------------------------------------------------------------
-	if "crv_families" in st.session_state and "crv_families_init" not in st.session_state:
-		st.session_state["crv_families_init"] = True
+	fam_key = "crv_families"
+	if fam_key in st.session_state:
+		if "crv_families_init" not in st.session_state:
+			st.session_state["crv_families_init"] = True
+
+		# If the family selection changed, we want to re-trigger the auto-population of builds.
+		last_fam_key = "crv_last_families_selection"
+		if last_fam_key not in st.session_state:
+			st.session_state[last_fam_key] = st.session_state[fam_key]
+		elif st.session_state[last_fam_key] != st.session_state[fam_key]:
+			st.session_state["crv_families_init"] = True
+			st.session_state[last_fam_key] = st.session_state[fam_key]
 
 	# --- Persistent viewer/session state ---
 	if "viewer_metric_checks" not in st.session_state:
@@ -338,7 +326,7 @@ def _run_as_script():
 		# Keep last sidebar selection for other panels in this viewer.
 		st.session_state["crv_runs_selected"] = list(selected_runs)
 
-	selected_builds, selected_families, _available_builds = sidebar_family_and_build_selector(
+	res_runs, selected_families, _available_builds = sidebar_family_and_build_selector(
 		timestamp_names=timestamp_names,
 		family_names=family_names,
 		family_to_ts=family_to_ts,
@@ -347,6 +335,8 @@ def _run_as_script():
 		empty_builds_means_all=False,
 		on_runs_updated=update_list_of_runs_selected,
 	)
+
+	selected_builds = res_runs
 
 	# Do not populate the main window until at least one family is selected.
 	if not selected_families:
@@ -431,49 +421,52 @@ def _run_as_script():
 		df=df,
 		key_prefix="crv",
 		prefs=prefs,
-		default_visible_cols=["run", "run_timestamp"] + [c for c in df.columns if c not in ["run", "run_timestamp", "_variant", "_ts", "run_id", "activation", "final_activation", "optimizer", "optimizer_list"]],
+		default_visible_cols=["run", "run_timestamp", "epochs", "epoch"] + [c for c in df.columns if c not in ["run", "run_timestamp", "epochs", "epoch", "_variant", "_ts", "run_id", "activation", "final_activation", "optimizer", "optimizer_list"]],
 		return_all_if_none=False
 	)
 
-	if st.button("Generate simulations from saved scores", help="For selected runs, look for saved scores and generate stock_simulation_*.csv files"):
-		if not selected_runs_from_grid:
-			st.warning("Please select at least one run in the table above.")
-		else:
-			status_text = st.empty()
-
-			# We need the full paths for selected runs.
-			# selected_runs_from_grid are IDs from the grid (usually timestamp names or _dir).
-			paths_to_process = []
-			for rid in selected_runs_from_grid:
-				# Find the original row to get the full _dir
-				match = next((r for r in display_rows if (r.get("_ts") or r.get("_dir")) == rid), None)
-				if match and match.get("_dir"):
-					p = os.path.normpath(os.path.join(base_dir, match["_dir"]))
-					if os.path.isdir(p):
-						# Ensure we only process single run (ensemble) directories
-						p = get_single_run_directory(p)
-						if p not in paths_to_process:
-							paths_to_process.append(p)
-				else:
-					# Fallback to direct join if not found in display_rows
-					p = os.path.normpath(os.path.join(base_dir, rid))
-					if os.path.isdir(p):
-						p = get_single_run_directory(p)
-						if p not in paths_to_process:
-							paths_to_process.append(p)
-
-			if not paths_to_process:
-				st.warning(f"No directories found for selection: {selected_runs_from_grid}")
+	col_sim_1, col_sim_2 = st.columns([1, 0.5])
+	with col_sim_1:
+		force_sim = col_sim_2.checkbox("force", help="Force the regeneration of all selected simulations", key="crv_force_sim")
+		if st.button("Generate simulations from saved scores", help="For selected runs, look for saved scores and generate stock_simulation_*.csv files"):
+			if not selected_runs_from_grid:
+				st.warning("Please select at least one run in the table above.")
 			else:
-				status_text.text(f"Generating simulations for {len(paths_to_process)} directories...")
-				try:
-					generate_simulations_from_directories(paths_to_process, top_k=[1, 3, 5, 10], force=False)
-				except Exception as e:
-					st.error(f"Error during simulation generation: {e}")
-					traceback.print_exc()
+				status_text = st.empty()
 
-				status_text.text("Done! Refreshing viewer...")
-				st.rerun()
+				# We need the full paths for selected runs.
+				# selected_runs_from_grid are IDs from the grid (usually timestamp names or _dir).
+				paths_to_process = []
+				for rid in selected_runs_from_grid:
+					# Find the original row to get the full _dir
+					match = next((r for r in display_rows if (r.get("_ts") or r.get("_dir")) == rid), None)
+					if match and match.get("_dir"):
+						p = os.path.normpath(os.path.join(base_dir, match["_dir"]))
+						if os.path.isdir(p):
+							# Ensure we only process single run (ensemble) directories
+							p = get_single_run_directory(p)
+							if p not in paths_to_process:
+								paths_to_process.append(p)
+					else:
+						# Fallback to direct join if not found in display_rows
+						p = os.path.normpath(os.path.join(base_dir, rid))
+						if os.path.isdir(p):
+							p = get_single_run_directory(p)
+							if p not in paths_to_process:
+								paths_to_process.append(p)
+
+				if not paths_to_process:
+					st.warning(f"No directories found for selection: {selected_runs_from_grid}")
+				else:
+					status_text.text(f"Generating simulations for {len(paths_to_process)} directories...")
+					try:
+						generate_simulations_from_directories(paths_to_process, top_k=[1, 3, 5, 10], force=force_sim)
+					except Exception as e:
+						st.error(f"Error during simulation generation: {e}")
+						traceback.print_exc()
+
+					status_text.text("Done! Refreshing viewer...")
+					st.rerun()
 
 	selected_runs = selected_runs_from_grid
 
@@ -502,6 +495,8 @@ def _run_as_script():
 		# Whenever the grid selection changes, update the set of runs that the
 		# metrics viewer at the bottom should focus on.
 		st.session_state["last_grid_selection"] = curr_runs
+		# Reset graphs populated state so we wait for the next button click
+		st.session_state["crv_graphs_populated"] = False
 
 	# No in-grid selection; rely on sidebar-selected_set and last_grid_selection
 	# for determining which runs to visualize.
@@ -582,11 +577,6 @@ def _run_as_script():
 
 	def _viewer_panel(selected_runs: List[str]):
 		"""Render the metrics and stock simulation viewer.
-
-		# Defer population of graphs until the user clicks the button under the grid
-		if not st.session_state.get("crv_graphs_populated"):
-			st.info("Click 'Populate Graphs' under the grid to render charts.")
-			return
 
 		The selection coming into this panel is the list of identifiers from the
 		central grid (either timestamps or rep paths).
@@ -2662,7 +2652,10 @@ def _run_as_script():
 		st.session_state["crv_graphs_populated"] = True
 
 	# Render the viewer panel at the bottom of the main page (only after button press)
-	_viewer_panel(runs_for_view)
+	if st.session_state.get("crv_graphs_populated"):
+		_viewer_panel(runs_for_view)
+	else:
+		st.info("Click 'Populate Graphs' under the grid to render charts.")
 
 
 if __name__ == "__main__":

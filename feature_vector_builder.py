@@ -48,7 +48,7 @@ class FeatureVectorBuilder:
         vwap_ratio = rec.get_vwap_ratio_used()
         transaction_ratio = rec.get_tranaction_ratio_used()
 
-        dates, X_flat, _Y, db_ticker_ids = fetch_grouped_by_date(
+        dates, X_flat, Y_labels, db_ticker_ids = fetch_grouped_by_date(
             dbinfo_file=dbinfo_file,
             day_change_centered=day_change_centered,
             current_day_change=current_day_change,
@@ -76,7 +76,8 @@ class FeatureVectorBuilder:
             db_ticker_ids,
             model_ticker_ids,
             num_features=num_features,
-            num_days=num_days
+            num_days=num_days,
+            Y_labels=Y_labels
         )
 
     def __init__(
@@ -86,7 +87,8 @@ class FeatureVectorBuilder:
         db_ticker_ids: List[int],
         model_ticker_ids: List[int],
         num_features: int,
-        num_days: int
+        num_days: int,
+        Y_labels: Optional[np.ndarray] = None
     ):
         """
         Initialize the FeatureVectorBuilder.
@@ -98,12 +100,14 @@ class FeatureVectorBuilder:
             model_ticker_ids: List of ticker IDs expected by the model.
             num_features: Number of features per ticker per date.
             num_days: Number of days to include in the output vector (1 + num_prior).
+            Y_labels: Optional per-date label matrix (D, T_db).
         """
         self.dates = dates
         self.num_features = num_features
         self.num_days = num_days
         self.model_ticker_ids = model_ticker_ids
         self.db_ticker_ids = db_ticker_ids
+        self.Y_labels = None
 
         # Align X_flat to match model_ticker_ids
         if model_ticker_ids and list(model_ticker_ids) != list(db_ticker_ids):
@@ -116,6 +120,9 @@ class FeatureVectorBuilder:
             db_num_features = X_flat.shape[1] // len(db_ticker_ids) if db_ticker_ids else 0
 
             X_aligned = np.full((num_dates, num_model_tickers * num_features), np.nan, dtype=X_flat.dtype)
+            Y_aligned = None
+            if Y_labels is not None:
+                Y_aligned = np.full((num_dates, num_model_tickers), np.nan, dtype=Y_labels.dtype)
 
             for i, tid in enumerate(model_ticker_ids):
                 if tid in db_ticker_id_to_idx:
@@ -124,16 +131,20 @@ class FeatureVectorBuilder:
                     X_aligned[:, i * num_features : i * num_features + copy_size] = X_flat[
                         :, db_idx * db_num_features : db_idx * db_num_features + copy_size
                     ]
+                    if Y_aligned is not None:
+                        Y_aligned[:, i] = Y_labels[:, db_idx]
             self.X_flat = X_aligned
+            self.Y_labels = Y_aligned
         else:
             self.X_flat = X_flat
+            self.Y_labels = Y_labels
 
     def build_for_date(
         self,
         date_id: Optional[int] = None,
         expected_input_size: Optional[int] = None,
         prefer_prior_only: bool = False
-    ) -> Tuple[np.ndarray, int]:
+    ) -> Tuple[np.ndarray, int, Optional[np.ndarray]]:
         """
         Build a feature vector for the given date_id.
 
@@ -145,7 +156,7 @@ class FeatureVectorBuilder:
             prefer_prior_only: If True, tries to exclude current day features.
 
         Returns:
-            A tuple of (feature_vector, actual_date_id).
+            A tuple of (feature_vector, actual_date_id, labels).
         """
         if date_id is None:
             date_idx = len(self.dates) - 1
@@ -169,4 +180,6 @@ class FeatureVectorBuilder:
         else:
             feat_vec = concat_features_current_then_prior(self.X_flat, date_idx, num_prior)
 
-        return feat_vec, actual_date_id
+        labels = self.Y_labels[date_idx] if self.Y_labels is not None else None
+
+        return feat_vec, actual_date_id, labels

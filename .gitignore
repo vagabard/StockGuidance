@@ -2,3 +2,5 @@ data/
 __pycache__/
 cache/
 *.pyc
+*.egg-info/
+/tests/test_model/8.pt

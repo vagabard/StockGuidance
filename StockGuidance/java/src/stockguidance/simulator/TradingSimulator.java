@@ -1,14 +1,12 @@
 package stockguidance.simulator;
 
+import stockguidance.models.FamilyRun;
+import stockguidance.models.SingleRun;
+
 import java.io.File;
 import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.util.*;
 import java.util.regex.Pattern;
-import java.util.stream.Collectors;
-import java.util.stream.Stream;
 
 public class TradingSimulator {
 
@@ -16,6 +14,7 @@ public class TradingSimulator {
     private final String dbinfoFile;
     private final boolean onlyEnsemble;
     private final boolean force;
+    private static final String JAVA_TAG = "_java";
 
     public TradingSimulator(List<Integer> topK, String dbinfoFile, boolean onlyEnsemble, boolean force) {
         this.topK = topK != null ? topK : Arrays.asList(1, 3, 5, 10);
@@ -27,14 +26,45 @@ public class TradingSimulator {
     public List<String> generateSimulationsFromDirectories(List<String> directories) {
         List<String> allGenerated = new ArrayList<>();
         for (String d : directories) {
-            File dir = new File(d);
-            if (!dir.isDirectory()) {
-                System.out.println("Warning: " + d + " is not a directory. Skipping.");
+            File path = new File(d);
+            if (path.isFile() && path.getName().endsWith(".json")) {
+                System.out.println("Processing JSON file: " + d);
+                if (path.getName().equals("family_state.json") || path.getName().equals("family_run.json")) {
+                    try {
+                        FamilyRun familyRun = FamilyRun.load(path);
+                        System.out.println("Loaded FamilyRun from direct JSON: " + familyRun);
+                    } catch (IOException e) {
+                        System.out.println("Error loading FamilyRun from " + d + ": " + e.getMessage());
+                    }
+                    allGenerated.addAll(generateSimulationsFromDirectories(Arrays.asList(path.getParent())));
+                } else {
+                    allGenerated.addAll(runSimulationForSingleOrEnsemble(path.getParentFile()));
+                }
                 continue;
             }
+            if (!path.isDirectory()) {
+                System.out.println("Warning: " + d + " is not a directory or a valid JSON file. Skipping.");
+                continue;
+            }
+            File dir = path;
 
             if (isFamilyDirectory(dir)) {
                 System.out.println("Processing family directory: " + d);
+
+                // Try to load family run config
+                File familyState = new File(dir, "family_state.json");
+                if (!familyState.exists()) {
+                    familyState = new File(dir, "family_run.json");
+                }
+                if (familyState.exists()) {
+                    try {
+                        FamilyRun familyRun = FamilyRun.load(familyState);
+                        System.out.println("Loaded FamilyRun: " + familyRun);
+                    } catch (IOException e) {
+                        System.out.println("Error loading FamilyRun from " + familyState.getAbsolutePath() + ": " + e.getMessage());
+                    }
+                }
+
                 List<String> subRuns = new ArrayList<>();
                 findSubRunsForGivenRunDirectory(dir, subRuns);
                 List<String> tempGenerated = generateSimulationsFromDirectories(subRuns);
@@ -85,8 +115,6 @@ public class TradingSimulator {
     }
 
     private boolean dirHasModel(File dir) {
-        // In Python it uses resolve_manifest_path(run_dir)
-        // Simplified check: manifest.json or similar
         return new File(dir, "manifest.json").exists();
     }
 
@@ -98,7 +126,6 @@ public class TradingSimulator {
                 return f.getAbsolutePath();
             }
         }
-        // Check parent if it's a rep dir
         if (dir.getName().toLowerCase().contains("rep")) {
             File parent = dir.getParentFile();
             if (parent != null) {
@@ -151,11 +178,8 @@ public class TradingSimulator {
 
     private List<String> runSimulationForSingleOrEnsemble(File runDir) {
         System.out.println("Simulating for: " + runDir.getAbsolutePath());
-        // This would involve loading SingleRun, identifying epochs, and calling performAnalysis.
-        // For the purpose of this replication, we'll provide the structural implementation.
         List<String> generatedPaths = new ArrayList<>();
 
-        // 1. Identify score directories
         List<File> scoreDirs = getScoreDirs(runDir);
         List<String> epochs = identifyEpochsWithScores(scoreDirs);
 
@@ -170,12 +194,56 @@ public class TradingSimulator {
             return generatedPaths;
         }
 
-        // Logic to process each epoch...
-        // This would call performAnalysis(recommenders, topK, ...)
+        try {
+            SingleRun singleRun = SingleRun.load(new File(singleRunPath));
+            System.out.println("Loaded SingleRun: " + singleRun);
 
-        System.out.println("Replicated logic would now process " + epochs.size() + " epochs.");
+            List<StockRecommender> recommenders = new ArrayList<>();
+            // Recommender for the main directory
+            recommenders.add(new StockRecommenderFromSavedScores(singleRun, runDir.getAbsolutePath()));
+
+            // Recommenders for each rep
+            for (File scoreDir : scoreDirs) {
+                if (scoreDir.equals(runDir)) continue;
+                recommenders.add(new StockRecommenderFromSavedScores(singleRun, scoreDir.getAbsolutePath()));
+            }
+
+            SimulationEngine engine = new SimulationEngine(recommenders, topK, dbinfoFile, onlyEnsemble, force);
+
+            for (String epoch : epochs) {
+                List<Integer> dates = identifyDatesForEpoch(scoreDirs, epoch);
+                try {
+                    List<String> paths = engine.runSimulation(epoch, dates);
+                    generatedPaths.addAll(paths);
+                } catch (Exception e) {
+                    System.out.println("Error running simulation for epoch " + epoch + ": " + e.getMessage());
+                    e.printStackTrace();
+                }
+            }
+        } catch (IOException e) {
+            System.out.println("Error loading SingleRun from " + singleRunPath + ": " + e.getMessage());
+            return generatedPaths;
+        }
 
         return generatedPaths;
+    }
+
+    private List<Integer> identifyDatesForEpoch(List<File> scoreDirs, String epoch) {
+        Set<Integer> dates = new HashSet<>();
+        Pattern pattern = Pattern.compile("stock_scores_epoch_" + epoch + "_date_(\\d+)_net_.*\\.csv");
+        for (File dir : scoreDirs) {
+            File[] files = dir.listFiles();
+            if (files == null) continue;
+            for (File f : files) {
+                java.util.regex.Matcher matcher = pattern.matcher(f.getName());
+                if (matcher.find()) {
+                    dates.add(Integer.parseInt(matcher.group(1)));
+                }
+            }
+        }
+        List<Integer> sortedDates = new ArrayList<>(dates);
+        Collections.sort(sortedDates);
+        return sortedDates;
     }
 
     private List<File> getScoreDirs(File runDir) {
@@ -212,17 +280,25 @@ public class TradingSimulator {
             }
         }
         List<String> sortedEpochs = new ArrayList<>(epochs);
-        Collections.sort(sortedEpochs, Comparator.comparingInt(Integer::parseInt));
+        Collections.sort(sortedEpochs, (a, b) -> Integer.compare(Integer.parseInt(a), Integer.parseInt(b)));
         return sortedEpochs;
     }
 
     public static void main(String[] args) {
         if (args.length == 0) {
-            System.out.println("Usage: TradingSimulator <directory1> <directory2> ...");
+            System.out.println("Usage: TradingSimulator [--force] [--only-ensemble] <directory1> <directory2> ...");
             return;
         }
-        TradingSimulator simulator = new TradingSimulator(Arrays.asList(1, 3, 5, 10), "dbinfo.id", false, false);
-        List<String> result = simulator.generateSimulationsFromDirectories(Arrays.asList(args));
+        boolean forceFlag = false;
+        boolean onlyEnsembleFlag = false;
+        List<String> dirs = new ArrayList<>();
+        for (String arg : args) {
+            if (arg.equals("--force")) forceFlag = true;
+            else if (arg.equals("--only-ensemble")) onlyEnsembleFlag = true;
+            else dirs.add(arg);
+        }
+        TradingSimulator simulator = new TradingSimulator(Arrays.asList(1, 3, 5, 10), "dbinfo.id", onlyEnsembleFlag, forceFlag);
+        List<String> result = simulator.generateSimulationsFromDirectories(dirs);
         System.out.println("Generated simulations: " + result);
     }
 }

@@ -5,12 +5,14 @@ from typing import TYPE_CHECKING, Optional, Any
 
 if TYPE_CHECKING:
     from trainer.state.family_run import FamilyRun
+    from trainer.state.single_run import SingleRun
 
 from models import make_model
 
 def load_model_from_checkpoint(
     checkpoint_path: str,
     family_run: FamilyRun,
+    single_run: SingleRun,
     input_size: int,
     output_size: int,
     mlp_layers: int,
@@ -46,12 +48,14 @@ def load_model_from_checkpoint(
         arch=str(family_run.neural_network_type),
         input_size=int(input_size),
         output_size=int(output_size),
-        hidden_layers=family_run.hidden_layer_size or [int(input_size)],
+        hidden_layers=single_run.hidden_layer_size or [int(input_size)],
         num_layers=int(mlp_layers),
         activation=str(activation),
         final_activation=str(final_activation),
         layer_types=family_run.layer_types,
         sequence_length=int(prior_days) + 1,
+        bias_mode=str(single_run.bias),
+        layer_normalization=single_run.layer_normalization,
     )
 
     model.load_state_dict(model_state)

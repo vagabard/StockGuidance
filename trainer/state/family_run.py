@@ -83,9 +83,12 @@ class FamilyRun:
 	prior_days_list: List[int]
 	mlp_layers_list: List[int]
 	lr_list: List[float]
+	learning_rate_adjustment_parameter_list: List[float]
+	hidden_layer_size_list: List[Optional[List[int]]]
 	activation_list: List[str]
 	final_activation_list: List[str]
 	optimizer_list: List[str]
+	layer_normalization_list: List[bool]
 	include_one_feature_list: Optional[Sequence[str]]
 	base_optional_features: Set[str]
 	base_args_list: List[str] | None = None
@@ -95,6 +98,7 @@ class FamilyRun:
 	current_index: int = 0
 	completed: bool = False
 	limit : int = 0
+	ticker_limit : Optional[int] = None
 	current_day_change :bool = False
 	volume_ratio : bool = False
 	vwap_ratio : bool = False
@@ -111,7 +115,8 @@ class FamilyRun:
 	simulate_prior_only: Optional[bool] = None
 	device : Optional[str] = None
 	precision : Optional[str] = None
-	total_epochs_to_train : Optional[int] = None
+	epochs_list : Optional[List[int]] = None
+	bias_list : Optional[List[str]] = None
 	batch_of_instances_to_train_on_at_once : Optional[int] = None
 	shuffle_instances_in_training_set : Optional[bool] = None
 	number_of_GPU_workers : Optional[int] = None
@@ -119,7 +124,6 @@ class FamilyRun:
 	run_repeats : Optional[int] = None
 
 	neural_network_type : Optional[str] = None
-	hidden_layer_size : Optional[List[int]] = None
 	drop_last : Optional[bool] = False
 	persistent_workers : Optional[bool] = None
 	layer_types : Optional[List[str]] = None
@@ -172,16 +176,20 @@ class FamilyRun:
 				prior_days_list,
 				mlp_layers_list,
 				lr_list,
+				learning_rate_adjustment_parameter_list,
 				activation_list,
 				final_activation_list,
 				day_change_centered_list,
 				optimizer_list,
+				epochs_list,
+				hidden_layer_size_list,
+				bias_list,
+				layer_normalization_list,
 			) = parse_sweep_lists(
 				args,
 				valid_activations=VALID_ACTIVATIONS,
 				valid_day_centers=VALID_DAY_CENTERS,
 			)
-
 
 			ts = time.strftime("%Y%m%d_%H%M%S", time.localtime())
 			# If the caller supplied --initial-run (typically a higher-level harness
@@ -190,126 +198,72 @@ class FamilyRun:
 			initial_run_id = str(getattr(args, "initial_run", "") or ts)
 			file_structure.set_from_initial_id(initial_run_id)
 
-			limit = getattr(args, "limit", 0)
-
-			raw_train_start_date_id = getattr(args, "raw_train_start_with_special_characters", None)
-			raw_train_end_date_id = getattr(args, "raw_train_end_with_special_characters", None)
-			random_training_duration = getattr(args, "random_training_duration", None)
-
-			split_mode = getattr(args, "split_mode", None)
-			random_seed_splits = getattr(args, "seed", None)
-			train_percent = getattr(args, "train_percent", None)
-			val_percent = getattr(args, "val_percent", None)
 			imadict = vars(args)
-			# print("args 2 ",args)
-			# allKeys = vars(args).keys()
-			# for (key) in allKeys:
-			# 	print(key, "    equal ", (key in ["simulate_top_k"]))
-			# 	if (key in ["simulate_top_k"]):
-			# 		print("printing on args" , imadict.get(key) )
 			simulate_top_k = [int(one_k) for one_k in general_arg_parser_understands_lists(imadict.get("simulate_top_k"), "simulate_top_k")]
 
-			device = getattr(args, "device", None)
-			precision = getattr(args, "precision", None)
-			total_epochs_to_train = getattr(args, "epochs", None)
-			batch_of_instances_to_train_on_at_once = getattr(args, "batch_size", None)
-			shuffle_instances_in_training_set = getattr(args, "shuffle", None)
-			number_of_GPU_workers = getattr(args, "num_workers", None)
-			pin_GPU_memory = getattr(args, "pin_memory", None)
-			run_repeats = getattr(args, "run_repeats", None)
+			# Convert argparse.Namespace to a dictionary that from_dict can consume.
+			# This ensures that all defaulting and normalization logic is shared.
+			data = imadict.copy()
+			data.update({
+				"initial_run_id": initial_run_id,
+				"file_structure": file_structure,
+				"day_change_centered_list": day_change_centered_list,
+				"prior_days_list": prior_days_list,
+				"mlp_layers_list": mlp_layers_list,
+				"lr_list": lr_list,
+				"learning_rate_adjustment_parameter_list": learning_rate_adjustment_parameter_list,
+				"hidden_layer_size_list": hidden_layer_size_list,
+				"activation_list": activation_list,
+				"final_activation_list": final_activation_list,
+				"optimizer_list": optimizer_list,
+				"epochs_list": epochs_list,
+				"bias_list": bias_list,
+				"layer_normalization_list": layer_normalization_list,
+				"include_one_feature_list": include_one_feature_list,
+				"base_optional_features": base_optional_features,
+				"base_args": data.get("base_args_list") or data.get("base_args"),
+				"simulate_top_k": simulate_top_k,
+			})
+			# Ensure field names match what from_dict expects if they differ from CLI args
+			if "seed" in data:
+				data["random_seed_splits"] = data["seed"]
+			if "batch_size" in data:
+				data["batch_of_instances_to_train_on_at_once"] = data["batch_size"]
+			if "num_workers" in data:
+				data["number_of_GPU_workers"] = data["num_workers"]
+			if "pin_memory" in data:
+				data["pin_GPU_memory"] = data["pin_memory"]
+			if "arch" in data:
+				data["neural_network_type"] = data["arch"]
+			if "simulate_after" in data:
+				data["simulate_after_training"] = data["simulate_after"]
+			if "rank_temp" in data:
+				data["rank_temperature"] = data["rank_temp"]
+			if "enable_rank_err" in data:
+				data["enable_rank_error_loss_in_training"] = data["enable_rank_err"]
+			if "rank_lower" in data:
+				data["rank_error_lower_bound"] = data["rank_lower"]
+			if "rank_upper" in data:
+				data["rank_error_upper_bound"] = data["rank_upper"]
+			if "log_interval" in data:
+				data["log_interval"] = data["log_interval"]
+			if "ticker_limit" in data:
+				data["ticker_limit"] = data["ticker_limit"]
+			if "trading_interval" in data:
+				data["trading_interval"] = data["trading_interval"]
+			if "shuffle" in data:
+				data["shuffle_instances_in_training_set"] = data["shuffle"]
+			if "layer_types" in data:
+				# Use the parsed list from earlier if available
+				data["layer_types"] = [x.strip() for x in general_arg_parser_understands_lists(str(getattr(args, "layer_types", "linear")), "layer_types")]
 
-			neural_network_type = getattr(args, "arch", None)
-			hidden_layers_raw = getattr(args, "hidden_layers", "")
-			hidden_layer_size = [int(x) for x in general_arg_parser_understands_lists(str(hidden_layers_raw), "hidden_layers")]
-			drop_last = getattr(args, "drop_last", False)
-			persistent_workers = getattr(args, "persistent_workers", None)
-			layer_types_raw = getattr(args, "layer_types", "linear")
-			layer_types = [x.strip() for x in general_arg_parser_understands_lists(str(layer_types_raw), "layer_types")]
+			if "raw_train_start_with_special_characters" not in data:
+				data["raw_train_start_with_special_characters"] = getattr(args, "raw_train_start_with_special_characters", None)
+			if "raw_train_end_with_special_characters" not in data:
+				data["raw_train_end_with_special_characters"] = getattr(args, "raw_train_end_with_special_characters", None)
 
-			dont_use_dataloader = getattr(args, "dont_use_dataloader", False)
-
-			base_args_source = getattr(args, "base_args_list", None)
-			if base_args_source is None:
-				base_args_source = getattr(args, "base_args", None)
-			if base_args_source is None:
-				base_args_list: List[str] = []
-			elif isinstance(base_args_source, (list, tuple, set)):
-				base_args_list = [str(v) for v in base_args_source]
-			else:
-				base_args_list = [str(base_args_source)]
-
-
-
-			# Try to populate database info if CLI provided a dbinfo file
-			dbinfo_obj = None
-			dbinfo_file: Optional[str] =  getattr(args, "dbinfo_file", "dbinfo.id")
-			try:
-				loaded = load_dbinfo(dbinfo_file)
-				if loaded is not None:
-					# type: ignore[attr-defined]
-					dbinfo_obj = loaded
-			except Exception as e:
-				traceback.print_exception(e)
-				# Leave as None if loading fails; callers that need DB must pass it explicitly
-				pass
-
-			new_family_run = cls(
-				initial_run_id=str(initial_run_id),
-				args=args,
-				day_change_centered_list=list(day_change_centered_list),
-				prior_days_list=list(prior_days_list),
-				mlp_layers_list=list(mlp_layers_list),
-				lr_list=list(lr_list),
-				activation_list=list(activation_list),
-				final_activation_list=list(final_activation_list),
-				optimizer_list=list(optimizer_list),
-				include_one_feature_list=list(include_one_feature_list) if include_one_feature_list else None,
-				base_optional_features=set(base_optional_features),
-				base_args_list=list(base_args_list),
-				single_runs_for_all_combinations=[],
-				current_index=0,
-				completed=False,
-				limit=limit,
-				volume_ratio=args.volume_ratio,
-				vwap_ratio=args.vwap_ratio,
-				transaction_ratio=args.transaction_ratio,
-				raw_train_start_with_special_characters=raw_train_start_date_id,
-				raw_train_end_with_special_characters=raw_train_end_date_id,
-				random_training_duration=random_training_duration,
-				split_mode=split_mode,
-				random_seed_splits=random_seed_splits,
-				train_percent=train_percent,
-				val_percent=val_percent,
-				simulate_top_k=simulate_top_k,
-				simulate_prior_only=args.simulate_prior_only,
-				precision=precision,
-				dbinfo=dbinfo_obj,
-				dbinfo_file=dbinfo_file,
-				device=device,
-				total_epochs_to_train=total_epochs_to_train,
-				batch_of_instances_to_train_on_at_once=batch_of_instances_to_train_on_at_once,
-				dont_use_dataloader=dont_use_dataloader,
-				shuffle_instances_in_training_set=shuffle_instances_in_training_set,
-				number_of_GPU_workers=number_of_GPU_workers,
-				pin_GPU_memory=pin_GPU_memory,
-				run_repeats=run_repeats,
-				neural_network_type=neural_network_type,
-				hidden_layer_size=hidden_layer_size,
-				drop_last=drop_last,
-				persistent_workers=persistent_workers,
-				layer_types=layer_types,
-				log_interval=args.log_interval,
-				use_ranking_error_loss=args.use_ranking_error_loss,
-				rank_temperature=args.rank_temp,
-				enable_rank_error_loss_in_training=args.enable_rank_err,
-				rank_error_lower_bound=args.rank_lower,
-				rank_error_upper_bound=args.rank_upper,
-				trading_interval=args.trading_interval,
-				simulate_after_training=args.simulate_after,
-				file_structure=file_structure,
-				ticker_ids=getattr(args, "ticker_ids", None)
-			)
-			new_family_run.file_structure = file_structure
+			new_family_run = cls.from_dict(data)
+			new_family_run.args = args # Keep original args for single run generation
 			return new_family_run
 
 	def create_options_for_individual_runs(self) -> None:
@@ -331,38 +285,49 @@ class FamilyRun:
 		single_runs_for_all_combinations: List[SingleRun] = []
 		combo_id = 0
 		base_timestamp = time.strftime("%Y%m%d_%H%M%S", time.localtime())
+		lrap_values = self.learning_rate_adjustment_parameter_list or [1.0]
 
 		for dc in self.day_change_centered_list:
 			for pd in self.prior_days_list:
 				for ml in self.mlp_layers_list:
-					for lr in self.lr_list:
-						for final_act in self.final_activation_list:
-							for act in self.activation_list:
-								for opt in self.optimizer_list:
-									for one_feat in one_feature_values:
-										selected_features = set(self.base_optional_features)
-										if one_feat is not None:
-											selected_features.add(str(one_feat))
-										set_feature_flags(args, selected_features)
-										current_timestamp_id = f"{base_timestamp}_{combo_id:02d}"
-										lrap = float(getattr(self.args, "learning_rate_adjustment_parameter", 0.998))
-										run_state = SingleRun(
-											timestamp_id=current_timestamp_id,
-											family_run=self,
-											day_change_centered=str(dc),
-											prior_days=int(pd),
-											mlp_layers=int(ml),
-											lr=float(lr),
-											learning_rate_adjustment_parameter=lrap,
-											activation=str(act),
-											final_activation=str(final_act),
-											optimizer=str(opt),
-											include_features=selected_features or None,
-											train_start_date_id=None,
-											train_end_date_id=None,
-										)
-										single_runs_for_all_combinations.append(run_state)
-										combo_id += 1
+					for hls in self.hidden_layer_size_list:
+						for lr in self.lr_list:
+							for lrap in lrap_values:
+								for final_act in self.final_activation_list:
+									for act in self.activation_list:
+										for opt in self.optimizer_list:
+											for epoch in self.epochs_list:
+												for bias in self.bias_list:
+													for ln in self.layer_normalization_list:
+														for one_feat in one_feature_values:
+															selected_features = set(self.base_optional_features)
+															if one_feat is not None:
+																selected_features.add(str(one_feat))
+															set_feature_flags(args, selected_features)
+															current_timestamp_id = f"{base_timestamp}_{combo_id:02d}"
+															run_state = SingleRun.from_args(
+																argparse.Namespace(
+																	timestamp_id=current_timestamp_id,
+																	day_change_centered=str(dc),
+																	prior_days=int(pd),
+																	mlp_layers=int(ml),
+																	hidden_layer_size=hls,
+																	lr=float(lr),
+																	learning_rate_adjustment_parameter=float(lrap),
+																	activation=str(act),
+																	final_activation=final_act,
+																	epochs=int(epoch),
+																	bias=str(bias),
+																	layer_normalization=ln,
+																	optimizer=str(opt),
+																	include_features=tuple(selected_features) if selected_features else None,
+																	train_start_date_id=None,
+																	train_end_date_id=None,
+																),
+																family_run=self
+															)
+															single_runs_for_all_combinations.append(run_state)
+															combo_id += 1
 
 		self.single_runs_for_all_combinations = single_runs_for_all_combinations
 
@@ -401,10 +366,15 @@ class FamilyRun:
 		data["day_change_centered_list"] = [str(v) for v in self.day_change_centered_list]
 		data["prior_days_list"] = [int(v) for v in self.prior_days_list]
 		data["mlp_layers_list"] = [int(v) for v in self.mlp_layers_list]
+		data["hidden_layer_size_list"] = [[int(v) for v in sublist] if sublist is not None else None for sublist in self.hidden_layer_size_list]
 		data["lr_list"] = [float(v) for v in self.lr_list]
+		data["learning_rate_adjustment_parameter_list"] = [float(v) for v in (self.learning_rate_adjustment_parameter_list or [1.0])]
 		data["activation_list"] = [str(v) for v in self.activation_list]
 		data["final_activation_list"] = [str(v) for v in self.final_activation_list]
 		data["optimizer_list"] = [str(v) for v in self.optimizer_list]
+		data["epochs_list"] = [int(v) for v in self.epochs_list]
+		data["bias_list"] = [str(v) for v in self.bias_list]
+		data["layer_normalization_list"] = [bool(v) for v in self.layer_normalization_list]
 		# ``include_one_feature_list`` may be a sequence or ``None``; normalise to
 		# a plain list for JSON.
 		if self.include_one_feature_list is not None:
@@ -413,7 +383,6 @@ class FamilyRun:
 		# list for JSON serialisation.
 		data["base_optional_features"] = sorted(str(v) for v in self.base_optional_features)
 		data["base_args"] = list(self.base_args_list or [])
-		data["hidden_layer_size"] = [int(v) for v in self.hidden_layer_size] if self.hidden_layer_size is not None else None
 		data["layer_types"] = [str(v) for v in self.layer_types] if self.layer_types is not None else None
 
 		def _normalize_to_list(val: Any) -> Any:
@@ -500,16 +469,46 @@ class FamilyRun:
 				return [float(v) for v in value]
 			return [float(value)]
 
+		def _as_bool_list(value: Any) -> List[bool]:
+			if value is None:
+				return []
+			if isinstance(value, (list, tuple, set)):
+				return [bool(str(v).lower() == "true" or str(v) == "1") for v in value]
+			return [bool(str(value).lower() == "true" or str(value) == "1")]
+
 		initial_run_id = str(data.get("initial_run_id", ""))
 		day_change_centered_list = _as_str_list(data.get("day_change_centered_list"))
 		prior_days_list = _as_int_list(data.get("prior_days_list"))
 		mlp_layers_list = _as_int_list(data.get("mlp_layers_list"))
 		lr_list = _as_float_list(data.get("lr_list"))
+		learning_rate_adjustment_parameter_list = _as_float_list(
+			data.get("learning_rate_adjustment_parameter_list")
+		)
+		if not learning_rate_adjustment_parameter_list:
+			# Backward-compatibility for older saved states where this was a scalar.
+			legacy_lrap = data.get("learning_rate_adjustment_parameter", 1.0)
+			learning_rate_adjustment_parameter_list = [float(legacy_lrap)]
+		hidden_layer_size_list = data.get("hidden_layer_size_list")
+		if hidden_layer_size_list is not None:
+			hidden_layer_size_list = [[int(v) for v in sublist] if sublist is not None else None for sublist in hidden_layer_size_list]
+		else:
+			# Fallback for old state
+			old_hls = _as_int_list(data.get("hidden_layer_size"))
+			if not old_hls:
+				old_hls = None
+			hidden_layer_size_list = [old_hls]
+
 		activation_list = _as_str_list(data.get("activation_list"))
 		final_activation_list = _as_str_list(data.get("final_activation_list"))
 		optimizer_list = _as_str_list(data.get("optimizer_list"))
 		if not optimizer_list:
 			optimizer_list = ["adam"]
+		bias_list = _as_str_list(data.get("bias_list"))
+		if not bias_list:
+			bias_list = ["all"]
+		layer_normalization_list = _as_bool_list(data.get("layer_normalization_list"))
+		if not layer_normalization_list:
+			layer_normalization_list = [True]
 		include_one_feature_raw = data.get("include_one_feature_list")
 		include_one_feature_list = (
 			_as_str_list(include_one_feature_raw) if include_one_feature_raw is not None else None
@@ -557,6 +556,7 @@ class FamilyRun:
 			return str(v)
 
 		limit = _get_int("limit")
+		ticker_limit = _get_int("ticker_limit")
 		volume_ratio = _get_bool("volume_ratio")
 		vwap_ratio = _get_bool("vwap_ratio")
 		transaction_ratio = _get_bool("transaction_ratio") or _get_bool("tranaction_ratio")
@@ -572,6 +572,13 @@ class FamilyRun:
 			train_percent = 0.0
 		if val_percent is None:
 			val_percent = 0.0
+
+		if train_percent + val_percent > 1.0:
+			raise ValueError(
+				f"train_percent ({train_percent}) and val_percent ({val_percent}) "
+				f"sum to {train_percent + val_percent}, which is more than 1.0"
+			)
+
 		if test_percent is None:
 			test_percent = 1.0 - train_percent - val_percent
 
@@ -585,7 +592,13 @@ class FamilyRun:
 		simulate_prior_only = _get_bool("simulate_prior_only")
 		precision = _get_str("precision")
 		device = data.get("device")  # may be string like 'cpu'/'cuda', leave as-is
-		total_epochs_to_train = _get_int("total_epochs_to_train") or 0
+		epochs_list = _as_int_list(data.get("epochs_list"))
+		if not epochs_list:
+			old_val = _get_int("total_epochs_to_train")
+			if old_val is not None:
+				epochs_list = [old_val]
+			else:
+				epochs_list = [80] # default
 		batch_of_instances_to_train_on_at_once = _get_int("batch_of_instances_to_train_on_at_once") or 1
 		dont_use_dataloader = _get_bool("dont_use_dataloader")
 		shuffle_instances_in_training_set = _get_bool("shuffle_instances_in_training_set")
@@ -593,14 +606,7 @@ class FamilyRun:
 		pin_GPU_memory = _get_bool("pin_GPU_memory")
 		run_repeats = _get_int("run_repeats") or 1
 		neural_network_type = _get_str("neural_network_type") or "mlp"
-		hidden_layer_size = _as_int_list(data.get("hidden_layer_size"))
 		layer_types = _as_str_list(data.get("layer_types"))
-		if not hidden_layer_size: # Fallback for old states that might have a single int
-			old_val = _get_int("hidden_layer_size")
-			if old_val is not None:
-				hidden_layer_size = [old_val]
-			else:
-				hidden_layer_size = []
 
 		drop_last = _get_bool("drop_last")
 		persistent_workers = _get_bool("persistent_workers")
@@ -644,6 +650,17 @@ class FamilyRun:
 				traceback.print_exception(e)
 				dbinfo_file = None
 
+		# If we have a dbinfo_file but no dbinfo_obj yet, try loading it now
+		# (this covers the from_args path where we want to use from_dict's shared logic)
+		if dbinfo_file and dbinfo_obj is None:
+			try:
+				from database.db_info import load_dbinfo
+				loaded = load_dbinfo(dbinfo_file)
+				if loaded is not None:
+					dbinfo_obj = loaded
+			except Exception:
+				pass
+
 		return cls(
 			initial_run_id=initial_run_id,
 			file_structure=file_structure,
@@ -652,9 +669,14 @@ class FamilyRun:
 			prior_days_list=prior_days_list,
 			mlp_layers_list=mlp_layers_list,
 			lr_list=lr_list,
+			learning_rate_adjustment_parameter_list=learning_rate_adjustment_parameter_list,
+			hidden_layer_size_list=hidden_layer_size_list,
 			activation_list=activation_list,
 			final_activation_list=final_activation_list,
 			optimizer_list=optimizer_list,
+			epochs_list=epochs_list,
+			bias_list=bias_list,
+			layer_normalization_list=layer_normalization_list,
 			include_one_feature_list=include_one_feature_list,
 			base_optional_features=base_optional_features,
 			base_args_list=base_args_list,
@@ -662,6 +684,7 @@ class FamilyRun:
 			current_index=current_index,
 			completed=completed,
 			limit=limit,
+			ticker_limit=ticker_limit,
 			volume_ratio=volume_ratio,
 			vwap_ratio=vwap_ratio,
 			transaction_ratio=transaction_ratio,
@@ -679,7 +702,6 @@ class FamilyRun:
 			dbinfo=dbinfo_obj,
 			dbinfo_file=dbinfo_file,
 			device=device,
-			total_epochs_to_train=total_epochs_to_train,
 			batch_of_instances_to_train_on_at_once=batch_of_instances_to_train_on_at_once,
 			dont_use_dataloader=dont_use_dataloader,
 			shuffle_instances_in_training_set=shuffle_instances_in_training_set,
@@ -687,7 +709,6 @@ class FamilyRun:
 			pin_GPU_memory=pin_GPU_memory,
 			run_repeats=run_repeats,
 			neural_network_type=neural_network_type,
-			hidden_layer_size=hidden_layer_size,
 			drop_last=drop_last,
 			persistent_workers=persistent_workers,
 			layer_types=layer_types,
@@ -735,8 +756,8 @@ class FamilyRun:
 		with open(file_structure.family_state_path, "r", encoding="utf-8") as sf:
 			state: Dict[str, Any] = json.load(sf)
 
-		# Prefer the comprehensive mapping in from_dict so we restore all known
-		# fields from JSON. ``file_structure`` is supplied based on the resume dir
+		# Use from_dict to ensure consistent reconstruction.
+		# ``file_structure`` is supplied based on the resume dir
 		# and then explicitly re-attached to ensure we do not depend on what was
 		# persisted in the JSON.
 		obj = cls.from_dict(state)

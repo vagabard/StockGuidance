@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import time
+import traceback
 from typing import List, Tuple, TYPE_CHECKING, Dict
 
 import numpy as np
@@ -84,7 +85,7 @@ def write_run_params(run_dir: str, ts: str, args, resolved: dict, simulate_topk_
 		print(f"Warning: failed to write runParameters.txt: {e}")
 
 
-def create_manifest_dictionary( single_run: SingleRun|None, model_state_path:str|None, optimizer_state_path:str|None,
+def create_manifest_dictionary( single_run: SingleRun|None, model_state_path:str, optimizer_state_path:str,
                                test_metrics_path: str, input_size: int, output_size: int,
                                previous_timestamp: str | None = None) -> dict:
 	# NOTE: Several boolean feature flags are saved under multiple keys for
@@ -106,8 +107,8 @@ def create_manifest_dictionary( single_run: SingleRun|None, model_state_path:str
 		"input_size": int(input_size),
 		"output_size": int(output_size),
 		"hidden_layers": (
-			[int(v) for v in single_run.family_run.hidden_layer_size]
-			if single_run.family_run.hidden_layer_size is not None
+			[int(v) for v in single_run.hidden_layer_size]
+			if single_run.hidden_layer_size is not None
 			else 0
 		),
 		"mlp_layers": int(single_run.mlp_layers),
@@ -128,6 +129,8 @@ def create_manifest_dictionary( single_run: SingleRun|None, model_state_path:str
 		"day_change_centered": single_run.day_change_centered,
 		"precision": str((single_run.family_run.precision or "auto").lower()),
 		"ticker_ids": [int(tid) for tid in single_run.ticker_ids] if single_run.ticker_ids is not None else None,
+		"bias_mode": str(single_run.bias),
+		"layer_types": single_run.family_run.layer_types,
 	}
 	if model_state_path is not None and model_state_path != "":
 		manifest["state_dict_path"] = os.path.basename(model_state_path)
@@ -139,18 +142,19 @@ def create_manifest_dictionary( single_run: SingleRun|None, model_state_path:str
 	return manifest
 
 
-def save_model_and_manifest(single_run: SingleRun, model, optimizer, run_dir: str, suffix: str, test_metrics_path: str, input_size: int, output_size: int,
-                            model_state_path: str | None = None, optimizer_state_path: str | None = None):
+def save_model_and_manifest(single_run: SingleRun, model, optimizer, run_dir: str, suffix: str, test_metrics_path: str, input_size: int, output_size: int):
 	"""Save model/optimizer state dicts and a human-readable manifest JSON."""
-	model_state_path = model_state_path if model_state_path else os.path.join(run_dir, f"{suffix}_model_state.pt")
-	optimizer_state_path = optimizer_state_path if optimizer_state_path else os.path.join(run_dir, f"{suffix}_optimizer_state.pt")
+	model_state_path = os.path.join(run_dir, f"{suffix}_model_state.pt")
+	optimizer_state_path = os.path.join(run_dir, f"{suffix}_optimizer_state.pt")
 	save_dir = os.path.dirname(model_state_path)
 	manifest_path = os.path.join(save_dir, f"{suffix}_model_manifest.json")
 	_save_model_state_dict(model.state_dict(), model_state_path)
 	try:
-		_save_optimizer_state_dict(optimizer.state_dict(), optimizer_state_path)
+		if optimizer is not None:
+			_save_optimizer_state_dict(optimizer.state_dict(), optimizer_state_path)
 	except Exception as opt_e:
 		print(f"Warning: could not save optimizer state: {opt_e}")
+		traceback.print_exc(opt_e)
 
 	manifest = create_manifest_dictionary(single_run, model_state_path, optimizer_state_path, test_metrics_path, input_size, output_size)
 	_save_manifest(manifest, manifest_path)

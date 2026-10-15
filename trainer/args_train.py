@@ -71,7 +71,7 @@ def parse_sweep_lists(
 	args: Any,
 	valid_activations: Optional[Iterable[str]] = None,
 	valid_day_centers: Optional[Iterable[str]] = None,
-) -> Tuple[List[int], List[int], List[float], List[str], List[str], List[str], List[str]]:
+) -> Tuple[List[int], List[int], List[float], List[float], List[str], List[str], List[str], List[str], List[int], List[Optional[List[int]]], List[str], List[bool]]:
 	"""Parse and normalise the main sweepable option lists for training.
 
 	This consolidates the list / range parsing previously in
@@ -79,13 +79,18 @@ def parse_sweep_lists(
 	behaviour while keeping it in a single place.
 
 	Returns a tuple:
-	``(prior_days_list, mlp_layers_list, lr_list, activation_list,
-	final_activation_list, day_change_centered_list, optimizer_list)``.
+	``(prior_days_list, mlp_layers_list, lr_list, learning_rate_adjustment_parameter_list, activation_list,
+	final_activation_list, day_change_centered_list, optimizer_list, epochs_list, hidden_layer_size_list, bias_list)``.
 	"""
 
 	prior_days_list = parse_int_list(getattr(args, "prior_days"), "prior_days")
 	mlp_layers_list = parse_int_list(getattr(args, "mlp_layers"), "mlp_layers")
 	lr_list = parse_float_list(getattr(args, "lr"), "lr")
+	learning_rate_adjustment_parameter_list = parse_float_list(
+		getattr(args, "learning_rate_adjustment_parameter", "1.0"),
+		"learning_rate_adjustment_parameter",
+	)
+	epochs_list = parse_int_list(getattr(args, "epochs"), "epochs")
 
 	activation_list = general_arg_parser_understands_lists(
 		getattr(args, "activation", "relu"),
@@ -108,14 +113,54 @@ def parse_sweep_lists(
 		valid_values=["adam", "adamw", "sgd"],
 	)
 
+	bias_list = general_arg_parser_understands_lists(
+		getattr(args, "bias", "all"),
+		"bias",
+		valid_values=["none", "internal", "noinput", "nooutput", "input", "output", "all"],
+	)
+
+	layer_normalization_list_raw = general_arg_parser_understands_lists(
+		getattr(args, "layer_normalization", "True"),
+		"layer_normalization",
+		valid_values=["True", "False", "true", "false", "1", "0"],
+	)
+	layer_normalization_list = [str(x).lower() == "true" or str(x) == "1" for x in layer_normalization_list_raw]
+
+	# Handle hidden_layer_size_list sweep
+	raw_hidden_list = getattr(args, "hidden_layer_size_list", None)
+	if raw_hidden_list:
+		# Semicolon separated list of comma separated lists
+		hidden_layer_size_list: List[Optional[List[int]]] = []
+		for config in str(raw_hidden_list).split(";"):
+			if config.strip().lower() == "none":
+				hidden_layer_size_list.append(None)
+			else:
+				hidden_layer_size_list.append([
+					int(x) for x in general_arg_parser_understands_lists(config, "hidden_layer_size_list")
+				])
+	else:
+		# Fallback to single hidden_layers arg
+		hidden_layers_raw = getattr(args, "hidden_layers", "")
+		if str(hidden_layers_raw).strip():
+			hidden_layer_size_list = [[
+				int(x) for x in general_arg_parser_understands_lists(str(hidden_layers_raw), "hidden_layers")
+			]]
+		else:
+			hidden_layer_size_list = [None]
+
 	return (
 		prior_days_list,
 		mlp_layers_list,
 		lr_list,
+		learning_rate_adjustment_parameter_list,
 		activation_list,
 		final_activation_list,
 		day_change_centered_list,
 		optimizer_list,
+		epochs_list,
+		hidden_layer_size_list,
+		bias_list,
+		layer_normalization_list,
 	)
 
 

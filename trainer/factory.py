@@ -7,6 +7,7 @@ from trainer.torch_interface.compat import torch, optim
 
 if TYPE_CHECKING:  # pragma: no cover - import for type checkers only
 	from trainer.state.family_run import FamilyRun
+	from trainer.state.single_run import SingleRun
 
 try:
 	from models import make_model  # type: ignore
@@ -17,6 +18,7 @@ except Exception as e:
 
 def create_model_and_optimizer(
     family_run: FamilyRun,
+    single_run: SingleRun,
     input_size: int,
     output_size: int,
     num_layers: int,
@@ -36,12 +38,14 @@ def create_model_and_optimizer(
 		arch=str(family_run.neural_network_type),
 		input_size=int(input_size),
 		output_size=int(output_size),
-		hidden_layers=family_run.hidden_layer_size,
+		hidden_layers=single_run.hidden_layer_size,
 		num_layers=int(num_layers),
 		activation=str(activation),
 		final_activation=final_activation,
 		layer_types=family_run.layer_types,
 		sequence_length=int(prior_days) + 1,
+		bias_mode=str(single_run.bias),
+		layer_normalization=single_run.layer_normalization,
 	)
 	if to_device:
 		model = model.to(device)
