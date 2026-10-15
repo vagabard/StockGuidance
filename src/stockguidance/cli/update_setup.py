@@ -16,6 +16,7 @@ from stockguidance.market_data.history_store import JsonHistoryStore
 from stockguidance.market_data.providers.http import PolygonHttpTransport
 from stockguidance.market_data.providers.polygon import GROUPED_ENDPOINT, GROUPED_UNIVERSE, PolygonGroupedProvider
 from stockguidance.market_data.publication import DailyPublicationPolicy
+from stockguidance.validation.repair import load_repair_plan
 from stockguidance.workflows.update_market_data import UpdateSettings, update_market_data
 from stockguidance.workflows.update_result import UpdateResult
 
@@ -24,6 +25,8 @@ def assemble_and_update(arguments: argparse.Namespace) -> UpdateResult:
 	clock = SystemClock()
 	identity = SourceIdentity("polygon", GROUPED_ENDPOINT, "us-stocks", GROUPED_UNIVERSE, PriceAdjustment(arguments.adjustment))
 	source = SourceConfig(identity, Path(arguments.data_root), Path(arguments.dbinfo_file), "polygon_fetch.DEFAULT_API_KEY or POLYGON_API_KEY")
+	repair_path = getattr(arguments, "repair_plan", None)
+	repair_plan = None if repair_path is None else load_repair_plan(Path(repair_path))
 	history_store = JsonHistoryStore(source.data_root / "history")
 	boundary = history_store.load(identity)
 	if boundary is None and arguments.history_start is None:
@@ -31,8 +34,10 @@ def assemble_and_update(arguments: argparse.Namespace) -> UpdateResult:
 	first = date.fromisoformat(arguments.history_start) if arguments.history_start else boundary.history_start if boundary is not None else None
 	if first is None:
 		raise UnknownHistoryBoundary("Supported history is unknown")
-	end = date.fromisoformat(arguments.end_date) if arguments.end_date else clock.now().date()
-	start = date.fromisoformat(arguments.start_date) if arguments.start_date else first
+	end = date.fromisoformat(arguments.end_date) if arguments.end_date else repair_plan.end if repair_plan is not None else clock.now().date()
+	start = date.fromisoformat(arguments.start_date) if arguments.start_date else repair_plan.start if repair_plan is not None else first
+	if repair_plan is not None:
+		repair_plan.validate_for_update(identity, start, end, clock.now())
 	calendar = ExchangeCalendar("XNYS", first - timedelta(days=14), max(end, first) + timedelta(days=14))
 	if arguments.history_start:
 		if not arguments.history_evidence:
@@ -44,7 +49,7 @@ def assemble_and_update(arguments: argparse.Namespace) -> UpdateResult:
 	if boundary is None:
 		raise UnknownHistoryBoundary("Supported history is unknown")
 	boundary.validate_for(identity, calendar)
-	settings = UpdateSettings(start, end, DailyPublicationPolicy(timedelta(minutes=arguments.publication_delay_minutes), arguments.publication_evidence), CorrectionPolicy(timedelta(days=arguments.recent_window_days), timedelta(hours=arguments.recent_refresh_hours), timedelta(days=arguments.archive_refresh_days), arguments.correction_evidence))
+	settings = UpdateSettings(start, end, DailyPublicationPolicy(timedelta(minutes=arguments.publication_delay_minutes), arguments.publication_evidence), CorrectionPolicy(timedelta(days=arguments.recent_window_days), timedelta(hours=arguments.recent_refresh_hours), timedelta(days=arguments.archive_refresh_days), arguments.correction_evidence), repair_plan)
 	api_key = getattr(arguments, "api_key", None) or os.environ.get("POLYGON_API_KEY")
 	if not api_key:
 		value: object = import_module("polygon_fetch").DEFAULT_API_KEY

@@ -19,8 +19,10 @@ from stockguidance.market_data.providers.contracts import DownloadedSession, Mar
 from stockguidance.market_data.publication import DailyPublicationPolicy
 from stockguidance.market_data.records import records_id
 from stockguidance.market_data.requests import MarketDataRequest
-from stockguidance.market_data.update_planning import SnapshotCoverageReader, SnapshotIndex, plan_updates, reconciled
+from stockguidance.market_data.update_planning import SnapshotCoverageReader, SnapshotIndex, plan_updates
+from stockguidance.validation.assessment import assess_session, coverage_state
 from stockguidance.validation.coverage import CoverageResult, CoverageState, SessionCoverage
+from stockguidance.validation.repair import RepairAction, RepairPlan
 from stockguidance.workflows.failures import FailureCode, StageExecutionError, StageFailure, WorkflowStage
 from stockguidance.workflows.update_result import UpdateResult
 from stockguidance.workflows.update_metadata import persist_update_result
@@ -32,12 +34,15 @@ class UpdateSettings:
 	end: date
 	publication: DailyPublicationPolicy
 	corrections: CorrectionPolicy
+	repair_plan: RepairPlan | None = None
 
 	def __post_init__(self) -> None:
 		require_date(self.start, "update start")
 		require_date(self.end, "update end")
 		if self.start > self.end or not isinstance(self.publication, DailyPublicationPolicy) or not isinstance(self.corrections, CorrectionPolicy):
 			raise ValueError("Invalid update bounds or policies")
+		if self.repair_plan is not None and not isinstance(self.repair_plan, RepairPlan):
+			raise ValueError("Update repair plan must be a typed validation plan")
 
 
 def _failure(code: FailureCode, session_date: date | None = None) -> StageFailure:
@@ -48,6 +53,8 @@ def _failure(code: FailureCode, session_date: date | None = None) -> StageFailur
 def update_market_data(source: SourceConfig, settings: UpdateSettings, boundary: HistoryBoundary | None, calendar: SessionCalendar, provider: MarketDataProvider, repository: MarketDataRepository, clock: Clock) -> UpdateResult:
 	"""Reconcile a live snapshot; historical cutoffs belong to read-only planners."""
 	started = decision_cutoff(clock)
+	if settings.repair_plan is not None:
+		settings.repair_plan.validate_for_update(source.identity, settings.start, settings.end, started)
 	request = MarketDataRequest(source.identity, settings.start, settings.end, started)
 	reader = SnapshotCoverageReader(repository)
 	try:
@@ -68,7 +75,8 @@ def update_market_data(source: SourceConfig, settings: UpdateSettings, boundary:
 	for item in work:
 		try:
 			manifest = item.manifest
-			if item.needs_download:
+			force_refresh = settings.repair_plan is not None and any(repair.action is RepairAction.REFRESH_SOURCE and repair.session_date == item.session.session_date for repair in settings.repair_plan.items)
+			if item.needs_download or force_refresh:
 				try:
 					response = provider.fetch(source, item.session)
 				except Exception:
@@ -109,6 +117,14 @@ def update_market_data(source: SourceConfig, settings: UpdateSettings, boundary:
 	combined = {snapshot.session.session_date: snapshot for snapshot in snapshots}
 	combined.update((snapshot.session.session_date, snapshot) for snapshot in final_reader.snapshots)
 	snapshots = tuple(combined[key] for key in sorted(combined))
+	try:
+		integrity_query = dependency_scope(final_plan, calendar, settings.publication, completed).query
+		integrity = () if integrity_query is None else repository.inspect_integrity(integrity_query)
+	except Exception:
+		raise StageExecutionError(_failure(FailureCode.STORAGE)) from None
+	requested_dates = {item.session.session_date for item in final_plan.sessions}
+	if any(finding.blocking and finding.session_date not in requested_dates for finding in integrity):
+		failures.append(_failure(FailureCode.STORAGE))
 	eligible = tuple(snapshot for snapshot in snapshots if snapshot.receipt is not None and snapshot.receipt.available_at <= completed)
 	index = SnapshotIndex(eligible)
 	assessments: list[SessionCoverage] = []
@@ -120,12 +136,13 @@ def update_market_data(source: SourceConfig, settings: UpdateSettings, boundary:
 			try:
 				manifest = store.load(source.identity, assessment.session)
 				snapshot = by_date.get(assessment.session.session_date)
-				if assessment.session.session_date not in failed_dates and reconciled(source.identity, manifest, snapshot, index, completed):
+				findings = assess_session(source.identity, assessment, manifest, snapshot, index, completed) + tuple(finding for finding in integrity if finding.session_date in {None, assessment.session.session_date})
+				if assessment.session.session_date not in failed_dates and not findings:
 					state, detail = CoverageState.COMPLETE, "Request-scoped source keys/content, raw import, and legacy derived dependencies verified"
 					if manifest is not None:
 						manifests.append(store.mark_complete(manifest))
 				else:
-					state, detail = CoverageState.UNVERIFIED, "Required source/import/derived evidence is absent, unavailable, or failed"
+					state, detail = coverage_state(findings) if findings else CoverageState.INCOMPLETE, "Required source/import/derived evidence is absent, unavailable, or failed"
 					if manifest is not None:
 						manifests.append(manifest)
 			except InvalidManifest:

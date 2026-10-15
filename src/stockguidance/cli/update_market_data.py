@@ -15,6 +15,7 @@ def parser() -> argparse.ArgumentParser:
 	arguments.add_argument("--dbinfo-file", default="dbinfo.id")
 	arguments.add_argument("--start-date")
 	arguments.add_argument("--end-date")
+	arguments.add_argument("--repair-plan", help="Explicitly apply automatic repairs from validation JSON; manual review items are rejected")
 	add_update_policy_arguments(arguments)
 	arguments.add_argument("--max-retries", type=int, default=3)
 	return arguments

@@ -6,6 +6,7 @@ from stockguidance.market_data.legacy_derived import legacy_rows
 from stockguidance.market_data.providers.contracts import DownloadedSession
 from stockguidance.market_data.records import records_id
 from stockguidance.market_data.update_planning import SnapshotIndex
+from stockguidance.validation.derived import derived_values_match
 
 
 def import_if_needed(repository: MarketDataRepository, query: SessionQuery, download: DownloadedSession, snapshot: SessionSnapshot | None) -> None:
@@ -20,7 +21,7 @@ def derived_repairs(snapshots: tuple[SessionSnapshot, ...], repair_dates: frozen
 		if not snapshot.raw_verified or snapshot.session.session_date not in repair_dates:
 			continue
 		dependency = index.dependency(snapshot)
-		if not snapshot.derived_verified(dependency):
-			prior, following = index.neighbors(snapshot)
+		prior, following = index.neighbors(snapshot)
+		if not snapshot.derived_verified(dependency) or not derived_values_match(snapshot, prior, following):
 			updates.append(DerivedUpdate(snapshot, legacy_rows(prior, snapshot.records, following), dependency))
 	return tuple(updates)

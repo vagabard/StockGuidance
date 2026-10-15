@@ -25,6 +25,24 @@ def _derived_value(value: object) -> float | None:
 	return result
 
 
+def decode_raw_row(row: Sequence[object]) -> tuple[int, DailyBar]:
+	if len(row) != 9 or not isinstance(row[1], str):
+		raise ValueError("Invalid raw record layout")
+	return normalize_date_id(row[0]), DailyBar(row[1], decimal_price(row[2]), decimal_price(row[3]), decimal_price(row[4]), decimal_price(row[5]), count_value(row[6]), None if row[7] is None else decimal_price(row[7]), None if row[8] is None else count_value(row[8]))
+
+
+def decode_derived_row(row: Sequence[object]) -> tuple[int, LegacyDerivedRow]:
+	if len(row) != len(DERIVED_COLUMNS) + 2 or not isinstance(row[1], str):
+		raise ValueError("Invalid derived record layout")
+	return normalize_date_id(row[0]), LegacyDerivedRow(row[1], tuple(_derived_value(value) for value in row[2:]))
+
+
+def decode_receipt(row: Sequence[object]) -> tuple[date, ImportReceipt]:
+	if len(row) != 5 or not isinstance(row[1], str) or not isinstance(row[2], str):
+		raise ValueError("Invalid import receipt layout")
+	return normalize_session_date(row[0]), ImportReceipt(row[1], datetime.fromisoformat(row[2]), _optional_text(row[3]), _optional_text(row[4]))
+
+
 def read_snapshots(cursor: Cursor, query: SessionQuery) -> tuple[SessionSnapshot, ...]:
 	dates = tuple(session.session_date for session in query.sessions)
 	placeholders = ",".join("%s" for session in query.sessions)
@@ -42,26 +60,20 @@ def read_snapshots(cursor: Cursor, query: SessionQuery) -> tuple[SessionSnapshot
 	cursor.execute("SELECT r.date_id, s.label, r.open, r.high, r.low, r.close, r.volume, r.vwap, r.transactions" + query_tail.format(table="raw_stock_data"), dates)
 	raw: dict[int, list[DailyBar]] = {}
 	for row in cursor.fetchall():
-		if len(row) != 9 or not isinstance(row[1], str):
-			raise ValueError("Invalid raw record layout")
-		bar = DailyBar(row[1], decimal_price(row[2]), decimal_price(row[3]), decimal_price(row[4]), decimal_price(row[5]), count_value(row[6]), None if row[7] is None else decimal_price(row[7]), None if row[8] is None else count_value(row[8]))
-		raw.setdefault(normalize_date_id(row[0]), []).append(bar)
+		date_id, bar = decode_raw_row(row)
+		raw.setdefault(date_id, []).append(bar)
 	cursor.execute("SELECT r.date_id, s.label, " + ", ".join(f"r.{column}" for column in DERIVED_COLUMNS) + query_tail.format(table="daily_delta_stock_data"), dates)
 	derived: dict[int, list[LegacyDerivedRow]] = {}
 	for row in cursor.fetchall():
-		if len(row) != len(DERIVED_COLUMNS) + 2 or not isinstance(row[1], str):
-			raise ValueError("Invalid derived record layout")
-		derived.setdefault(normalize_date_id(row[0]), []).append(LegacyDerivedRow(row[1], tuple(_derived_value(value) for value in row[2:])))
+		date_id, derived_row = decode_derived_row(row)
+		derived.setdefault(date_id, []).append(derived_row)
 	cursor.execute(f"SELECT session_date, raw_id, available_at, derived_dependency_id, derived_content_id FROM stockguidance_imports WHERE session_date IN ({placeholders})", dates)
 	receipts: dict[date, ImportReceipt] = {}
 	for row in cursor.fetchall():
-		if len(row) != 5 or not isinstance(row[1], str) or not isinstance(row[2], str):
-			raise ValueError("Invalid import receipt layout")
-		session_date = normalize_session_date(row[0])
-		available = datetime.fromisoformat(row[2])
-		if session_date in receipts or session_date not in dates or available.utcoffset() is None:
+		session_date, receipt = decode_receipt(row)
+		if session_date in receipts or session_date not in dates:
 			raise ValueError("Invalid receipt scope or timestamp")
-		receipts[session_date] = ImportReceipt(row[1], available, _optional_text(row[3]), _optional_text(row[4]))
+		receipts[session_date] = receipt
 	by_date = {session.session_date: session for session in query.sessions}
 	snapshots: list[SessionSnapshot] = []
 	for date_id, session_date in ids.items():

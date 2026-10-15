@@ -7,12 +7,14 @@ from stockguidance.database.repositories.market_data import DerivedUpdate, Sessi
 from stockguidance.database.repositories.mysql_market_read import read_snapshots
 from stockguidance.database.repositories.mysql_sessions import Cursor
 from stockguidance.database.repositories.sessions import SessionQuery
+from stockguidance.database.repositories.validation_rows import inspect_rows
 from stockguidance.database.update_schema import assert_source, assert_transactional_tables
 from stockguidance.database.write_connections import WriteConnectionFactory, WriteCursor
 from stockguidance.market_data.legacy_derived import DERIVED_COLUMNS, derived_id
 from stockguidance.market_data.providers.contracts import DownloadedSession, ResponseState
 from stockguidance.market_data.records import records_id
 from stockguidance.market_data.update_planning import SnapshotIndex
+from stockguidance.validation.findings import ValidationFinding
 
 
 class MySQLMarketDataRepository:
@@ -46,6 +48,10 @@ class MySQLMarketDataRepository:
 	def inspect(self, query: SessionQuery) -> tuple[SessionSnapshot, ...]:
 		with self._transaction(query) as cursor:
 			return read_snapshots(cursor, query)
+
+	def inspect_integrity(self, query: SessionQuery) -> tuple[ValidationFinding, ...]:
+		with self._transaction(query) as cursor:
+			return inspect_rows(cursor, query).findings
 
 	def import_session(self, query: SessionQuery, download: DownloadedSession) -> None:
 		if download.session not in query.sessions or download.available_at > query.as_of or download.response.state not in {ResponseState.COMPLETE, ResponseState.NO_TRADING}:

@@ -13,6 +13,7 @@ from stockguidance.market_data.manifests import InvalidManifest, ManifestStore, 
 from stockguidance.market_data.providers.contracts import ResponseState
 from stockguidance.market_data.records import DailyBar, records_id
 from stockguidance.validation.coverage import CoverageState
+from stockguidance.validation.derived import derived_values_match
 
 
 class SnapshotCoverageReader:
@@ -78,4 +79,5 @@ def reconciled(source: SourceIdentity, manifest: SourceManifest | None, snapshot
 		return False
 	if manifest.download.response.state not in {ResponseState.COMPLETE, ResponseState.NO_TRADING} or snapshot.receipt is None or snapshot.receipt.available_at > cutoff:
 		return False
-	return records_id(manifest.download.response.records) == snapshot.raw_content_id and snapshot.derived_verified(index.dependency(snapshot))
+	prior, following = index.neighbors(snapshot)
+	return records_id(manifest.download.response.records) == snapshot.raw_content_id and snapshot.derived_verified(index.dependency(snapshot)) and derived_values_match(snapshot, prior, following)

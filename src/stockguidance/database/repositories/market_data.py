@@ -9,6 +9,7 @@ from stockguidance.database.repositories.sessions import SessionQuery
 from stockguidance.market_data.legacy_derived import LegacyDerivedRow, derived_id
 from stockguidance.market_data.providers.contracts import DownloadedSession
 from stockguidance.market_data.records import DailyBar, records_id
+from stockguidance.validation.findings import ValidationFinding
 
 
 @dataclass(frozen=True)
@@ -71,5 +72,6 @@ class DerivedUpdate:
 
 class MarketDataRepository(Protocol):
 	def inspect(self, query: SessionQuery) -> tuple[SessionSnapshot, ...]: ...
+	def inspect_integrity(self, query: SessionQuery) -> tuple[ValidationFinding, ...]: ...
 	def import_session(self, query: SessionQuery, download: DownloadedSession) -> None: ...
 	def replace_derived(self, query: SessionQuery, update: DerivedUpdate) -> None: ...
