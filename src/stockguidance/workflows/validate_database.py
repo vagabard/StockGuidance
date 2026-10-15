@@ -7,6 +7,7 @@ from stockguidance.config.source import SourceConfig
 from stockguidance.config.validation import require_aware_datetime, require_date
 from stockguidance.database.repositories.sessions import SessionQuery, StoredSession
 from stockguidance.database.repositories.validation import DatabaseInspection, ValidationRepository
+from stockguidance.features.specification import FeatureSpec
 from stockguidance.market_data.coverage_planning import plan_coverage
 from stockguidance.market_data.dependencies import dependency_scope
 from stockguidance.market_data.history import HistoryBoundary
@@ -16,10 +17,13 @@ from stockguidance.market_data.requests import MarketDataRequest
 from stockguidance.market_data.update_planning import SnapshotIndex
 from stockguidance.validation.assessment import assess_session, coverage_state
 from stockguidance.validation.boundaries import boundary_findings
+from stockguidance.validation.close_samples import validate_close_samples
+from stockguidance.validation.feature_scope import feature_query
 from stockguidance.validation.coverage import CoverageResult, SessionCoverage
 from stockguidance.validation.findings import FindingCategory, ValidationCheck, ValidationFinding
 from stockguidance.validation.repair import plan_repairs
 from stockguidance.validation.result import ValidationResult
+from stockguidance.targets.specification import TargetSpec
 
 
 @dataclass(frozen=True)
@@ -28,6 +32,8 @@ class ValidationSettings:
 	end: date
 	publication: DailyPublicationPolicy
 	as_of: datetime | None = None
+	features: FeatureSpec | None = None
+	target: TargetSpec = TargetSpec()
 
 	def __post_init__(self) -> None:
 		require_date(self.start, "validation start")
@@ -36,6 +42,8 @@ class ValidationSettings:
 			raise ValueError("Invalid validation bounds or publication policy")
 		if self.as_of is not None:
 			require_aware_datetime(self.as_of, "validation cutoff")
+		if (self.features is not None and not isinstance(self.features, FeatureSpec)) or not isinstance(self.target, TargetSpec):
+			raise ValueError("Validation requires explicit feature/target contracts")
 
 
 class _NoStoredSessions:
@@ -44,10 +52,13 @@ class _NoStoredSessions:
 
 
 def validate_database(source: SourceConfig, settings: ValidationSettings, boundary: HistoryBoundary | None, calendar: SessionCalendar, repository: ValidationRepository, clock: Clock) -> ValidationResult:
+	if settings.features is not None and (settings.features.adjustment is not source.identity.adjustment or settings.features.interval is not source.identity.interval):
+		raise ValueError("Validation feature specification and source differ")
 	cutoff = decision_cutoff(clock, settings.as_of)
 	request = MarketDataRequest(source.identity, settings.start, settings.end, cutoff)
 	plan = plan_coverage(source, request, boundary, calendar, settings.publication, _NoStoredSessions(), clock)
 	scope = dependency_scope(plan, calendar, settings.publication, cutoff)
+	scope = replace(scope, query=feature_query(plan, scope.query, settings.features, calendar, settings.publication))
 	inspection = DatabaseInspection(()) if scope.query is None else repository.inspect(scope.query)
 	allowed = set(() if scope.query is None else scope.query.sessions)
 	if any(snapshot.session not in allowed for snapshot in inspection.snapshots) or len({snapshot.session for snapshot in inspection.snapshots}) != len(inspection.snapshots) or len({snapshot.date_id for snapshot in inspection.snapshots}) != len(inspection.snapshots):
@@ -73,14 +84,24 @@ def validate_database(source: SourceConfig, settings: ValidationSettings, bounda
 				manifests.append(manifest)
 		findings.extend(assess_session(source.identity, item, manifest, by_date.get(item.session.session_date), index, cutoff))
 	findings.extend(boundary_findings(plan, snapshots, index, calendar, settings.publication))
-	findings.append(ValidationFinding(FindingCategory.NOT_ASSESSED, ValidationCheck.TARGET, "Numerical close-to-close targets and previous-close model features require Stage 5; derived checks use legacy-open-to-close-v1 only"))
+	for session in (() if scope.query is None else scope.query.sessions):
+		if session.session_date in requested_dates:
+			continue
+		try:
+			context_manifest = store.load(source.identity, session)
+		except InvalidManifest:
+			context_manifest = None
+		if context_manifest is not None:
+			manifests.append(context_manifest)
+	numerical_findings, samples = validate_close_samples(plan, inspection, tuple(manifests), calendar, settings.publication, settings.features, settings.target)
+	findings.extend(numerical_findings)
 	for manifest in manifests:
 		if manifest.download.available_at <= cutoff and (not manifest.import_complete or not manifest.derived_complete):
 			findings.append(ValidationFinding(FindingCategory.INCOMPLETE, ValidationCheck.SOURCE, "Manifest import/derived completion markers are unfinished", manifest.download.session.session_date))
 	assessments: list[SessionCoverage] = []
 	for item in plan.sessions:
-		session_findings = tuple(finding for finding in findings if finding.session_date in {None, item.session.session_date} and finding.check is not ValidationCheck.TARGET)
+		session_findings = tuple(finding for finding in findings if finding.session_date in {None, item.session.session_date})
 		state = coverage_state(session_findings)
 		assessments.append(SessionCoverage(item.session, state, "Request-scoped source keys/content and legacy dependencies verified" if not any(finding.blocking for finding in session_findings) else "See typed findings for missing, invalid, incomplete, or unverified evidence"))
 	result_findings = tuple(findings)
-	return ValidationResult(plan, CoverageResult(request, tuple(assessments)), result_findings, plan_repairs(source.identity, settings.start, settings.end, cutoff, result_findings), snapshots, tuple(manifests), () if scope.query is None else scope.query.sessions, inspection.record_counts)
+	return ValidationResult(plan, CoverageResult(request, tuple(assessments)), result_findings, plan_repairs(source.identity, settings.start, settings.end, cutoff, result_findings), snapshots, tuple(manifests), () if scope.query is None else scope.query.sessions, inspection.record_counts, samples, settings.features)

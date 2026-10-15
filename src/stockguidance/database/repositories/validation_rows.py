@@ -31,9 +31,20 @@ def inspect_rows(cursor: Cursor, query: SessionQuery) -> DatabaseInspection:
 	raw: dict[int, dict[str, DailyBar]] = {}
 	derived: dict[int, dict[str, LegacyDerivedRow]] = {}
 	counts: dict[date, list[int]] = {session_date: [0, 0] for session_date in dates}
+	ticker_symbols: dict[int, str] = {}
+	symbol_ids: dict[str, int] = {}
 	for table, columns in (("raw_stock_data", "r.open, r.high, r.low, r.close, r.volume, r.vwap, r.transactions"), ("daily_delta_stock_data", ", ".join(f"r.{column}" for column in DERIVED_COLUMNS))):
 		cursor.execute(f"SELECT r.date_id, r.ticker_id, t.transaction_date, s.label, {columns} FROM {table} r LEFT JOIN ticker_symbol s ON s.id = r.ticker_id LEFT JOIN transaction_dates t ON t.id = r.date_id WHERE t.transaction_date IN ({placeholders}) OR t.id IS NULL ORDER BY r.date_id, r.ticker_id", dates)
 		for row in cursor.fetchall():
+			try:
+				ticker_id = normalize_date_id(row[1])
+			except ValueError:
+				ticker_id = None
+			if ticker_id is not None and isinstance(row[3], str):
+				if (ticker_id in ticker_symbols and ticker_symbols[ticker_id] != row[3]) or (row[3] in symbol_ids and symbol_ids[row[3]] != ticker_id):
+					findings.append(ValidationFinding(FindingCategory.INVALID, ValidationCheck.DUPLICATE, "Ambiguous ticker identity", record_ids=(ticker_id,)))
+				ticker_symbols[ticker_id] = row[3]
+				symbol_ids[row[3]] = ticker_id
 			if row[2] is not None:
 				row_date = normalize_session_date(row[2])
 				if row_date not in counts:
@@ -64,7 +75,7 @@ def inspect_rows(cursor: Cursor, query: SessionQuery) -> DatabaseInspection:
 			findings.append(ValidationFinding(FindingCategory.INVALID, ValidationCheck.IMPORT, "Daily receipt predates the session close", session_date))
 			snapshot_receipt = None
 		snapshots.append(SessionSnapshot(sessions[session_date], date_id, tuple(raw.get(date_id, {}).values()), tuple(derived.get(date_id, {}).values()), snapshot_receipt))
-	return DatabaseInspection(tuple(snapshots), tuple(findings), tuple(SessionRecordCounts(session_date, count[0], count[1]) for session_date, count in counts.items()))
+	return DatabaseInspection(tuple(snapshots), tuple(findings), tuple(SessionRecordCounts(session_date, count[0], count[1]) for session_date, count in counts.items()), tuple(sorted(ticker_symbols.items())))
 
 
 def _read_record(row: Sequence[object], table: str, ids: dict[int, date], raw: dict[int, dict[str, DailyBar]], derived: dict[int, dict[str, LegacyDerivedRow]], findings: list[ValidationFinding]) -> None:

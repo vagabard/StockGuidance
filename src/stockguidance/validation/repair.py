@@ -70,6 +70,8 @@ def plan_repairs(source: SourceIdentity, start: date, end: date, cutoff: datetim
 	for finding in findings:
 		if not finding.blocking:
 			continue
+		if finding.check in {ValidationCheck.FEATURE, ValidationCheck.TARGET} and any(other.blocking and other.check not in {ValidationCheck.FEATURE, ValidationCheck.TARGET} and other.session_date in {None, finding.dependency_session_date or finding.session_date} for other in findings):
+			continue
 		if finding.session_date is not None and not start <= finding.session_date <= end:
 			action = RepairAction.REVIEW_RECORDS
 		elif finding.check is ValidationCheck.SCHEMA:
@@ -84,6 +86,8 @@ def plan_repairs(source: SourceIdentity, start: date, end: date, cutoff: datetim
 			action = RepairAction.REFRESH_SOURCE
 		elif finding.check in {ValidationCheck.RAW_KEYS, ValidationCheck.RAW_VALUES, ValidationCheck.IMPORT}:
 			action = RepairAction.REIMPORT
+		elif finding.check in {ValidationCheck.FEATURE, ValidationCheck.TARGET}:
+			action = RepairAction.REVIEW_RECORDS
 		else:
 			action = RepairAction.REBUILD_DERIVED
 		item = RepairItem(action, finding.session_date, finding.check, finding.tickers)

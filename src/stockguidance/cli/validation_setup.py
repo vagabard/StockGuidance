@@ -7,6 +7,7 @@ from stockguidance.calendar.exchange import ExchangeCalendar
 from stockguidance.config.source import PriceAdjustment, SourceConfig, SourceIdentity
 from stockguidance.database.repositories.mysql_validation import MySQLValidationRepository
 from stockguidance.database.write_connections import LegacyWriteConnectionFactory
+from stockguidance.features.specification import FeatureSpec
 from stockguidance.market_data.history import HistoryProvenance, UnknownHistoryBoundary, establish_history_boundary
 from stockguidance.market_data.history_store import JsonHistoryStore
 from stockguidance.market_data.providers.polygon import GROUPED_ENDPOINT, GROUPED_UNIVERSE
@@ -19,6 +20,9 @@ def assemble_and_validate(arguments: argparse.Namespace) -> ValidationResult:
 	clock = SystemClock()
 	identity = SourceIdentity("polygon", GROUPED_ENDPOINT, "us-stocks", GROUPED_UNIVERSE, PriceAdjustment(arguments.adjustment))
 	source = SourceConfig(identity, Path(arguments.data_root), Path(arguments.dbinfo_file), "unused-by-read-only-validation")
+	if (arguments.ticker_ids is None) != (arguments.lookback_sessions is None):
+		raise ValueError("Feature validation requires both ticker IDs and lookback")
+	features = None if arguments.ticker_ids is None else FeatureSpec(tuple(int(value.strip()) for value in arguments.ticker_ids.split(",")), arguments.lookback_sessions, adjustment=identity.adjustment)
 	boundary = JsonHistoryStore(source.data_root / "history").load(identity)
 	if boundary is None and arguments.history_start is None:
 		raise UnknownHistoryBoundary("Supported history is unknown")
@@ -39,5 +43,5 @@ def assemble_and_validate(arguments: argparse.Namespace) -> ValidationResult:
 	if arguments.publication_delay_minutes is not None and not arguments.publication_evidence:
 		raise ValueError("Known publication delay requires provenance")
 	publication = DailyPublicationPolicy(None if arguments.publication_delay_minutes is None else timedelta(minutes=arguments.publication_delay_minutes), arguments.publication_evidence or "Publication policy unknown")
-	settings = ValidationSettings(start, end, publication, cutoff)
+	settings = ValidationSettings(start, end, publication, cutoff, features)
 	return validate_database(source, settings, boundary, calendar, MySQLValidationRepository(source, LegacyWriteConnectionFactory()), clock)

@@ -26,7 +26,8 @@ def test_clean_scope_is_complete_and_source_evidence_is_explicit(harness, valida
 	assert payload["source"]["universe"] == harness.source.identity.universe
 	assert payload["sessions"][0]["raw_valid_keys"] == ["AAA"]
 	assert payload["derived_spec"] == "legacy-open-to-close-v1"
-	assert matches(result, ValidationCheck.TARGET, FindingCategory.NOT_ASSESSED)
+	assert result.samples and result.samples[0].targets.raw == (0.0,)
+	assert matches(result, ValidationCheck.FEATURE, FindingCategory.NOT_ASSESSED)
 	assert matches(result, ValidationCheck.HISTORY, FindingCategory.EXPECTED_ABSENCE, date(2024, 7, 1))
 
 

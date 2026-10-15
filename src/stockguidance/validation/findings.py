@@ -29,6 +29,7 @@ class ValidationCheck(StrEnum):
 	HISTORY = "predecessor_history"
 	OUTCOME = "legacy_outcome"
 	TARGET = "close_to_close_target"
+	FEATURE = "previous_close_features"
 
 
 @dataclass(frozen=True)
@@ -39,6 +40,7 @@ class ValidationFinding:
 	session_date: date | None = None
 	tickers: tuple[str, ...] = ()
 	record_ids: tuple[int, ...] = ()
+	dependency_session_date: date | None = None
 
 	def __post_init__(self) -> None:
 		require_enum(self.category, FindingCategory, "finding category")
@@ -46,6 +48,8 @@ class ValidationFinding:
 		require_text(self.detail, "finding detail")
 		if self.session_date is not None:
 			require_date(self.session_date, "finding session")
+		if self.dependency_session_date is not None:
+			require_date(self.dependency_session_date, "finding dependency session")
 		if not isinstance(self.tickers, tuple) or any(not isinstance(ticker, str) or not ticker for ticker in self.tickers):
 			raise ValueError("Finding tickers must be an immutable text layout")
 		if not isinstance(self.record_ids, tuple) or any(type(record_id) is not int for record_id in self.record_ids):

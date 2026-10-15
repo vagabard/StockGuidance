@@ -19,6 +19,7 @@ class DatabaseInspection:
 	snapshots: tuple[SessionSnapshot, ...]
 	findings: tuple[ValidationFinding, ...] = ()
 	record_counts: tuple[SessionRecordCounts, ...] = ()
+	ticker_symbols: tuple[tuple[int, str], ...] = ()
 
 
 class ValidationRepository(Protocol):

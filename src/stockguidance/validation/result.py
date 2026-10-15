@@ -3,6 +3,8 @@ from dataclasses import dataclass
 from stockguidance.calendar.sessions import TradingSession
 from stockguidance.database.repositories.market_data import SessionSnapshot
 from stockguidance.database.repositories.validation import SessionRecordCounts
+from stockguidance.datasets.sample import Sample
+from stockguidance.features.specification import FeatureSpec
 from stockguidance.market_data.coverage import CoveragePlan
 from stockguidance.market_data.manifests import SourceManifest
 from stockguidance.validation.coverage import CoverageResult, CoverageState
@@ -20,6 +22,8 @@ class ValidationResult:
 	manifests: tuple[SourceManifest, ...]
 	queried_sessions: tuple[TradingSession, ...]
 	record_counts: tuple[SessionRecordCounts, ...]
+	samples: tuple[Sample, ...] = ()
+	feature_specification: FeatureSpec | None = None
 
 	@property
 	def failed(self) -> bool:
