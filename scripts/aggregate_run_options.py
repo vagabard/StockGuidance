@@ -83,16 +83,21 @@ def aggregate_run_options(root_dir: str = r"c:\Projects\StockGuidance\data") -> 
                             "file_structure", "single_runs_for_all_combinations", "dbinfo",
                             "activation_list", "base_args", "base_args_list", "base_optional_features",
                             "completed", "current_index", "day_change_centered_list", "dbinfo_file", "device",
-                            "final_activation_list", "include_one_feature_list", "initial_run_id", "input_size", "limit",
-                            "log_interval", "lr_list", "mlp_layers_list", "optimizer_list",
-                            "output_size", "prior_days_list", "ticker_ids", "trading_interval"
+                            "epochs_list", "final_activation_list", "include_one_feature_list", "initial_run_id", "input_size", "limit",
+                            "log_interval", "lr_list", "mlp_layers_list", "optimizer_list", "hidden_layer_size_list",
+                            "output_size", "prior_days_list", "ticker_ids", "trading_interval",
+                            "bias_list", "layer_normalization_list", "learning_rate_adjustment_parameter_list"
                         ]
                         if field in ignored_fields:
                             continue
 
                         # Process hidden_layer_size: if it's a list, concatenate it into a single string
-                        if field == "hidden_layer_size" and isinstance(value, list):
-                            value = ",".join(map(str, value))
+                        if (field == "hidden_layer_size" or field == "hidden_layer_size_list") and isinstance(value, list):
+                            if field == "hidden_layer_size":
+                                value = ",".join(map(str, value))
+                            else:
+                                # hidden_layer_size_list is a list of lists/Nones
+                                value = ";".join([",".join(map(str, v)) if v else "None" for v in value])
 
                         # Convert unhashable types to strings for dictionary keys
                         if isinstance(value, (list, dict, set)):
