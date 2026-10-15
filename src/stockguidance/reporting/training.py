@@ -1,0 +1,17 @@
+from dataclasses import asdict
+
+from stockguidance.training.result import TrainingResult
+
+
+def training_payload(result: TrainingResult) -> dict[str, object]:
+	return {
+		"artifact": {"path": str(result.artifact.path), "artifact_id": result.artifact.artifact_id},
+		"completed_epochs": result.completed_epochs, "training_samples": result.training_samples,
+		"training_mae": result.training_mae, "training_metric_scope": "in_sample",
+		"evaluation_kind": result.evaluation_kind.value, "evaluation_mae": result.evaluation_mae,
+		"evaluation_samples": result.evaluation_samples, "evaluation_revision": result.evaluation_revision,
+		"evaluation_cutoff": None if result.evaluation_cutoff is None else result.evaluation_cutoff.isoformat(),
+		"excluded_training": [{**asdict(item), "entry_session": item.entry_session.isoformat()} for item in result.excluded_training],
+		"excluded_evaluation": [{**asdict(item), "entry_session": item.entry_session.isoformat()} for item in result.excluded_evaluation],
+		"epochs": [asdict(item) for item in result.epochs], "device": result.device, "precision": result.precision,
+	}

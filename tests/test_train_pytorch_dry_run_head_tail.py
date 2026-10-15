@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import train_pytorch_network as tpn
+from trainer import legacy_training as tpn
 
 
 def _get_planned_runs(start_date: str | None = None, end_date: str | None = None, run_repeats: int | None = None):

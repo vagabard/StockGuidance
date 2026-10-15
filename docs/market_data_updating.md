@@ -1,5 +1,10 @@
 # Recoverable daily market-data updating
 
+For independent read-only checks and explicit validation repair plans, see
+[database validation](database_validation.md). The updater shares its readiness
+and integrity checks; `--repair-plan validation.json` applies automatic proposals
+only when explicitly invoked and rejects plans requiring manual review.
+
 Run commands from the repository root using PyCharm's configured Python. The
 supported frontend is `python -m stockguidance.cli.update_market_data`; the root
 `update_market_data.py` wrapper runs the same frontend. Installing the updated
