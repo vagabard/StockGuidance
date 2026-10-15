@@ -88,6 +88,7 @@ def test_stock_recommender_random_inputs_vary_argmax(tmp_path):
         lr=0.001,
         activation=activation,
         final_activation="",
+        epochs=1,
         file_structure=FileStructureSingleRunHandler.from_dict({"run_directory": str(run_dir), "suffix": ""}),
     )
 

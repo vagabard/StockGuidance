@@ -1,0 +1,26 @@
+from datetime import date
+from typing import Protocol
+from zoneinfo import ZoneInfo
+
+from stockguidance.calendar.sessions import TradingSession
+
+
+class SessionCalendar(Protocol):
+	@property
+	def calendar_id(self) -> str: ...
+
+	@property
+	def version(self) -> str: ...
+
+	@property
+	def timezone(self) -> ZoneInfo: ...
+
+	@property
+	def start(self) -> date: ...
+
+	@property
+	def end(self) -> date: ...
+
+	def session(self, session_date: date) -> TradingSession: ...
+	def sessions(self, start: date, end: date) -> tuple[TradingSession, ...]: ...
+	def shift(self, session: TradingSession, offset: int) -> TradingSession: ...

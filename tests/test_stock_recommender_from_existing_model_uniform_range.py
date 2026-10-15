@@ -57,6 +57,7 @@ def test_existing_model_random_uniform_inputs_vary_top_id():
             lr=0.001,
             activation=manifest.get("activation", "relu"),
             final_activation=manifest.get("final_activation", ""),
+            epochs=manifest.get("epochs", 1),
             file_structure=FileStructureSingleRunHandler.from_dict({"run_directory": model_dir, "suffix": ""}),
             ticker_ids=manifest.get("ticker_ids")
         )

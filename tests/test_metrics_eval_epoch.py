@@ -26,7 +26,7 @@ def test_eval_epoch_returns_mean_mse_and_topk_without_rank(monkeypatch) -> None:
 	yb2 = torch.tensor([[-1.0, 1.0]])
 	batches = [(xb1, yb1), (xb2, yb2)]
 
-	mse, top10, rde = eval_epoch(
+	mse, top10, rde, counts = eval_epoch(
 		model,
 		batches,
 		device=torch.device("cpu"),
@@ -38,3 +38,7 @@ def test_eval_epoch_returns_mean_mse_and_topk_without_rank(monkeypatch) -> None:
 	assert mse == pytest.approx(expected)
 	assert top10 == pytest.approx(expected)  # top-k loss mirrors mse for this setup
 	assert rde == 0.0
+	assert counts["label_pos"] == 4
+	assert counts["label_neg"] == 1
+	assert counts["label_zero"] == 1
+	assert counts["pred_zero"] == 6 # 3 samples * 2 outputs
