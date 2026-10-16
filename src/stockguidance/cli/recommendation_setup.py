@@ -16,6 +16,9 @@ from stockguidance.market_data.history_store import JsonHistoryStore
 from stockguidance.market_data.providers.configured_polygon import ConfiguredPolygonProvider
 from stockguidance.models.policy import ModelRefreshPolicy, ModelSelection
 from stockguidance.portfolio.policy import AllocationSpec
+from stockguidance.portfolio.precision import ExecutionPolicy
+from stockguidance.portfolio.serialization import decimal_text, load_portfolio
+from stockguidance.portfolio.state import initial_portfolio
 from stockguidance.recommendations.configuration import ArtifactKind, RecommendationJob, RetrainingPlan
 from stockguidance.targets.specification import TargetSpec
 from stockguidance.workflows.recommend import recommend
@@ -36,8 +39,16 @@ def assemble_and_recommend(configuration: RecommendationConfiguration, arguments
 		decisions = tuple(DecisionTiming(calendar.shift(session, -1), session, calendar.shift(session, 1), session.closes_at - settings.decision_lead) for session in calendar.sessions(settings.start, settings.end))
 		retraining = RetrainingPlan(decisions, settings.training, arguments.artifact)
 	job = RecommendationJob(configuration.source, configuration.start or boundary.history_start, configuration.end, configuration.entry_date, configuration.features, TargetSpec(), ModelSelection(policy, None if reference is None else reference.artifact_id), AllocationSpec(configuration.allocation_policy, calendar.session(configuration.anchor_date)), configuration.publication, configuration.corrections, configuration.eligibility, configuration.top_k, reference, ArtifactKind(arguments.artifact_kind), retraining)
+	clock = SystemClock()
+	portfolio = None
+	if arguments.portfolio_state is not None:
+		portfolio = load_portfolio(arguments.portfolio_state, job.allocation, calendar)
+	elif arguments.capital is not None:
+		if job.entry_date != job.allocation.anchor_session.session_date:
+			raise ValueError("Initial cash requires entry at the anchor; supply actual portfolio state for later sessions")
+		portfolio = initial_portfolio(job.allocation, decimal_text(arguments.capital), clock.now())
 	connect = LegacyWriteConnectionFactory()
 	validation = MySQLValidationRepository(job.source, connect)
 	closes = VerifiedCloseRepository(job.source, validation)
 	services = RecommendationServices(ConfiguredPolygonProvider(arguments.max_retries), MySQLMarketDataRepository(job.source, connect), validation, closes, VerifiedEligibilityRepository(closes))
-	return recommend(job, boundary, calendar, services, SystemClock())
+	return recommend(job, boundary, calendar, services, clock, portfolio=portfolio, execution=ExecutionPolicy(decimal_text(arguments.fee_per_fill)))

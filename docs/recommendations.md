@@ -13,7 +13,7 @@ decision cutoff is captured **after refresh**, so actual new receipts can be
 available. Validation, feature construction, liquidity and label maturity use
 that same cutoff. The command fails if refresh crosses the entry close or if
 training/prediction finishes after it. It does not backdate newly downloaded
-history. Historical replay belongs to Stage 8's chronological simulator.
+history. Historical replay uses the [chronological simulator](simulation.md).
 
 The requested entry fills at its close, and exit is the next exchange session's
 close under the explicit `pre_close_decision_same_close_fill` simulation
@@ -140,10 +140,27 @@ evidence, ranking, coverage readiness and optional training results. Credentials
 database configuration and controller state are excluded. Reports do not write
 into model directories or send email. Output can be saved explicitly by the caller.
 
-Both `alternate_sessions` and `staggered_halves` are request/result policies.
-The output is a **ranked suggestion**, with `orders_planned: false`,
-`fills_recorded: false`, and `cash_rest_enforced: false`. Actual supplied portfolio
-state, independent balances and cash-rest-backed sizing/planning are Stage 8.
+Both `alternate_sessions` and `staggered_halves` use the shared deterministic
+portfolio planner. Without supplied capital/state, output remains a **ranked
+suggestion**, with `orders_planned: false`, `fills_recorded: false`, and
+`cash_rest_enforced: false`.
+
+For a capital-aware plan, supply `--portfolio-state portfolio.json`. The snapshot
+schema and cash-rest rules are documented in [simulation.md](simulation.md).
+For the initial entry **at the allocation anchor only**, `--capital '1000.00'`
+declares actual initial cash instead. Later entries require the actual complete
+snapshot, including positions and resting proceeds. `--fee-per-fill '1.00'`
+sets an explicit fixed fee; the default is zero. Initial staggered capital must
+split equally into whole cents.
+
+The result includes the supplied snapshot and an `order_plan` with fixed maximum
+debits per ticker, projected eligible cash, fees, timing and a reason when no buy
+is scheduled or possible. `cash_rest_enforced` then becomes true; `orders_planned`
+reports whether the plan actually contains orders. Maximum debits include the
+fee and do not assume a known entry close;
+fractional quantities are determined only at execution. A failed fill keeps its
+budget in that allocation. Recommendations never change the supplied state or
+record hypothetical fills: `fills_recorded` remains false.
 
 Exit 0 means all required stages completed and suggestions are ready before the
 entry close. Exit 2 means invalid arguments/configuration. Exit 1 means required
@@ -153,7 +170,8 @@ there is no successful recommendation payload following a required failure.
 
 The typed application entry point is `workflows.recommend.recommend`, taking a
 `RecommendationJob`, evidenced boundary, calendar, `RecommendationServices`,
-injected clock and optional typed trainer. It returns `RecommendationRunResult`.
+injected clock and optional typed trainer, `portfolio: PortfolioState` and
+`execution: ExecutionPolicy`. It returns `RecommendationRunResult`.
 Source/provider/database adapters are injectable; only the concrete CLI selects
 Polygon. Newly imported session mappings are read after refresh. No application
 code builds CLI strings or reads mutable training-directory properties.

@@ -5,14 +5,16 @@ from stockguidance.calendar.protocols import SessionCalendar
 from stockguidance.database.repositories.closes import CloseQuery
 from stockguidance.database.repositories.sessions import SessionQuery
 from stockguidance.datasets.building import build_sample
-from stockguidance.inference.scores import score_sample
 from stockguidance.market_data.history import HistoryBoundary
 from stockguidance.market_data.identity import content_id
+from stockguidance.portfolio.planning import plan_orders
+from stockguidance.portfolio.precision import ExecutionPolicy
+from stockguidance.portfolio.state import PortfolioState
 from stockguidance.recommendations.artifacts import load_recommendation_artifact, require_compatible_artifact
 from stockguidance.recommendations.configuration import ArtifactKind, RecommendationJob
 from stockguidance.recommendations.eligibility import EligibilityState, assess_eligibility, eligibility_revision
 from stockguidance.recommendations.preparation import prepare_request
-from stockguidance.recommendations.ranking import rank_scores
+from stockguidance.recommendations.scoring import predict_ranking
 from stockguidance.recommendations.result import RecommendationResult
 from stockguidance.workflows.failures import FailureCode, StageExecutionError, StageFailure, WorkflowStage
 from stockguidance.workflows.recommendation_dependencies import HistoryTrainer, RecommendationServices
@@ -26,9 +28,12 @@ def _failure(stage: WorkflowStage, code: FailureCode, message: str) -> StageExec
 	return StageExecutionError(StageFailure(stage, code, message))
 
 
-def recommend(job: RecommendationJob, boundary: HistoryBoundary, calendar: SessionCalendar, services: RecommendationServices, clock: Clock, *, trainer: HistoryTrainer | None = None) -> RecommendationRunResult:
+def recommend(job: RecommendationJob, boundary: HistoryBoundary, calendar: SessionCalendar, services: RecommendationServices, clock: Clock, *, trainer: HistoryTrainer | None = None, portfolio: PortfolioState | None = None, execution: ExecutionPolicy = ExecutionPolicy()) -> RecommendationRunResult:
 	try:
 		request = prepare_request(job, boundary, calendar, clock)
+		if portfolio is not None:
+			portfolio.validate_calendar(calendar)
+			plan_orders(portfolio, job.allocation, request.timing, (), execution)
 	except Exception:
 		raise _failure(WorkflowStage.REQUEST, FailureCode.INVALID_REQUEST, "Recommendation timing, coverage or training specification is invalid") from None
 	artifact: LoadedModel | LoadedEnsemble | None = None
@@ -78,8 +83,8 @@ def recommend(job: RecommendationJob, boundary: HistoryBoundary, calendar: Sessi
 	try:
 		if artifact is None:
 			raise ValueError("No explicit artifact")
-		scores = score_sample(artifact, sample)
-		ranking = rank_scores(scores, eligibility, job.top_k)
+		prediction = predict_ranking(artifact, sample, eligibility, job.top_k)
+		scores, ranking = prediction.scores, prediction.ranking
 		if not ranking:
 			raise _failure(WorkflowStage.PREDICTION, FailureCode.NOT_READY, "No ticker satisfies the required previous-session transaction minimum")
 		if decision_cutoff(clock) >= request.timing.entry_time:
@@ -90,6 +95,12 @@ def recommend(job: RecommendationJob, boundary: HistoryBoundary, calendar: Sessi
 		raise
 	except Exception:
 		raise _failure(WorkflowStage.PREDICTION, FailureCode.PREDICTION_FAILED, "Required prediction or ranking failed") from None
-	members = (artifact,) if isinstance(artifact, LoadedModel) else artifact.members
-	weights = (1.0,) if isinstance(artifact, LoadedModel) else artifact.weights
-	return RecommendationRunResult(result, scores, eligibility, sample, refresh, validation, tuple(member.artifact_id for member in members), weights, training)
+	try:
+		order_plan = None if portfolio is None else plan_orders(portfolio, job.allocation, request.timing, ranking, execution)
+		if order_plan is not None and decision_cutoff(clock) >= request.timing.entry_time:
+			raise _failure(WorkflowStage.PLANNING, FailureCode.NOT_READY, "Entry close passed before portfolio order plans were ready")
+	except StageExecutionError:
+		raise
+	except Exception:
+		raise _failure(WorkflowStage.PLANNING, FailureCode.INVALID_REQUEST, "Supplied portfolio state cannot support a valid cash-rest order plan") from None
+	return RecommendationRunResult(result, scores, eligibility, sample, refresh, validation, prediction.member_artifact_ids, prediction.member_weights, training, order_plan, portfolio)

@@ -135,7 +135,7 @@ def test_text_output_and_root_frontends_use_the_same_cli(recommender, job_json, 
 	path.write_text(json.dumps(job_json), encoding="utf-8")
 	assert choose_next_day_stocks.main(arguments(recommender, path) + ["--format", "text"]) == 0
 	output = capsys.readouterr().out
-	assert "Ranked suggestions" in output and "Stage 8" in output
+	assert "Ranked suggestions" in output and "supplied portfolio state" in output
 	assert "2024-07-09" in output and "2024-07-10" in output
 
 

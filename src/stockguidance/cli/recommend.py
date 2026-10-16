@@ -5,6 +5,8 @@ from pathlib import Path
 from stockguidance.cli.recommendation_configuration import load_configuration
 from stockguidance.cli.recommendation_setup import assemble_and_recommend
 from stockguidance.models.policy import ModelRefreshPolicy
+from stockguidance.portfolio.precision import ExecutionPolicy
+from stockguidance.portfolio.serialization import decimal_text
 from stockguidance.recommendations.configuration import ArtifactKind
 from stockguidance.reporting.recommendations import recommendation_payload, render_recommendations
 from stockguidance.workflows.failures import StageExecutionError
@@ -19,12 +21,22 @@ def build_parser() -> argparse.ArgumentParser:
 	parser.add_argument("--artifact-kind", choices=[kind.value for kind in ArtifactKind], default=ArtifactKind.MODEL.value)
 	parser.add_argument("--max-retries", type=int, default=5)
 	parser.add_argument("--format", choices=("json", "text"), default="json")
+	capital = parser.add_mutually_exclusive_group()
+	capital.add_argument("--portfolio-state", type=Path, help="Actual portfolio JSON snapshot for cash-rest order planning")
+	capital.add_argument("--capital", help="Actual initial cash at the allocation anchor, as a decimal string")
+	parser.add_argument("--fee-per-fill", default="0.00", help="Fixed fee for each simulated/planned fill, as whole cents")
 	return parser
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 	parser = build_parser()
 	arguments = parser.parse_args(argv)
+	try:
+		ExecutionPolicy(decimal_text(arguments.fee_per_fill))
+		if arguments.capital is not None and decimal_text(arguments.capital) <= 0:
+			raise ValueError("Nonpositive capital")
+	except Exception:
+		parser.error("Capital and fees require valid decimal strings; fees use nonnegative whole cents")
 	if arguments.max_retries <= 0:
 		parser.error("--max-retries must be positive")
 	if arguments.policy == ModelRefreshPolicy.CURRENT.value and (arguments.artifact_id is None or len(arguments.artifact_id) != 64 or any(character not in "0123456789abcdef" for character in arguments.artifact_id)):

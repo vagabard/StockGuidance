@@ -22,7 +22,7 @@ class AllocationSpec:
 	Staggered halves splits initial capital once into independent A/B balances:
 	A buys at anchor, anchor+2, ...; B at anchor+1, anchor+3, ... . Each sells
 	at the next close and reinvests its own proceeds after the overnight rest.
-	Balances are never rebalanced or transferred. Stage 8 supplies the ledger.
+	Balances are never rebalanced or transferred. State and planning live here.
 	"""
 
 	policy: AllocationPolicy

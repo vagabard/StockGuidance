@@ -12,6 +12,7 @@ from stockguidance.models.policy import ModelRefreshPolicy
 from stockguidance.portfolio.policy import AllocationPolicy
 from stockguidance.recommendations.eligibility import EligibilityPolicy
 from stockguidance.reporting.recommendations import recommendation_payload
+from stockguidance.recommendations import scoring
 from stockguidance.workflows import recommend as workflow
 from stockguidance.workflows.failures import FailureCode, StageExecutionError, StageFailure, WorkflowStage
 from stockguidance.workflows.train_model import train_from_history
@@ -92,7 +93,7 @@ def test_failure_at_every_required_stage_prevents_success(recommender, monkeypat
 	if stage == "training":
 		trainer = fail
 	else:
-		monkeypatch.setattr(workflow, targets[stage], fail)
+		monkeypatch.setattr(scoring if stage in ("prediction", "ranking") else workflow, targets[stage], fail)
 	with pytest.raises(StageExecutionError) as error:
 		recommender.run(job, trainer=trainer)
 	expected = {"refresh": WorkflowStage.REFRESH, "validation": WorkflowStage.VALIDATION, "features": WorkflowStage.VALIDATION, "eligibility": WorkflowStage.VALIDATION, "training": WorkflowStage.TRAINING, "artifact": WorkflowStage.ARTIFACT, "prediction": WorkflowStage.PREDICTION, "ranking": WorkflowStage.PREDICTION}[stage]

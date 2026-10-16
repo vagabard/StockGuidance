@@ -1,5 +1,7 @@
 from dataclasses import asdict
 
+from stockguidance.portfolio.serialization import portfolio_payload
+from stockguidance.reporting.orders import order_plan_payload
 from stockguidance.reporting.training import training_payload
 from stockguidance.workflows.recommendation_result import RecommendationRunResult
 
@@ -8,8 +10,10 @@ def recommendation_payload(run: RecommendationRunResult) -> dict[str, object]:
 	result = run.recommendation
 	request, timing = result.request, result.request.timing
 	return {
-		"successful": True, "kind": "ranked_suggestions", "orders_planned": False, "fills_recorded": False,
-		"cash_rest_enforced": False, "planning_status": "requires_stage_8_portfolio_state",
+		"successful": True, "kind": "ranked_suggestions" if run.order_plan is None else "portfolio_order_plan", "orders_planned": run.order_plan is not None and bool(run.order_plan.orders), "fills_recorded": False,
+		"cash_rest_enforced": run.order_plan is not None, "planning_status": "requires_supplied_portfolio_state" if run.order_plan is None else run.order_plan.state.value,
+		"supplied_portfolio": None if run.portfolio is None else portfolio_payload(run.portfolio),
+		"order_plan": None if run.order_plan is None else order_plan_payload(run.order_plan),
 		"model_policy": request.model.policy.value, "artifact_id": result.artifact_id,
 		"members": [{"artifact_id": identity, "weight": weight} for identity, weight in zip(run.member_artifact_ids, run.member_weights)],
 		"source": asdict(request.source.identity), "data_revision": result.data_revision,
@@ -33,6 +37,9 @@ def recommendation_payload(run: RecommendationRunResult) -> dict[str, object]:
 
 def render_recommendations(run: RecommendationRunResult) -> str:
 	result, timing = run.recommendation, run.recommendation.request.timing
-	lines = [f"Ranked suggestions: entry close {timing.entry_session.session_date}; exit close {timing.exit_session.session_date}", f"Decision cutoff: {timing.decision_cutoff.isoformat()}", f"Artifact: {result.artifact_id}", f"Source revision: {result.data_revision}", f"Allocation policy: {result.request.allocation.policy.value}", "Cash-rest order planning requires Stage 8 portfolio state; no orders or fills are recorded."]
+	status = "Cash-rest order planning requires supplied portfolio state; no fills are recorded." if run.order_plan is None else f"Cash-rest order plan: {run.order_plan.state.value}; {len(run.order_plan.orders)} orders; no fills are recorded."
+	lines = [f"Ranked suggestions: entry close {timing.entry_session.session_date}; exit close {timing.exit_session.session_date}", f"Decision cutoff: {timing.decision_cutoff.isoformat()}", f"Artifact: {result.artifact_id}", f"Source revision: {result.data_revision}", f"Allocation policy: {result.request.allocation.policy.value}", status]
 	lines.extend(f"#{rank}: ticker_id={item.ticker_id} score={item.score:.8f}" for rank, item in enumerate(result.ranking, start=1))
+	if run.order_plan is not None:
+		lines.extend(f"Plan {item.allocation}: ticker_id={item.ticker_id} maximum_debit={item.maximum_debit}" for item in run.order_plan.orders)
 	return "\n".join(lines)
