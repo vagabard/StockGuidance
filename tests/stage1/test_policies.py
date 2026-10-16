@@ -45,9 +45,9 @@ def test_unsupported_allocation_and_cash_rest(recommendation_request: Recommenda
 		replace(recommendation_request.allocation, **changes)
 
 
-def test_entry_open_is_reserved() -> None:
+def test_entry_open_requires_its_explicit_opening_transformation() -> None:
 	assert SignalMode("entry_open") is SignalMode.ENTRY_OPEN
-	with pytest.raises(ValueError, match="Stage 10"):
+	with pytest.raises(ValueError, match="entry_open requires"):
 		FeatureSpec((7, 3), 2, signal_mode=SignalMode.ENTRY_OPEN)
 
 

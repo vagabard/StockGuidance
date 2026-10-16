@@ -229,8 +229,10 @@ functions live under `portfolio/`; historical fills/events/benchmarks live under
 
 Old open-to-close models, score CSVs, NPZ caches and numeric-date simulation
 switches are incompatible. Rebuild models/datasets under Stages 5/6. Stage 9
-still owns legacy viewer/metrics/controller/incremental callers of removed root
-simulation helpers and their obsolete output formats. The new root frontend
-does not expose those helpers. Optional `entry_open` remains Stage 10. The
+removes legacy viewer/metrics/controller/incremental callers of root helpers and
+obsolete formats; all supported frontends use typed packages. Stage 10 adds the
+[entry-opening signal and matched chronological comparison](entry_open.md), using
+stored original receipts and the same execution/schedule rules. Missing openings
+skip anchored decisions without dropping positions or moving sale sessions. The
 retained hardcoded key is `DEFAULT_API_KEY` in `polygon_fetch.py`; eventual
 external configuration remains future work and its value is never copied here.

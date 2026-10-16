@@ -166,7 +166,10 @@ Exit 0 means all required stages completed and suggestions are ready before the
 entry close. Exit 2 means invalid arguments/configuration. Exit 1 means required
 setup, refresh, validation, artifact, training, prediction or reporting failure;
 there is no successful recommendation payload following a required failure.
-`entry_open` fails explicitly as the unimplemented Stage 10 enhancement.
+Stage 10 [entry-opening recommendations](entry_open.md) require the explicit
+opening channel, a compatible distinct artifact and timely captured observations
+for the full ordered universe. Both model policies capture current openings after
+daily reconciliation; no unfinished daily bar enters the signal or eligibility.
 
 The typed application entry point is `workflows.recommend.recommend`, taking a
 `RecommendationJob`, evidenced boundary, calendar, `RecommendationServices`,

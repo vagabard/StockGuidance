@@ -6,10 +6,13 @@ from stockguidance.calendar.protocols import SessionCalendar
 from stockguidance.database.repositories.close_projection import project_closes
 from stockguidance.database.repositories.closes import CloseData, CloseQuery
 from stockguidance.database.repositories.validation import DatabaseInspection
+from stockguidance.database.repositories.closes import CloseRepository
+from stockguidance.database.repositories.signals import SignalRepository
 from stockguidance.datasets.building import build_sample
 from stockguidance.datasets.sample import Sample, TargetState
 from stockguidance.features.history_window import WindowState
-from stockguidance.features.specification import FeatureSpec
+from stockguidance.features.specification import FeatureSpec, SignalMode
+from stockguidance.market_data.openings import OpeningRepository
 from stockguidance.market_data.closes import PriceState
 from stockguidance.market_data.coverage import CoveragePlan
 from stockguidance.market_data.manifests import SourceManifest
@@ -30,14 +33,15 @@ class InspectedCloseRepository:
 def validate_close_samples(
 	plan: CoveragePlan, inspection: DatabaseInspection, manifests: tuple[SourceManifest, ...],
 	calendar: SessionCalendar, publication: DailyPublicationPolicy,
-	features: FeatureSpec | None, target: TargetSpec,
+	features: FeatureSpec | None, target: TargetSpec, openings: OpeningRepository | None = None,
 ) -> tuple[tuple[ValidationFinding, ...], tuple[Sample, ...]]:
 	findings: list[ValidationFinding] = []
 	samples: list[Sample] = []
 	snapshots = {snapshot.session: snapshot for snapshot in inspection.snapshots}
 	symbols = dict(inspection.ticker_symbols)
 	requested = {item.session for item in plan.sessions}
-	repository = InspectedCloseRepository(inspection, manifests)
+	closes = InspectedCloseRepository(inspection, manifests)
+	repository: CloseRepository = closes if openings is None else SignalRepository(closes, openings)
 	if features is None:
 		findings.append(ValidationFinding(FindingCategory.NOT_ASSESSED, ValidationCheck.FEATURE, "Model feature validation requires an explicit ordered ticker universe and lookback; targets are computed independently from verified raw closes"))
 	for item in plan.sessions:
@@ -76,6 +80,8 @@ def validate_close_samples(
 			category = FindingCategory.UNVERIFIED if sample.feature_state is WindowState.UNVERIFIED else FindingCategory.NOT_YET_AVAILABLE
 			findings.append(ValidationFinding(category, ValidationCheck.FEATURE, "Close window is not published by the pre-close decision", entry.session_date))
 		for issue in sample.features.issues:
+			if specification.signal_mode is SignalMode.ENTRY_OPEN and issue.session == entry:
+				continue
 			category = FindingCategory(issue.state.value)
 			if issue.session not in requested and issue.state in {PriceState.MISSING, PriceState.UNVERIFIED}:
 				category = FindingCategory.NOT_ASSESSED

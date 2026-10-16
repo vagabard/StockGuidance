@@ -7,6 +7,7 @@ from stockguidance.database.repositories.eligibility import EligibilityRepositor
 from stockguidance.database.repositories.market_data import MarketDataRepository
 from stockguidance.database.repositories.validation import ValidationRepository
 from stockguidance.market_data.history import HistoryBoundary
+from stockguidance.market_data.opening_refresh import OpeningRefresh
 from stockguidance.market_data.providers.contracts import MarketDataProvider
 from stockguidance.market_data.publication import DailyPublicationPolicy
 from stockguidance.training.result import TrainingResult
@@ -20,6 +21,7 @@ class RecommendationServices:
 	validation: ValidationRepository
 	closes: CloseRepository
 	eligibility: EligibilityRepository
+	openings: OpeningRefresh | None = None
 
 
 class HistoryTrainer(Protocol):

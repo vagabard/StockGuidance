@@ -10,7 +10,7 @@ from stockguidance.training.jobs import load_job, open_job_history
 
 
 def main(argv: list[str] | None = None, *, default_kind: str = "features") -> int:
-	parser = argparse.ArgumentParser(description="Read-only previous-close feature inspection or mature close-to-close correlations from an explicit training job.")
+	parser = argparse.ArgumentParser(description="Read-only previous_close or entry_open feature inspection, or mature close-to-close correlations from an explicit training job.")
 	parser.add_argument("--config", type=Path, required=True)
 	parser.add_argument("--kind", choices=("features", "correlations"), default=default_kind)
 	parser.add_argument("--sample-count", type=int, default=5)

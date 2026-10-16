@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from stockguidance.config.source import SourceConfig
-from stockguidance.market_data.providers import configured_polygon
+from stockguidance.market_data.providers import configured_polygon, credentials
 
 
 @pytest.mark.parametrize("environment_credential", [False, True])
@@ -31,7 +31,7 @@ def test_credentials_are_loaded_only_on_fetch_and_provider_is_reused(samples, mo
 			fetches.append((source, session))
 			return "fixture-response"
 
-	monkeypatch.setattr(configured_polygon, "import_module", import_module)
+	monkeypatch.setattr(credentials, "import_module", import_module)
 	monkeypatch.setattr(configured_polygon, "PolygonHttpTransport", transport)
 	monkeypatch.setattr(configured_polygon, "PolygonGroupedProvider", Provider)
 	provider = configured_polygon.ConfiguredPolygonProvider(3)

@@ -6,6 +6,7 @@ from stockguidance.calendar.sessions import TradingSession
 from stockguidance.database.repositories.closes import CloseData
 from stockguidance.features.specification import CloseFeature, FeatureSpec
 from stockguidance.market_data.closes import CloseIssue, PriceState
+from stockguidance.market_data.openings import OpeningData
 
 
 @dataclass(frozen=True)
@@ -27,11 +28,16 @@ class FeatureValues:
 				raise ValueError("Feature sessions must be exactly adjacent")
 
 
-def construct_features(specification: FeatureSpec, timing: DecisionTiming, sessions: tuple[TradingSession, ...], data: CloseData) -> FeatureValues:
+def construct_features(specification: FeatureSpec, timing: DecisionTiming, sessions: tuple[TradingSession, ...], data: CloseData, openings: OpeningData | None = None) -> FeatureValues:
 	if len(sessions) != specification.lookback_sessions or tuple(session.sequence for session in sessions) != tuple(range(timing.entry_session.sequence - specification.lookback_sessions, timing.entry_session.sequence)):
 		raise ValueError("Feature history must be the exact prior-session window")
 	by_key = {(item.timing.session, item.ticker_id): item for item in data.observations}
 	issues = [issue for issue in data.issues if issue.session in sessions]
+	opening_prices = {} if openings is None else {item.ticker_id: item.price for item in openings.observations}
+	if CloseFeature.ENTRY_OPEN_RETURN in specification.feature_order:
+		if openings is None or openings.query.sessions != (timing.entry_session,) or openings.query.ticker_ids != specification.ticker_ids or openings.query.as_of != timing.decision_cutoff:
+			raise ValueError("Opening features require the exact entry session, cutoff and full ticker universe")
+		issues.extend(openings.issues)
 	for session in sessions:
 		for ticker_id in specification.ticker_ids:
 			observation = by_key.get((session, ticker_id))
@@ -51,7 +57,10 @@ def construct_features(specification: FeatureSpec, timing: DecisionTiming, sessi
 			close = by_key[session, ticker_id].close
 			anchor = by_key[sessions[0], ticker_id].close
 			for feature in specification.feature_order:
-				values.append(close / anchor - 1 if feature is CloseFeature.RELATIVE_CLOSE else math.log(close))
+				if feature is CloseFeature.ENTRY_OPEN_RETURN:
+					values.append(opening_prices[ticker_id] / by_key[sessions[-1], ticker_id].close - 1)
+				else:
+					values.append(close / anchor - 1 if feature is CloseFeature.RELATIVE_CLOSE else math.log(close))
 	if any(not math.isfinite(value) for value in values):
 		return FeatureValues(specification, sessions, None, (CloseIssue(specification.ticker_ids[0], sessions[0], PriceState.INVALID, "Close transformation is not finite"),))
 	return FeatureValues(specification, sessions, tuple(values))

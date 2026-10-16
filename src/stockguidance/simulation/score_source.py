@@ -66,7 +66,7 @@ class HistoricalSignals:
 		validate_model(artifact, request, timing, self.calendar)
 		sample = build_sample(request.features, request.target, timing, self.boundary, self.calendar, self.publication, self.closes)
 		if sample.features.values is None:
-			raise DecisionUnavailable("Previous-close feature window is unavailable at the historical decision")
+			raise DecisionUnavailable("Required close history or full-universe opening inputs are unavailable at the historical decision")
 		query = CloseQuery(SessionQuery(self.boundary, (timing.previous_session,), timing.decision_cutoff), request.features.ticker_ids)
 		eligibility = assess_eligibility(request.features.ticker_ids, request.eligibility, timing, self.eligibility.read(query))
 		if any(item.state is EligibilityState.UNAVAILABLE for item in eligibility):

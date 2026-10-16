@@ -7,9 +7,11 @@ from stockguidance.simulation.jobs import SimulationConfiguration
 from stockguidance.database.repositories.eligibility import VerifiedEligibilityRepository
 from stockguidance.database.repositories.mysql_validation import MySQLValidationRepository
 from stockguidance.database.repositories.verified_closes import VerifiedCloseRepository
+from stockguidance.database.repositories.signals import SignalRepository
 from stockguidance.database.connections import MySQLConnectionFactory
 from stockguidance.market_data.history import UnknownHistoryBoundary
 from stockguidance.market_data.history_store import JsonHistoryStore
+from stockguidance.market_data.opening_store import OpeningStore
 from stockguidance.portfolio.policy import AllocationSpec
 from stockguidance.recommendations.configuration import ArtifactKind
 from stockguidance.simulation.configuration import EvaluationPolicy, SimulationRequest
@@ -32,7 +34,7 @@ def assemble_and_simulate(configuration: SimulationConfiguration, arguments: Sim
 		raise ValueError("Execution audit cutoff must include the evaluation end close")
 	request = SimulationRequest(configuration.source.identity, configuration.features, TargetSpec(), AllocationSpec(configuration.allocation_policy, calendar.session(configuration.anchor_date)), configuration.start, configuration.end, configuration.initial_capital, configuration.decision_lead, configuration.eligibility, configuration.top_k, configuration.execution)
 	closes = VerifiedCloseRepository(configuration.source, MySQLValidationRepository(configuration.source, MySQLConnectionFactory()))
-	signals = HistoricalSignals(boundary, calendar, configuration.publication, closes, VerifiedEligibilityRepository(closes))
+	signals = HistoricalSignals(boundary, calendar, configuration.publication, SignalRepository(closes, OpeningStore(configuration.source.data_root)), VerifiedEligibilityRepository(closes))
 	scores: ScoreSource
 	if EvaluationPolicy(arguments.model_policy) is EvaluationPolicy.FIXED:
 		if arguments.artifact is None or arguments.artifact_id is None:

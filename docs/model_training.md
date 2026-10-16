@@ -1,12 +1,14 @@
 # Close-to-close training and inference artifacts
 
 Stage 6 provides a typed training API and standalone inference artifacts. Inputs
-are Stage 5's exact historical closing prices through the previous session;
+are Stage 5's exact historical closing prices through the previous session,
+optionally supplemented by the distinct [Stage 10 opening feature](entry_open.md);
 targets are raw `close(T+1) / close(T) - 1`. All old open-to-close datasets,
 NPZ caches, model manifests and checkpoints require rebuilding. No old file is
 deleted or relabeled. Recommendation, cash-rest planning and chronological
 simulation use the same package workflows. See [frontend integration](frontends.md)
-for current commands and remaining cleanup status.
+for current commands and completed cleanup status. Each signal mode requires its
+own trained artifact; opening receipts must satisfy each original decision cutoff.
 
 ## Environment and commands
 

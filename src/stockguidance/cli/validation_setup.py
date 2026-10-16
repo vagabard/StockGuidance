@@ -7,7 +7,7 @@ from stockguidance.calendar.exchange import ExchangeCalendar
 from stockguidance.config.source import PriceAdjustment, SourceConfig, SourceIdentity
 from stockguidance.database.repositories.mysql_validation import MySQLValidationRepository
 from stockguidance.database.connections import MySQLConnectionFactory
-from stockguidance.features.specification import FeatureSpec
+from stockguidance.features.specification import CloseFeature, FeatureSpec, SignalMode
 from stockguidance.market_data.history import HistoryProvenance, UnknownHistoryBoundary, establish_history_boundary
 from stockguidance.market_data.history_store import JsonHistoryStore
 from stockguidance.market_data.providers.polygon import GROUPED_ENDPOINT, GROUPED_UNIVERSE
@@ -22,7 +22,11 @@ def assemble_and_validate(arguments: argparse.Namespace) -> ValidationResult:
 	source = SourceConfig(identity, Path(arguments.data_root), Path(arguments.dbinfo_file), "unused-by-read-only-validation")
 	if (arguments.ticker_ids is None) != (arguments.lookback_sessions is None):
 		raise ValueError("Feature validation requires both ticker IDs and lookback")
-	features = None if arguments.ticker_ids is None else FeatureSpec(tuple(int(value.strip()) for value in arguments.ticker_ids.split(",")), arguments.lookback_sessions, adjustment=identity.adjustment)
+	mode = SignalMode(arguments.signal_mode)
+	if mode is SignalMode.ENTRY_OPEN and arguments.ticker_ids is None:
+		raise ValueError("Opening validation requires the full ordered universe and lookback")
+	order = (CloseFeature.RELATIVE_CLOSE,) if mode is SignalMode.PREVIOUS_CLOSE else (CloseFeature.RELATIVE_CLOSE, CloseFeature.ENTRY_OPEN_RETURN)
+	features = None if arguments.ticker_ids is None else FeatureSpec(tuple(int(value.strip()) for value in arguments.ticker_ids.split(",")), arguments.lookback_sessions, signal_mode=mode, feature_order=order, adjustment=identity.adjustment)
 	boundary = JsonHistoryStore(source.data_root / "history").load(identity)
 	if boundary is None and arguments.history_start is None:
 		raise UnknownHistoryBoundary("Supported history is unknown")

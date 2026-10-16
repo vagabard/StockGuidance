@@ -27,8 +27,9 @@ invalidate the whole feature vector; no ticker is dropped or reordered.
 `TargetSpec` supports only raw `close(T+1) / close(T) - 1`. Raw and transformed
 target tuples are identical and follow the feature specification's ticker order.
 There is no implicit target transformation. Legacy ranked, shifted, and
-open-to-close target specifications are incompatible. `entry_open` remains an
-explicit Stage 10 error. Price adjustment and daily interval must match the
+open-to-close target specifications are incompatible. Stage 10 adds an explicit
+[entry-opening feature channel](entry_open.md) without changing these targets.
+Price adjustment and daily interval must match the
 non-secret source/request identity before storage is accessed.
 
 ## Timing and sample construction

@@ -59,13 +59,18 @@ def metadata_payload(metadata: ArtifactMetadata) -> dict[str, object]:
 	training = asdict(metadata.training)
 	for name in ("training_cutoff", "information_cutoff", "first_entry", "last_entry", "last_exit", "last_exit_close_at"):
 		training[name] = training[name].isoformat()
-	return {"semantics": asdict(metadata.semantics), "model": asdict(metadata.model), "training": training, "framework_version": metadata.framework_version, "weight_dtype": metadata.weight_dtype, "feature_version": metadata.semantics.features.version, "layout": metadata.semantics.features.layout, "target_formula": metadata.semantics.target.raw_formula, "preprocessing": "stateless_window_only"}
+	features = metadata.semantics.features
+	payload: dict[str, object] = {"semantics": asdict(metadata.semantics), "model": asdict(metadata.model), "training": training, "framework_version": metadata.framework_version, "weight_dtype": metadata.weight_dtype, "feature_version": features.version, "layout": features.layout, "target_formula": metadata.semantics.target.raw_formula, "preprocessing": features.preprocessing}
+	if features.opening_contract is not None:
+		payload["opening_contract"] = features.opening_contract
+	return payload
 
 
 def decode_metadata(value: object) -> ArtifactMetadata:
-	fields = exact_mapping(value, ("semantics", "model", "training", "framework_version", "weight_dtype", "feature_version", "layout", "target_formula", "preprocessing"))
-	semantics = decode_semantics(fields["semantics"])
-	if fields["feature_version"] != semantics.features.version or fields["layout"] != semantics.features.layout or fields["target_formula"] != semantics.target.raw_formula or fields["preprocessing"] != "stateless_window_only":
+	semantics = decode_semantics(mapping(value).get("semantics"))
+	opening_keys = () if semantics.features.opening_contract is None else ("opening_contract",)
+	fields = exact_mapping(value, ("semantics", "model", "training", "framework_version", "weight_dtype", "feature_version", "layout", "target_formula", "preprocessing", *opening_keys))
+	if fields["feature_version"] != semantics.features.version or fields["layout"] != semantics.features.layout or fields["target_formula"] != semantics.target.raw_formula or fields["preprocessing"] != semantics.features.preprocessing or fields.get("opening_contract") != semantics.features.opening_contract:
 		raise ValueError("Unsupported numerical/execution specification; legacy models require retraining")
 	training = exact_mapping(fields["training"], ("training_cutoff", "information_cutoff", "first_entry", "last_entry", "last_exit", "last_exit_close_at", "data_revision", "sample_keys", "excluded_sample_keys", "seed", "completed_epochs"))
 	provenance = TrainingProvenance(datetime.fromisoformat(text_field(training, "training_cutoff")), datetime.fromisoformat(text_field(training, "information_cutoff")), date.fromisoformat(text_field(training, "first_entry")), date.fromisoformat(text_field(training, "last_entry")), date.fromisoformat(text_field(training, "last_exit")), datetime.fromisoformat(text_field(training, "last_exit_close_at")), text_field(training, "data_revision"), strings(training["sample_keys"]), strings(training["excluded_sample_keys"]), integer(training["seed"]), integer(training["completed_epochs"]))

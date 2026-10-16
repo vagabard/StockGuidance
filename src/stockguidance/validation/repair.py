@@ -18,6 +18,7 @@ class RepairAction(StrEnum):
 	REVIEW_SCHEMA = "review_schema"
 	REVIEW_RECORDS = "review_records"
 	ESTABLISH_POLICY = "establish_publication_policy"
+	CAPTURE_OPENING = "capture_opening_evidence"
 
 
 AUTOMATIC_ACTIONS = frozenset({RepairAction.REFRESH_SOURCE, RepairAction.REIMPORT, RepairAction.REBUILD_DERIVED, RepairAction.COMPLETE_MANIFEST})
@@ -72,7 +73,9 @@ def plan_repairs(source: SourceIdentity, start: date, end: date, cutoff: datetim
 			continue
 		if finding.check in {ValidationCheck.FEATURE, ValidationCheck.TARGET} and any(other.blocking and other.check not in {ValidationCheck.FEATURE, ValidationCheck.TARGET} and other.session_date in {None, finding.dependency_session_date or finding.session_date} for other in findings):
 			continue
-		if finding.session_date is not None and not start <= finding.session_date <= end:
+		if finding.check is ValidationCheck.OPENING:
+			action = RepairAction.CAPTURE_OPENING
+		elif finding.session_date is not None and not start <= finding.session_date <= end:
 			action = RepairAction.REVIEW_RECORDS
 		elif finding.check is ValidationCheck.SCHEMA:
 			action = RepairAction.REVIEW_SCHEMA

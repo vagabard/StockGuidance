@@ -19,4 +19,5 @@ Detailed specifications cover [updating](docs/market_data_updating.md),
 Use the configured PyCharm interpreter. Live operation requires evidenced source
 history/publication/correction settings and compatible storage. No live supported
 history date is assumed. Legacy open-to-close datasets, caches and models require
-rebuilding. `entry_open` remains the optional, unsupported Stage 10 enhancement.
+rebuilding. Stage 10 also supports the distinct [entry-opening signal and paired
+chronological comparison](docs/entry_open.md), without changing close-to-close fills.

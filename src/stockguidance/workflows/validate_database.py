@@ -7,7 +7,9 @@ from stockguidance.config.source import SourceConfig
 from stockguidance.config.validation import require_aware_datetime, require_date
 from stockguidance.database.repositories.sessions import SessionQuery, StoredSession
 from stockguidance.database.repositories.validation import DatabaseInspection, ValidationRepository
-from stockguidance.features.specification import FeatureSpec
+from stockguidance.features.specification import FeatureSpec, SignalMode
+from stockguidance.market_data.opening_store import OpeningStore
+from stockguidance.market_data.openings import OpeningRepository
 from stockguidance.market_data.coverage_planning import plan_coverage
 from stockguidance.market_data.dependencies import dependency_scope
 from stockguidance.market_data.history import HistoryBoundary
@@ -23,6 +25,7 @@ from stockguidance.validation.coverage import CoverageResult, SessionCoverage
 from stockguidance.validation.findings import FindingCategory, ValidationCheck, ValidationFinding
 from stockguidance.validation.repair import plan_repairs
 from stockguidance.validation.result import ValidationResult
+from stockguidance.validation.openings import validate_opening_coverage
 from stockguidance.targets.specification import TargetSpec
 
 
@@ -51,7 +54,7 @@ class _NoStoredSessions:
 		return ()
 
 
-def validate_database(source: SourceConfig, settings: ValidationSettings, boundary: HistoryBoundary | None, calendar: SessionCalendar, repository: ValidationRepository, clock: Clock) -> ValidationResult:
+def validate_database(source: SourceConfig, settings: ValidationSettings, boundary: HistoryBoundary | None, calendar: SessionCalendar, repository: ValidationRepository, clock: Clock, *, openings: OpeningRepository | None = None) -> ValidationResult:
 	if settings.features is not None and (settings.features.adjustment is not source.identity.adjustment or settings.features.interval is not source.identity.interval):
 		raise ValueError("Validation feature specification and source differ")
 	cutoff = decision_cutoff(clock, settings.as_of)
@@ -93,7 +96,10 @@ def validate_database(source: SourceConfig, settings: ValidationSettings, bounda
 			context_manifest = None
 		if context_manifest is not None:
 			manifests.append(context_manifest)
-	numerical_findings, samples = validate_close_samples(plan, inspection, tuple(manifests), calendar, settings.publication, settings.features, settings.target)
+	opening_repository = openings or OpeningStore(source.data_root)
+	if settings.features is not None and settings.features.signal_mode is SignalMode.ENTRY_OPEN:
+		findings.extend(validate_opening_coverage(settings.features, plan.boundary, calendar, settings.start, settings.end, cutoff, opening_repository))
+	numerical_findings, samples = validate_close_samples(plan, inspection, tuple(manifests), calendar, settings.publication, settings.features, settings.target, opening_repository)
 	findings.extend(numerical_findings)
 	for manifest in manifests:
 		if manifest.download.available_at <= cutoff and (not manifest.import_complete or not manifest.derived_complete):

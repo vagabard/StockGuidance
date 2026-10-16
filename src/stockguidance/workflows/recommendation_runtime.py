@@ -9,9 +9,13 @@ from stockguidance.database.repositories.eligibility import VerifiedEligibilityR
 from stockguidance.database.repositories.mysql_market_data import MySQLMarketDataRepository
 from stockguidance.database.repositories.mysql_validation import MySQLValidationRepository
 from stockguidance.database.repositories.verified_closes import VerifiedCloseRepository
+from stockguidance.database.repositories.signals import SignalRepository
 from stockguidance.database.connections import MySQLConnectionFactory
 from stockguidance.market_data.history import UnknownHistoryBoundary
 from stockguidance.market_data.history_store import JsonHistoryStore
+from stockguidance.market_data.opening_store import OpeningStore
+from stockguidance.market_data.opening_refresh import OpeningRefresh
+from stockguidance.market_data.providers.configured_openings import ConfiguredOpeningProvider
 from stockguidance.market_data.providers.configured_polygon import ConfiguredPolygonProvider
 from stockguidance.models.policy import ModelRefreshPolicy, ModelSelection
 from stockguidance.portfolio.policy import AllocationSpec
@@ -54,5 +58,6 @@ def assemble_and_recommend(configuration: RecommendationConfiguration, arguments
 	connect = MySQLConnectionFactory()
 	validation = MySQLValidationRepository(job.source, connect)
 	closes = VerifiedCloseRepository(job.source, validation)
-	services = RecommendationServices(ConfiguredPolygonProvider(arguments.max_retries), MySQLMarketDataRepository(job.source, connect), validation, closes, VerifiedEligibilityRepository(closes))
+	opening_store = OpeningStore(job.source.data_root)
+	services = RecommendationServices(ConfiguredPolygonProvider(arguments.max_retries), MySQLMarketDataRepository(job.source, connect), validation, SignalRepository(closes, opening_store), VerifiedEligibilityRepository(closes), OpeningRefresh(job.source, opening_store, ConfiguredOpeningProvider(arguments.max_retries), closes))
 	return recommend(job, boundary, calendar, services, clock, portfolio=portfolio, execution=ExecutionPolicy(decimal_text(arguments.fee_per_fill)))

@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+import re
 
 from stockguidance.market_data.providers.polygon import HttpResponse, provider_failure
 
@@ -19,11 +20,13 @@ class PolygonHttpTransport:
 		from urllib.error import HTTPError
 		from urllib.request import Request, urlopen
 
-		if not path.startswith("/v2/aggs/grouped/locale/us/market/stocks/") or "?" in path:
+		opening = re.fullmatch(r"/v2/aggs/ticker/[A-Za-z0-9._-]+/range/1/minute/([0-9]+)/([0-9]+)", path)
+		if "?" in path or (opening is None and not path.startswith("/v2/aggs/grouped/locale/us/market/stocks/")) or (opening is not None and int(opening[2]) - int(opening[1]) != 59999):
 			raise ValueError("Unsupported provider path")
 		for attempt in range(self.max_retries + 1):
 			time.sleep(self.minimum_interval_seconds)
-			request = Request(f"https://api.polygon.io{path}?adjusted={str(adjusted).lower()}&include_otc=false", headers={"Authorization": f"Bearer {self.api_key}"})
+			query = "include_otc=false" if opening is None else "sort=asc&limit=1"
+			request = Request(f"https://api.polygon.io{path}?adjusted={str(adjusted).lower()}&{query}", headers={"Authorization": f"Bearer {self.api_key}"})
 			try:
 				with urlopen(request, timeout=60) as response:
 					payload: object = json.loads(response.read())

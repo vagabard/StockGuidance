@@ -14,7 +14,7 @@ from stockguidance.workflows.failures import StageExecutionError
 
 
 def build_parser() -> argparse.ArgumentParser:
-	parser = argparse.ArgumentParser(description="Refresh and validate previous-close data, then rank close-to-next-session-close suggestions.")
+	parser = argparse.ArgumentParser(description="Refresh and validate explicit previous_close or entry_open signals, then rank close-to-next-session-close suggestions.")
 	parser.add_argument("--config", required=True, type=Path, help="Explicit recommendation JSON; see docs/recommendations.md")
 	parser.add_argument("--policy", required=True, choices=[policy.value for policy in ModelRefreshPolicy])
 	parser.add_argument("--artifact", required=True, type=Path, help="Explicit current artifact or retraining output file")
@@ -54,7 +54,7 @@ def main(argv: list[str] | None = None) -> int:
 		if (configuration.retraining is not None) != (arguments.policy == ModelRefreshPolicy.RETRAIN.value):
 			raise ValueError("Policy and training configuration differ")
 	except Exception as error:
-		message = "entry_open is reserved for Stage 10 and is not implemented" if str(error) == "entry_open is reserved for Stage 10 and is not implemented" else "Invalid recommendation configuration"
+		message = "Invalid recommendation configuration; entry_open requires its explicit opening feature" if "entry_open" in str(error) else "Invalid recommendation configuration"
 		print(json.dumps({"successful": False, "stage": "request", "failure": "invalid_request", "message": message}))
 		return 2
 	try:

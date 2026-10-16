@@ -14,12 +14,14 @@ from stockguidance.config.validation import require_aware_datetime
 from stockguidance.database.repositories.mysql_validation import MySQLValidationRepository
 from stockguidance.database.repositories.verified_closes import VerifiedCloseRepository
 from stockguidance.database.repositories.closes import CloseRepository
+from stockguidance.database.repositories.signals import SignalRepository
 from stockguidance.database.connections import MySQLConnectionFactory
 from stockguidance.features.specification import FeatureSpec
 from stockguidance.market_data.history import HistoryBoundary, UnknownHistoryBoundary
 from stockguidance.market_data.history_store import JsonHistoryStore
 from stockguidance.market_data.identity import decode_source, mapping, text_field
 from stockguidance.market_data.publication import DailyPublicationPolicy
+from stockguidance.market_data.opening_store import OpeningStore
 from stockguidance.targets.specification import TargetSpec
 from stockguidance.training.configuration import TrainingConfig
 from stockguidance.training.result import TrainingResult
@@ -90,7 +92,7 @@ def open_job_history(job: TrainingJob) -> JobHistory:
 
 	evaluation_decisions = () if job.evaluation_start is None or job.evaluation_end is None else decisions(job.evaluation_start, job.evaluation_end)
 	repository = VerifiedCloseRepository(job.source, MySQLValidationRepository(job.source, MySQLConnectionFactory()))
-	return JobHistory(boundary, calendar, repository, decisions(job.start, job.end), evaluation_decisions)
+	return JobHistory(boundary, calendar, SignalRepository(repository, OpeningStore(job.source.data_root)), decisions(job.start, job.end), evaluation_decisions)
 
 
 def execute_job(job: TrainingJob, artifact_path: Path, *, checkpoint_path: Path | None = None, resume_from: Path | None = None) -> TrainingResult:

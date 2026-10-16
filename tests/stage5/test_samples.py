@@ -165,8 +165,8 @@ def test_adjustment_mismatch_fails_before_read(samples):
 	assert not samples.repository.calls
 
 
-def test_entry_open_remains_explicitly_unsupported():
-	with pytest.raises(ValueError, match="Stage 10"):
+def test_entry_open_requires_an_explicit_opening_feature():
+	with pytest.raises(ValueError, match="entry_open requires"):
 		FeatureSpec((17, 3), 3, signal_mode=SignalMode.ENTRY_OPEN)
 
 

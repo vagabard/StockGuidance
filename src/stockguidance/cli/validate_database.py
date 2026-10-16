@@ -23,6 +23,7 @@ def parser() -> argparse.ArgumentParser:
 	arguments.add_argument("--format", choices=("text", "json"), default="text")
 	arguments.add_argument("--ticker-ids", help="Comma-separated exact ordered model universe; requires --lookback-sessions")
 	arguments.add_argument("--lookback-sessions", type=int, help="Exact historical close window; requires --ticker-ids")
+	arguments.add_argument("--signal-mode", choices=("previous_close", "entry_open"), default="previous_close", help="entry_open also audits read-only opening receipts for the full universe")
 	return arguments
 
 

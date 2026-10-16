@@ -11,6 +11,7 @@ dependencies = ["exchange-calendars>=4.11,<5", "tzdata>=2024.1", "numpy>=2.1,<3"
 
 [project.scripts]
 update_market_data = "stockguidance.cli.update_market_data:main"
+update_openings = "stockguidance.cli.update_openings:main"
 validate_database = "stockguidance.cli.validate_database:main"
 train_model = "stockguidance.cli.train_model:main"
 recommend = "stockguidance.cli.recommend:main"
@@ -19,6 +20,7 @@ stockguidance_batch = "stockguidance.cli.batch:main"
 incremental_training = "stockguidance.cli.incremental:main"
 inspect_features = "stockguidance.cli.inspect_features:main"
 inspect_reports = "stockguidance.cli.reports:main"
+compare_signals = "stockguidance.cli.compare_signals:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8.3", "mypy>=1.15"]

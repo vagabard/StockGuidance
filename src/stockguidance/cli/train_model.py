@@ -7,7 +7,7 @@ from stockguidance.reporting.training import training_payload
 
 
 def build_parser() -> argparse.ArgumentParser:
-	parser = argparse.ArgumentParser(description="Train previous-close inputs against mature next-session close returns.")
+	parser = argparse.ArgumentParser(description="Train explicit previous_close or entry_open inputs against mature next-session close returns.")
 	parser.add_argument("--config", required=True, type=Path, help="Explicit training job JSON; see docs/model_training.md")
 	parser.add_argument("--artifact", required=True, type=Path, help="Destination self-contained .sgmodel artifact")
 	parser.add_argument("--checkpoint", type=Path, help="Separate resumable training state destination")

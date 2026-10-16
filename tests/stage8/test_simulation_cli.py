@@ -69,7 +69,7 @@ def test_invalid_simulation_configuration_fails_before_setup(simulation, simulat
 	output = capsys.readouterr().out
 	assert not json.loads(output)["successful"] and "secret" not in output
 	if problem == "entry_open":
-		assert "Stage 10" in output
+		assert "entry_open" in output and "opening feature" in output
 
 
 @pytest.mark.parametrize("values", [[], ["--config", "x", "--model-policy", "fixed"], ["--config", "x", "--model-policy", "chronological_retrain", "--artifact", "x"], ["--config", "x", "--model-policy", "fixed", "--artifact", "x", "--artifact-id", "0" * 64, "--artifacts-directory", "x"], ["--config", "x", "--model-policy", "chronological_retrain", "--artifacts-directory", "x", "--artifact-kind", "ensemble"]])

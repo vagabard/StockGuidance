@@ -76,7 +76,7 @@ def test_invalid_configuration_is_nonzero_before_dependency_assembly(recommender
 	payload = json.loads(capsys.readouterr().out)
 	assert not payload["successful"] and "fixture-secret" not in str(payload)
 	if problem == "entry_open":
-		assert "entry_open" in payload["message"] and "Stage 10" in payload["message"]
+		assert "entry_open" in payload["message"] and "opening feature" in payload["message"]
 	assert not recommender.storage.provider.calls
 
 

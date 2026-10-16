@@ -78,3 +78,11 @@ The updater still needs persisted history or explicit boundary/evidence argument
 Updater and validator share source/raw/derived assessment and database integrity reading. Forged derived-content receipts cannot hide incorrect mature values, and unassigned orphans cannot produce a successful update. Re-run validation after explicit repairs.
 
 The retained hardcoded key is `DEFAULT_API_KEY` in `polygon_fetch.py`; it should eventually become external configuration. Validation does not load it or contact the provider. Reports and repair plans contain no credentials.
+
+Stage 10 adds `--signal-mode entry_open` with explicit `--ticker-ids` and
+`--lookback-sessions`. It audits read-only opening receipts, including the current
+unfinished daily session, without querying that session's final daily bar.
+`entry_open_observations` findings distinguish missing/unverified/late openings.
+`capture_opening_evidence` proposals are not automatic daily repairs: original
+historical receipt times cannot be manufactured by a download today. See
+[entry_open.md](entry_open.md) for the exact provider/method and missing policy.

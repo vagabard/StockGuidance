@@ -149,4 +149,4 @@ Only argument handling/delegation remains at these paths. No compatibility parsi
 
 - `polygon_fetch.py`: keep the existing `DEFAULT_API_KEY` constant at its original location and value; remove obsolete discovery/downloader code and delegate command execution to `stockguidance.cli.update_market_data`. Package the module so lazy credential lookup also works outside the checkout. Never copy the credential into documentation, configuration, reports or artifacts.
 
-The three obsolete benchmark files are retired rather than redirected to feature inspection: inspection does not benchmark their former CSV/intraday workloads. `entry_open` remains deferred Stage 10.
+The three obsolete benchmark files are retired rather than redirected to feature inspection: inspection does not benchmark their former CSV/intraday workloads. Stage 9 deferred `entry_open`; the subsequently requested enhancement is documented in [entry_open.md](entry_open.md).

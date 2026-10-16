@@ -118,7 +118,7 @@ Create subpackages as they acquire real responsibilities. Prefer focused files w
 | 7 | Current-model and retraining recommendation workflows | 6 | Complete (see handoff) |
 | 8 | Cash-rest portfolio planning and chronological simulation | 7 | Complete (see handoff) |
 | 9 | Frontend integration, remaining module extraction, and cleanup | 8 | Complete; main refactoring complete (see handoff) |
-| 10 | Optional entry-session opening-price signal | 9 | Deferred enhancement |
+| 10 | Optional entry-session opening-price signal | 9 | Complete (see handoff) |
 
 ## Stage 1 - Package foundation and typed strategy contracts
 
@@ -308,6 +308,10 @@ Pre-existing failures or remaining limitations:
 Data/model rebuild or migration requirements:
 Next stage and concrete prerequisites:
 ```
+
+### Stage 10 integration addendum - 2026-10-15
+
+Stage 10 is now complete, following verification of the committed Stage 9 checkout. The Stage 1-9 handoffs and their integration addendum remain historical records: their statements that `entry_open` is unsupported, optional-but-deferred or not implemented are superseded by this addendum and the final Stage 10 handoff. Both `previous_close` and `entry_open` are supported with distinct explicit feature/artifact contracts; execution remains close T to next-session close T+1 with mandatory overnight cash rest. Current opening acquisition, availability requirements, commands and the recorded matched-cohort comparison are documented in `docs/entry_open.md`. Final verification is **716 tests passed**, including **56 Stage 10 tests**, and strict mypy passes on **204 source files**. Stages 1-9 remain complete; no further numbered stage is required.
 
 ### Integration addendum for Stage 1-8 handoffs - 2026-10-15
 
@@ -1045,3 +1049,66 @@ Rebuild old intraday/open-to-close datasets, NPZ caches, artifacts, checkpoints 
 **Next stage and concrete prerequisites:**
 
 No further main-refactoring stage is required. **Stage 10 remains optional and deferred**, and must be explicitly requested. It would require evidenced pre-close entry-opening observations for the full ticker universe, a distinct recorded feature/artifact specification, and deterministic availability/selection/schedule comparisons without changing close-to-close execution or cash rest. Do not begin it as part of Stage 9.
+
+### Stage 10 handoff - 2026-10-15
+
+**Status:** Complete. The explicitly requested optional enhancement is implemented and its acceptance checks pass. Stage 9 was verified before implementation: the user-committed checkout was clean, the full baseline suite passed **660 tests** with three known Torch optimization warnings in **131.65 seconds**, and strict mypy passed on **191 source files**. Stage 9's retirement, delegation, import-safety and isolated-wheel checks were included; no prerequisite cleanup was repeated.
+
+**Implemented paths and public APIs/commands:**
+
+- `src/stockguidance/market_data/openings.py`: immutable `OpeningObservation`, `OpeningQuery`, `OpeningData` and runtime-checkable `OpeningRepository` contracts. `market_data/opening_store.py` supplies atomic receipt persistence and read-only, cutoff-aware retrieval. `database/repositories/signals.py` composes existing verified closes and stored openings through `SignalRepository` without changing public training API signatures.
+- `market_data/providers/openings.py` and `providers/configured_openings.py`: focused `PolygonOpeningProvider` and lazy configured provider assembly. `market_data/opening_refresh.py` supplies full-universe `OpeningRefresh`, obtains ticker symbols from verified prior-session observations and recovers partially completed captures without discarding earlier valid receipts. `providers/http.py` accepts the exact bounded minute endpoint; `providers/credentials.py` shares lazy credential resolution with the daily provider. The existing key declaration in `polygon_fetch.py` is unchanged and its value is not copied.
+- `features/specification.py`, `features/construction.py`, `features/opening_values.py`, `datasets/building.py` and `artifacts/decoding.py`: explicit opening feature order/layout, sample availability, data revisions and persisted artifact compatibility. `training/jobs.py`, `simulation/score_source.py` and `workflows/simulation_runtime.py` read stored opening evidence for training, diagnostics and simulation; they do not capture historical data or backdate availability.
+- `workflows/recommend.py`, `workflows/recommendation_dependencies.py` and `workflows/recommendation_runtime.py`: both `current` and `retrain` automatically capture the current full-universe opening after daily reconciliation and before the final cutoff. Historical daily readiness stays close-only; the exact inference sample checks current openings, and historical retraining excludes unavailable original opening samples.
+- `validation/openings.py`, `validation/close_samples.py`, `validation/findings.py`, `validation/repair.py`, `workflows/validate_database.py` and CLI validation assembly: standalone read-only opening checks, the `entry_open_observations` finding and the explicit `capture_opening_evidence` proposal. Opening evidence is not silently treated as an automatic daily-data repair.
+- `simulation/signal_comparison.py`: `compare_signal_modes` and `SignalComparison`, with matched training and decision cohorts. `workflows/signal_comparison_runtime.py` assembles the chronological workflow. `cli/update_openings.py` and `cli/compare_signals.py` expose focused commands, registered in `pyproject.toml`; existing training/recommendation/simulation/feature-inspection/validation frontends accept explicit opening specifications.
+- `docs/entry_open.md` records the exact JSON contract, provider documentation, commands, operational limitations, missing-data policy and reproducible comparison. `README.md`, `docs/frontends.md`, `docs/close_samples.md`, `docs/model_training.md`, `docs/recommendations.md`, `docs/simulation.md`, `docs/database_validation.md` and the Stage 10 deferral wording in `docs/stage9_retirement.md` are updated. No source files or user data/model directories are deleted in Stage 10.
+- `tests/stage10/conftest.py`, `test_opening_samples.py`, `test_opening_provider.py`, `test_workflows.py`, `test_comparison.py`, `test_frontends.py` and `test_capture_recovery.py`: **56 deterministic checks**. Earlier unsupported-mode assertions now require the explicit opening channel, and credential fixtures patch the shared lazy resolver. No test collection exclusions are added.
+
+**Decisions and contract/schema changes:**
+
+- `entry_open` retains the same completed-session close transformations and appends `entry_open_over_previous_close_minus_one`, namely `open(T) / close(T-1) - 1`, as the final channel for every ordered ticker. This stateless channel is repeated across the historical rows of the explicit `(lookback_sessions, ticker_count, feature_count)` array. Feature version is `entry-open-v1`; its layout records the repetition. `previous-close-v1` and its artifact fields remain unchanged. No fitted scaling or future-session normalization is introduced.
+- Opening acquisition uses `/v2/aggs/ticker/{ticker}/range/1/minute/{start}/{end}`, bounded to the exchange opening millisecond through +59,999 ms, ascending, limit 1 and explicit source adjustment. It reads only `o` after validating status, ticker, adjustment, count, exact bucket timestamp and absence of continuation. It never requests the entry session's completed daily bar. The inspected official Custom Bars documentation at `https://massive.com/docs/rest/stocks/aggregates/custom-bars` returned HTTP 200 and confirms millisecond bounds, split adjustment, extended-session bars and absent bars without qualifying trades; no live market-data API request was used for verification.
+- The precise opening method is `first_regular_session_minute_open-v1`: the first qualifying trade in the first regular-session minute, **not a separately certified official auction price**. A security that first trades later is unavailable under this version. Capture begins after that minute completes and must finish before the actual exchange close, including early closes. Observed time is the opening bucket boundary; availability is the actual response receipt, never the original date of a historical download.
+- Receipts use `stockguidance-opening-1` under `<data-root>/market_data/openings/<source-and-method-hash>/<date>/<ticker-id>.json`, with exact session/calendar, source/method, price, receipt time and content/response identities. Corrections and receipt changes affect revisions. Missing, late, corrupt or unverified evidence for **any ordered ticker** makes the entire sample unavailable. Never fill openings, shrink the universe, substitute daily-bar opens or reinterpret old artifacts. Artifacts persist endpoint, method, availability, missing policy, transformation, mode, preprocessing and layout; equal tensor width does not establish semantic compatibility.
+- Targets and executions remain close T to next exchange-session close T+1. Eligibility remains previous-session based; fitting labels must be mature at each training cutoff. Both allocation schedules retain anchored parity, mandatory overnight sale-proceeds rest and independently compounding A/B balances. Missing decisions do not remove sale/mark sessions, transfer capital or shift the schedule.
+- The paired comparison uses the intersection of eligible mature samples at each fitting cutoff and skips both modes at a decision when either input is unavailable. Period, ordered universe, close transformations, capital, schedule, execution/eligibility, training configuration, seed and retraining cadence are shared. Excluded fitting dates/cutoffs and decision dates/reasons are explicit in `stockguidance-signal-comparison-1`, beside both normal simulation reports. This is a matched-cohort comparison, not an unconstrained availability comparison. Generic report comparisons still reject incompatible feature specifications.
+
+**Checks run and results:**
+
+- Final full supported suite: **716 passed**, **3 known Torch transformer optimization warnings**, in **145.47 seconds**. It includes the Stage 1-9 regression suite, import-time guards and isolated wheel/credential checks. Both signal modes, recommendation policies and allocation schedules remain covered.
+- Focused Stage 10 suite: **56 passed** in **19.59 seconds**. Fixtures prove opening-driven selection changes without changed close fills; full-universe availability and exact ordering; strict provider/receipt boundaries; pre-open, delayed, empty, corrupt and partial captures; revision invalidation; future-daily-data exclusion; artifact mismatch rejection; read-only validation; current/retrain integration and supported frontend behavior.
+- Small aligned-price chronological comparison: **4 passed** in **6.53 seconds**, covering both allocation policies with complete and missing opening evidence. Labels, feature inputs and execution closes use the same fixture history. The recorded July 5-11, 2024 experiment starts with **1000.00**, seed **42**, one tiny CPU epoch and retraining every **two anchored buy decisions**. Complete-evidence final equities are **1799.97 / 524.99** for alternate sessions and **3224.95 / 1833.88** for staggered halves (previous-close / entry-open). Missing July 2/5 evidence for one ticker excludes July 2 from both fitting cohorts and July 5 from both decision paths; final equities are **499.99 / 499.99** and **1821.38 / 1821.38**, respectively. These synthetic results demonstrate reproducibility/cohort accounting, not profitability; see `docs/entry_open.md` for the table and command.
+- Strict mypy: **no issues in 204 source files**. No blanket suppressions, checker exceptions or new formatter are introduced.
+- Tracked/index and **21 new-file** CRLF-aware whitespace checks pass. Java changes: **0**; changed index entries: **0**. No branch, commit, reset, stash, staging or unstaging command is issued. Checks use temporary fixture files and tiny CPU jobs, not live database/schema mutations, production downloads/training, email or trades.
+
+Commands use the IDE-discovered Python **3.13.9**, `C:\Projects\StockGuidance\.venv\Scripts\python.exe`, package manager `pip`, and the existing process-only matching-runtime workaround. Discover the configured environment before each Python invocation.
+
+```powershell
+$stage10Runtime = Join-Path $env:TEMP 'stockguidance-python3139-stdlib'
+$env:PYTHONHOME = $stage10Runtime
+$env:PYTHONPATH = "$stage10Runtime\python313.zip;$stage10Runtime;C:\Projects\StockGuidance\.venv\Lib\site-packages"
+& 'C:\Projects\StockGuidance\.venv\Scripts\python.exe' -m pytest tests/stage10 -q --tb=short --maxfail=5
+& 'C:\Projects\StockGuidance\.venv\Scripts\python.exe' -m pytest tests/stage10/test_comparison.py -q -s --tb=short --maxfail=5
+& 'C:\Projects\StockGuidance\.venv\Scripts\python.exe' -m pytest tests -q --tb=short --maxfail=5
+& 'C:\Projects\StockGuidance\.venv\Scripts\python.exe' -m mypy
+git diff --check
+git diff --cached --check
+git -c core.autocrlf=false -c core.whitespace=cr-at-eol diff --no-index --check -- NUL docs/entry_open.md
+```
+
+Repeat the last check for each new source/test file. A new-file comparison may exit 1 solely because the file differs from NUL; whitespace diagnostics determine failure. The focused comparison prints its recorded summary; normal `stockguidance.cli.compare_signals` emits the full paired JSON report. Refresh installed console metadata through the configured environment during deployment; module commands already use this implementation.
+
+**Pre-existing failures or remaining limitations:**
+
+The configured base Python installation is still missing; ordinary commands require the existing process-only workaround or operator repair. Unrelated dependency inconsistencies remain outside this stage. Native MySQL/Polygon, live minute entitlements/publication/delay/rate limits, CUDA/AMP, production-scale performance and a live browser are not fixture-verification claims. Daily history metadata enforces a lower bound but does not establish minute-history entitlement. Large universes may not finish throttled per-ticker requests before the close; capture then fails rather than silently narrowing coverage.
+
+Original historical opening receipts cannot be reconstructed or backdated from downloads made today. Overwritten historical revisions remain unrecoverable. Historical training/comparison requires retained receipts available at the original cutoffs; an existing daily database alone is insufficient. This implementation deliberately does not promise an official auction price or support later-minute substitutes. The retained credential remains at `DEFAULT_API_KEY` in `polygon_fetch.py`, with eventual external configuration still future work; its value is absent from new receipts, reports, artifacts and documentation. User data/models, the local recovery archive and Java work are retained.
+
+**Data/model rebuild or migration requirements:**
+
+Train distinct opening-mode artifacts from explicit `entry_open` JSON and evidenced original opening receipts. Do not toggle a previous-close artifact's mode or relabel tensors based on dimension. Existing previous-close artifacts remain compatible; old intraday/open-to-close datasets, artifacts and caches still require the previously documented rebuild. Existing database/history/source/inference/portfolio/simulation schema versions are unchanged; opening receipts and paired comparison reports add separate schemas. No automatic migration from legacy scores or daily-bar openings exists.
+
+**Next stage and concrete prerequisites:**
+
+No further numbered stage is required: **Stages 1-10 are complete**. Operator deployment requires evidenced source/history/publication settings, appropriate minute access, retained contemporaneous opening receipts, separately trained compatible artifacts and refreshed console metadata. These operational prerequisites are not permission to invent historical availability, change cash-rest economics or start a production experiment.

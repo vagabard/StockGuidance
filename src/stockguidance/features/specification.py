@@ -6,6 +6,7 @@ from stockguidance.config.source import PriceAdjustment
 from stockguidance.config.validation import require_enum, require_positive_int
 from stockguidance.market_data.availability import ObservationTiming
 from stockguidance.market_data.intervals import ObservationInterval, require_daily_interval
+from stockguidance.market_data.openings import OPENING_ENDPOINT, OPENING_METHOD
 
 
 class SignalMode(StrEnum):
@@ -20,15 +21,16 @@ class MissingHistoryPolicy(StrEnum):
 class CloseFeature(StrEnum):
 	RELATIVE_CLOSE = "close_over_first_window_close_minus_one"
 	LOG_CLOSE = "log_close"
+	ENTRY_OPEN_RETURN = "entry_open_over_previous_close_minus_one"
 
 
 @dataclass(frozen=True)
 class FeatureSpec:
-	"""Only closing-price history through the previous completed session is input.
+	"""Closing history, optionally supplemented by an observed entry opening.
 
 	Ticker order is exact. Missing lookback is unavailable, never zero-filled.
 	Layout is oldest session first, then ticker, then feature, in C order.
-	Transformations are stateless and use only the observed window.
+	Transformations are stateless and use only that history and a timely opening.
 	"""
 
 	ticker_ids: tuple[int, ...]
@@ -41,8 +43,6 @@ class FeatureSpec:
 
 	def __post_init__(self) -> None:
 		require_enum(self.signal_mode, SignalMode, "signal_mode")
-		if self.signal_mode is SignalMode.ENTRY_OPEN:
-			raise ValueError("entry_open is reserved for Stage 10 and is not implemented")
 		require_daily_interval(self.interval)
 		require_enum(self.missing_history, MissingHistoryPolicy, "missing_history")
 		require_enum(self.adjustment, PriceAdjustment, "price adjustment")
@@ -52,6 +52,11 @@ class FeatureSpec:
 			require_enum(feature, CloseFeature, "close feature")
 		if len(set(self.feature_order)) != len(self.feature_order):
 			raise ValueError("feature_order must be unique")
+		if self.signal_mode is SignalMode.ENTRY_OPEN:
+			if len(self.feature_order) < 2 or self.feature_order[-1] is not CloseFeature.ENTRY_OPEN_RETURN:
+				raise ValueError("entry_open requires close features followed by entry_open_over_previous_close_minus_one")
+		elif CloseFeature.ENTRY_OPEN_RETURN in self.feature_order:
+			raise ValueError("previous_close cannot contain an entry opening feature")
 		require_positive_int(self.lookback_sessions, "lookback_sessions")
 		if not isinstance(self.ticker_ids, tuple) or not self.ticker_ids:
 			raise ValueError("ticker_ids must be a nonempty ordered tuple")
@@ -70,11 +75,21 @@ class FeatureSpec:
 
 	@property
 	def version(self) -> str:
-		return "previous-close-v1"
+		return "previous-close-v1" if self.signal_mode is SignalMode.PREVIOUS_CLOSE else "entry-open-v1"
 
 	@property
 	def layout(self) -> str:
-		return "session_oldest_first,ticker,feature:C"
+		return "session_oldest_first,ticker,feature:C" if self.signal_mode is SignalMode.PREVIOUS_CLOSE else "session_oldest_first,ticker,feature:C;opening_channel_repeated_over_history"
+
+	@property
+	def preprocessing(self) -> str:
+		return "stateless_window_only" if self.signal_mode is SignalMode.PREVIOUS_CLOSE else "stateless_previous_closes_and_entry_open"
+
+	@property
+	def opening_contract(self) -> dict[str, str] | None:
+		if self.signal_mode is SignalMode.PREVIOUS_CLOSE:
+			return None
+		return {"endpoint": OPENING_ENDPOINT, "method": OPENING_METHOD, "availability": "actual_receipt_after_first_minute_and_no_later_than_decision_cutoff", "missing_policy": "entire_sample_unavailable_if_any_ordered_ticker_is_missing", "transformation": CloseFeature.ENTRY_OPEN_RETURN.value}
 
 	def validate_observation(self, observation: ObservationTiming, timing: DecisionTiming) -> None:
 		if not isinstance(observation, ObservationTiming) or not isinstance(timing, DecisionTiming):

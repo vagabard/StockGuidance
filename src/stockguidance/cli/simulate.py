@@ -40,7 +40,7 @@ def main(argv: list[str] | None = None) -> int:
 		if (configuration.retraining is not None) != (arguments.model_policy == EvaluationPolicy.CHRONOLOGICAL_RETRAIN.value):
 			raise ValueError("Model policy and training configuration differ")
 	except Exception as error:
-		message = "entry_open is reserved for Stage 10 and is not implemented" if str(error) == "entry_open is reserved for Stage 10 and is not implemented" else "Invalid simulation configuration"
+		message = "Invalid simulation configuration; entry_open requires its explicit opening feature" if "entry_open" in str(error) else "Invalid simulation configuration"
 		print(json.dumps({"successful": False, "stage": "request", "message": message}))
 		return 2
 	try:

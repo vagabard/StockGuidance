@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 from stockguidance.artifacts.ensembles import LoadedEnsemble
 from stockguidance.artifacts.loading import LoadedModel
 from stockguidance.calendar.clock import Clock, decision_cutoff
@@ -5,6 +7,7 @@ from stockguidance.calendar.protocols import SessionCalendar
 from stockguidance.database.repositories.closes import CloseQuery
 from stockguidance.database.repositories.sessions import SessionQuery
 from stockguidance.datasets.building import build_sample
+from stockguidance.features.specification import CloseFeature, SignalMode
 from stockguidance.market_data.history import HistoryBoundary
 from stockguidance.market_data.identity import content_id
 from stockguidance.portfolio.planning import plan_orders
@@ -47,11 +50,17 @@ def recommend(job: RecommendationJob, boundary: HistoryBoundary, calendar: Sessi
 		refresh = update_market_data(job.source, UpdateSettings(job.start, job.end, job.publication, job.corrections), boundary, calendar, services.provider, services.market_data, clock)
 		if not refresh.successful:
 			raise ValueError("Incomplete refresh")
+		if job.features.signal_mode is SignalMode.ENTRY_OPEN:
+			if services.openings is None:
+				raise ValueError("Entry opening capture is not configured")
+			opening_request = prepare_request(job, boundary, calendar, clock)
+			services.openings.refresh(job.features, opening_request.timing, boundary, clock)
 	except Exception:
 		raise _failure(WorkflowStage.REFRESH, FailureCode.NOT_READY, "Required source reconciliation failed or coverage remains incomplete") from None
 	try:
 		request = prepare_request(job, boundary, calendar, clock)
-		validation = validate_database(job.source, ValidationSettings(job.start, job.end, job.publication, request.timing.decision_cutoff, job.features, job.target), boundary, calendar, services.validation, clock)
+		close_features = replace(job.features, signal_mode=SignalMode.PREVIOUS_CLOSE, feature_order=tuple(feature for feature in job.features.feature_order if feature is not CloseFeature.ENTRY_OPEN_RETURN))
+		validation = validate_database(job.source, ValidationSettings(job.start, job.end, job.publication, request.timing.decision_cutoff, close_features, job.target), boundary, calendar, services.validation, clock)
 		if not validation.complete:
 			raise ValueError("Incomplete validation")
 		sample = build_sample(job.features, job.target, request.timing, boundary, calendar, job.publication, services.closes)

@@ -30,6 +30,7 @@ class ValidationCheck(StrEnum):
 	OUTCOME = "legacy_outcome"
 	TARGET = "close_to_close_target"
 	FEATURE = "previous_close_features"
+	OPENING = "entry_open_observations"
 
 
 @dataclass(frozen=True)

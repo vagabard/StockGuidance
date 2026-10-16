@@ -8,7 +8,8 @@ grouped by reason and distinguished from retained frontends, are recorded in
 history and the verified local recovery archive. User data/models are unchanged.
 
 Use PyCharm's configured Python and package manager. All supported model inputs
-are `previous_close`; every target is raw `close(T+1) / close(T) - 1`. Decisions
+are `previous_close` or the distinct Stage 10 `entry_open` specification; every
+target is raw `close(T+1) / close(T) - 1`. Decisions
 precede the entry close. Same-close execution is an explicit simulation
 assumption. A recommendation produces a plan and records no fills.
 
@@ -229,5 +230,7 @@ trades or send mail. Native MySQL/Polygon deployment, CUDA and production-scale
 performance are outside fixture verification. Java sources are unchanged. Their
 legacy saved-score/CSV consumers need explicit format coordination before using
 the new Python artifacts/reports; Python does not continue emitting the old
-intraday formats for them. `entry_open` stays optional Stage 10 and is rejected
-explicitly; neither opening inputs nor full intraday ingestion are implemented.
+intraday formats for them. The completed [Stage 10 opening-price extension](entry_open.md)
+adds full-universe first-regular-minute opening inputs, actual-receipt readiness,
+distinct artifacts, read-only validation and matched chronological comparisons.
+It does not implement full intraday ingestion or change holding/cash-rest rules.
