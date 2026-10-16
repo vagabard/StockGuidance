@@ -1,7 +1,7 @@
 from stockguidance.config.source import SourceConfig
 from stockguidance.database.repositories.close_projection import project_closes
 from stockguidance.database.repositories.closes import CloseData, CloseQuery
-from stockguidance.database.repositories.validation import ValidationRepository
+from stockguidance.database.repositories.validation import DatabaseInspection, ValidationRepository
 from stockguidance.market_data.manifests import InvalidManifest, ManifestStore
 
 
@@ -12,6 +12,9 @@ class VerifiedCloseRepository:
 		self.source, self.repository = source, repository
 
 	def read(self, query: CloseQuery) -> CloseData:
+		return self.inspect(query)[0]
+
+	def inspect(self, query: CloseQuery) -> tuple[CloseData, DatabaseInspection]:
 		if query.scope.boundary.source != self.source.identity:
 			raise ValueError("Close repository and request sources differ")
 		inspection = self.repository.inspect(query.scope)
@@ -27,4 +30,4 @@ class VerifiedCloseRepository:
 				manifest = None
 			if manifest is not None:
 				manifests.append(manifest)
-		return project_closes(query, inspection, tuple(manifests))
+		return project_closes(query, inspection, tuple(manifests)), inspection

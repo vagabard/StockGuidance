@@ -1,0 +1,38 @@
+from dataclasses import asdict
+
+from stockguidance.reporting.training import training_payload
+from stockguidance.workflows.recommendation_result import RecommendationRunResult
+
+
+def recommendation_payload(run: RecommendationRunResult) -> dict[str, object]:
+	result = run.recommendation
+	request, timing = result.request, result.request.timing
+	return {
+		"successful": True, "kind": "ranked_suggestions", "orders_planned": False, "fills_recorded": False,
+		"cash_rest_enforced": False, "planning_status": "requires_stage_8_portfolio_state",
+		"model_policy": request.model.policy.value, "artifact_id": result.artifact_id,
+		"members": [{"artifact_id": identity, "weight": weight} for identity, weight in zip(run.member_artifact_ids, run.member_weights)],
+		"source": asdict(request.source.identity), "data_revision": result.data_revision,
+		"refresh_revision": run.refresh.data_revision, "feature_revision": run.sample.feature_revision,
+		"feature_identity": run.sample.feature_cache_key,
+		"coverage": {"start": request.coverage.start.isoformat(), "end": request.coverage.end.isoformat(), "as_of": request.coverage.as_of.isoformat(), "refreshed": run.refresh.successful, "validated": run.validation.complete},
+		"calendar": {"id": timing.entry_session.calendar_id, "version": run.sample.calendar_version},
+		"previous_session": timing.previous_session.session_date.isoformat(),
+		"entry_session": timing.entry_session.session_date.isoformat(), "exit_session": timing.exit_session.session_date.isoformat(),
+		"decision_cutoff": timing.decision_cutoff.isoformat(), "entry_close": timing.entry_time.isoformat(), "exit_close": timing.exit_time.isoformat(),
+		"execution_assumption": "pre_close_decision_same_close_fill",
+		"features": {**asdict(request.features), "version": request.features.version, "layout": request.features.layout},
+		"target": {**asdict(request.target), "formula": request.target.raw_formula},
+		"allocation": {"policy": request.allocation.policy.value, "anchor_session": request.allocation.anchor_session.session_date.isoformat(), "cash_rest": request.allocation.cash_rest.value},
+		"eligibility_policy": {**asdict(request.eligibility), "observation_session": "previous_completed_session", "missing_policy": "fail_required_readiness"},
+		"eligibility": [{"ticker_id": item.ticker_id, "state": item.state.value, "detail": item.detail, "session": None if item.observation is None else item.observation.timing.session.session_date.isoformat(), "available_at": None if item.observation is None else item.observation.timing.available_at.isoformat(), "transactions": None if item.observation is None else item.observation.transactions} for item in run.eligibility],
+		"scores": [asdict(item) for item in run.scores], "ranking": [asdict(item) for item in result.ranking],
+		"training": None if run.training is None else training_payload(run.training),
+	}
+
+
+def render_recommendations(run: RecommendationRunResult) -> str:
+	result, timing = run.recommendation, run.recommendation.request.timing
+	lines = [f"Ranked suggestions: entry close {timing.entry_session.session_date}; exit close {timing.exit_session.session_date}", f"Decision cutoff: {timing.decision_cutoff.isoformat()}", f"Artifact: {result.artifact_id}", f"Source revision: {result.data_revision}", f"Allocation policy: {result.request.allocation.policy.value}", "Cash-rest order planning requires Stage 8 portfolio state; no orders or fills are recorded."]
+	lines.extend(f"#{rank}: ticker_id={item.ticker_id} score={item.score:.8f}" for rank, item in enumerate(result.ranking, start=1))
+	return "\n".join(lines)

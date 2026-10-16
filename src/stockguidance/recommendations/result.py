@@ -21,7 +21,7 @@ class RankedTicker:
 class RecommendationResult:
 	"""A ranked suggestion with provenance; no cash ledger, orders, or fills.
 
-	The future workflow must establish full readiness before returning this.
+	The recommendation workflow establishes readiness before returning this.
 	A ranked list alone does not enforce the cash-rest allocation policy.
 	"""
 

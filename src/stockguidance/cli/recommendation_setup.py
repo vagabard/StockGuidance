@@ -1,0 +1,43 @@
+import argparse
+from datetime import timedelta
+
+from stockguidance.artifacts.contracts import ArtifactReference
+from stockguidance.calendar.clock import SystemClock
+from stockguidance.calendar.decisions import DecisionTiming
+from stockguidance.calendar.exchange import ExchangeCalendar
+from stockguidance.cli.recommendation_configuration import RecommendationConfiguration
+from stockguidance.database.repositories.eligibility import VerifiedEligibilityRepository
+from stockguidance.database.repositories.mysql_market_data import MySQLMarketDataRepository
+from stockguidance.database.repositories.mysql_validation import MySQLValidationRepository
+from stockguidance.database.repositories.verified_closes import VerifiedCloseRepository
+from stockguidance.database.write_connections import LegacyWriteConnectionFactory
+from stockguidance.market_data.history import UnknownHistoryBoundary
+from stockguidance.market_data.history_store import JsonHistoryStore
+from stockguidance.market_data.providers.configured_polygon import ConfiguredPolygonProvider
+from stockguidance.models.policy import ModelRefreshPolicy, ModelSelection
+from stockguidance.portfolio.policy import AllocationSpec
+from stockguidance.recommendations.configuration import ArtifactKind, RecommendationJob, RetrainingPlan
+from stockguidance.targets.specification import TargetSpec
+from stockguidance.workflows.recommend import recommend
+from stockguidance.workflows.recommendation_dependencies import RecommendationServices
+from stockguidance.workflows.recommendation_result import RecommendationRunResult
+
+
+def assemble_and_recommend(configuration: RecommendationConfiguration, arguments: argparse.Namespace) -> RecommendationRunResult:
+	boundary = JsonHistoryStore(configuration.source.data_root / "history").load(configuration.source.identity)
+	if boundary is None:
+		raise UnknownHistoryBoundary("Recommendation requires evidenced, persisted source history; use update_market_data first")
+	calendar = ExchangeCalendar(boundary.calendar_id, min(boundary.history_start, configuration.anchor_date) - timedelta(days=14), max(configuration.end, configuration.entry_date) + timedelta(days=14))
+	policy = ModelRefreshPolicy(arguments.policy)
+	reference = None if policy is ModelRefreshPolicy.RETRAIN else ArtifactReference(arguments.artifact, arguments.artifact_id)
+	retraining = None
+	if configuration.retraining is not None:
+		settings = configuration.retraining
+		decisions = tuple(DecisionTiming(calendar.shift(session, -1), session, calendar.shift(session, 1), session.closes_at - settings.decision_lead) for session in calendar.sessions(settings.start, settings.end))
+		retraining = RetrainingPlan(decisions, settings.training, arguments.artifact)
+	job = RecommendationJob(configuration.source, configuration.start or boundary.history_start, configuration.end, configuration.entry_date, configuration.features, TargetSpec(), ModelSelection(policy, None if reference is None else reference.artifact_id), AllocationSpec(configuration.allocation_policy, calendar.session(configuration.anchor_date)), configuration.publication, configuration.corrections, configuration.eligibility, configuration.top_k, reference, ArtifactKind(arguments.artifact_kind), retraining)
+	connect = LegacyWriteConnectionFactory()
+	validation = MySQLValidationRepository(job.source, connect)
+	closes = VerifiedCloseRepository(job.source, validation)
+	services = RecommendationServices(ConfiguredPolygonProvider(arguments.max_retries), MySQLMarketDataRepository(job.source, connect), validation, closes, VerifiedEligibilityRepository(closes))
+	return recommend(job, boundary, calendar, services, SystemClock())

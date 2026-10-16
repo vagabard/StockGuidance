@@ -136,16 +136,18 @@ boundary/dependency observations remain null. This is not Stage 5's close-to-clo
 target or new model input construction; those datasets and models still require
 rebuilding in their assigned stages.
 
-`choose_next_day_stocks.py` delegates its refresh step to this updater and stops
-on required failure before recommendation/training. Its remaining recommendation
-and training paths are still legacy code. `polygon_fetch.py` retains its other
+The [recommendation workflow](recommendations.md), exposed through
+`choose_next_day_stocks.py` and `run_recommender_from_model_dir.py`, calls this
+typed updater and stops on required failure before recommendation/training.
+Both frontends require explicit close-based artifacts or a typed retraining job.
+`polygon_fetch.py` retains its other
 discovery/trade-download responsibilities. The old population scripts and their
 standalone entry points remain isolated migration paths for Stage 9 cleanup;
 use the new updater for complete reconciliation.
 
 The existing hardcoded provider key remains `DEFAULT_API_KEY` in
-`polygon_fetch.py`; the legacy recommendation parser also retains its pre-existing
-inline default. Neither value is reproduced here. The new command uses
+`polygon_fetch.py`; the former recommendation parser's duplicate inline default
+was removed in Stage 7. Its value is not reproduced here. The new command uses
 `POLYGON_API_KEY` when set, otherwise the retained constant. Externalizing the
 remaining defaults is future work, not a prerequisite for updating. Legacy
 connector/credential loaders currently require running from the checkout and
