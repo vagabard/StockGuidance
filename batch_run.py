@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import List, Optional
 
 from incremental_training_harness import main as incremental_main
-from train_pytorch_network import main as train_main
+from trainer.legacy_training import main as train_main
 from choose_next_day_stocks import main as choose_main
 
 

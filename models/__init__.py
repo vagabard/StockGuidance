@@ -5,18 +5,10 @@ from typing import List, Optional
 
 from .convolution_transformer import ConvolutionAndTransformerFeedForwareNet
 from .multi_layer_mlp import MultiLayerLinearNet
+from stockguidance.models.activations import sigmoid_range_type
 
 
-class SigmoidRange(nn.Module):
-	"""
-	Activation function based on Sigmoid that maps inputs to the range [-1, 1].
-	Formula: 2 * sigmoid(x) - 1
-	"""
-	def __init__(self):
-		super().__init__()
-
-	def forward(self, x: torch.Tensor) -> torch.Tensor:
-		return 2.0 * torch.sigmoid(x) - 1.0
+SigmoidRange = sigmoid_range_type()
 
 
 def xavier_init_weights(m: nn.Module):

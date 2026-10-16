@@ -1,3 +1,5 @@
+"""Legacy run-directory persistence; new artifacts and checkpoints are separate."""
+
 from __future__ import annotations
 
 import json

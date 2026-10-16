@@ -152,7 +152,7 @@ def _run_one_window(
 	metrics directory contents.
 	"""
 
-	from train_pytorch_network import TrainPytorchNetwork  # Imported lazily
+	from trainer.legacy_training import TrainPytorchNetwork
 
 	# Force a fresh metrics file path per window so that each run creates its
 	# own timestamped subdirectory beneath ``run_group_dir``.

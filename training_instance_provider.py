@@ -1,5 +1,8 @@
 """
-Training/Test instance provider
+Legacy training/test instance provider
+
+New close-based training uses stockguidance.datasets.training. This provider
+retains incompatible intraday labels and sanitization for unmigrated models.
 
 This module provides a small helper class that prepares date-indexed feature/label
 windows for model training and testing. It relies on

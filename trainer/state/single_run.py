@@ -1,3 +1,5 @@
+"""Legacy mutable controller state; never required by new inference artifacts."""
+
 from __future__ import annotations
 
 import argparse

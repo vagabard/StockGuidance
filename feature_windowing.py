@@ -3,11 +3,14 @@ feature_windowing
 ------------------
 
 Utilities for constructing concatenated per-date feature windows that are
-shared between training (training_instance_provider) and inference/simulation
+shared between legacy training (training_instance_provider) and inference/simulation
 (simulate_trading).
 
 All functions operate on X_flat with shape (D, T*F), where each row is the
 flattened per-ticker feature vector for a given date index.
+
+These legacy windows are incompatible with previous-close samples. New consumers
+use stockguidance.datasets.building and its exact calendar/specification window.
 """
 from __future__ import annotations
 

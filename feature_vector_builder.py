@@ -1,3 +1,9 @@
+"""Legacy feature builder for unmigrated model consumers.
+
+Close-based consumers use stockguidance.datasets.building.build_sample.
+This builder's intraday semantics and dimension guessing are incompatible.
+"""
+
 from __future__ import annotations
 
 import numpy as np

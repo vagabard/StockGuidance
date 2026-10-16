@@ -1,3 +1,5 @@
+"""Legacy checkpoint loading. New inference uses stockguidance.artifacts.loading."""
+
 from __future__ import annotations
 import torch
 from torch import nn

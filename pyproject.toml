@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "StockGuidance"
+version = "0.1.0"
+description = "Daily close-to-close training, recommendations and cash-rest simulation"
+requires-python = ">=3.13"
+dependencies = ["exchange-calendars>=4.11,<5", "tzdata>=2024.1", "numpy>=2.1,<3"]
+
+[project.scripts]
+update_market_data = "stockguidance.cli.update_market_data:main"
+validate_database = "stockguidance.cli.validate_database:main"
+train_model = "stockguidance.cli.train_model:main"
+recommend = "stockguidance.cli.recommend:main"
+simulate_trading = "stockguidance.cli.simulate:main"
+stockguidance_batch = "stockguidance.cli.batch:main"
+incremental_training = "stockguidance.cli.incremental:main"
+inspect_features = "stockguidance.cli.inspect_features:main"
+inspect_reports = "stockguidance.cli.reports:main"
+
+[project.optional-dependencies]
+dev = ["pytest>=8.3", "mypy>=1.15"]
+training = ["torch>=2.6,<3"]
+database = ["mysql-connector-python>=9,<10"]
+viewers = ["streamlit>=1.40,<2"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["stockguidance*"]
+namespaces = false
+
+[tool.setuptools.package-data]
+stockguidance = ["py.typed"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+
+[tool.mypy]
+python_version = "3.13"
+files = ["src/stockguidance"]
+strict = true

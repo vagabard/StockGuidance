@@ -1,0 +1,25 @@
+{
+  "family_run": {
+    "activation_list": [
+      "relu"
+    ],
+    "base_args": [],
+    "base_args_list": null,
+    "base_optional_features": [],
+    "batch_of_instances_to_train_on_at_once": null,
+    "completed": false,
+    "current_day_change": false,
+    "current_index": 0,
+    "day_change_centered_list": [
+      "0.5"
+    ],
+    "dbinfo": null,
+    "dbinfo_file": "dbinfo.id",
+    "device": null,
+    "dont_use_dataloader": false,
+    "drop_last": false,
+    "enable_rank_error_loss_in_training": false,
+    "epochs_list": [
+      10
+    ],
+    "file_structure": 

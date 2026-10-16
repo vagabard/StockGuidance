@@ -1,3 +1,5 @@
+"""Legacy experiment controller, isolated from the typed training service."""
+
 from __future__ import annotations
 
 import argparse

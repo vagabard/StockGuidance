@@ -1,3 +1,5 @@
+"""Legacy open-to-close executor; new fitting lives in stockguidance.training."""
+
 from __future__ import annotations
 
 import argparse

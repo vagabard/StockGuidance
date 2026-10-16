@@ -1,5 +1,9 @@
 """
-Load rows from MySQL table `daily_delta_stock_data` and convert them into tensors/arrays.
+Legacy loader for `daily_delta_stock_data` tensors/arrays.
+
+New close-based consumers use stockguidance.database.repositories.verified_closes
+and stockguidance.datasets. Its revision identities and semantics are incompatible
+with these legacy datasets, transforms, and cache files.
 
 Connection is created via `db_connect.get_connection` (same defaults as the rest of the repo):
 - host: localhost

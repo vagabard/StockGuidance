@@ -1,3 +1,5 @@
+"""Legacy intraday label transforms; close samples use stockguidance.targets."""
+
 from typing import List, Tuple, Dict
 
 import numpy
