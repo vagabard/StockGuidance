@@ -9,7 +9,7 @@ import pytest
 
 from stockguidance.artifacts.loading import load_artifact
 from stockguidance.cli import train_model as cli
-from stockguidance.cli import training_job
+from stockguidance.training import jobs as training_job
 from stockguidance.config.source import SourceConfig
 from stockguidance.market_data.history_store import JsonHistoryStore
 from stockguidance.reporting.training import training_payload
@@ -142,7 +142,7 @@ def test_documented_job_is_valid_without_accessing_live_data(tmp_path):
 	assert job.configuration.model.final_activation == "none"
 
 
-def test_touched_legacy_modules_parse_without_importing_controllers():
+def test_supported_frontends_parse_without_importing_controllers():
 	root = Path(__file__).resolve().parents[2]
-	for path in ("trainer/legacy_training.py", "trainer/legacy_arguments.py", "trainer/state/family_run.py", "trainer/state/single_run.py", "trainer/model_loader.py", "trainer/train_single_run.py", "trainer/io_run.py", "choose_next_day_stocks.py", "incremental_training_harness.py", "batch_run.py", "models/__init__.py"):
+	for path in ("train_pytorch_network.py", "choose_next_day_stocks.py", "incremental_training_harness.py", "batch_run.py", "src/stockguidance/training/jobs.py", "src/stockguidance/workflows/batch.py"):
 		ast.parse((root / path).read_text(encoding="utf-8"), filename=path)

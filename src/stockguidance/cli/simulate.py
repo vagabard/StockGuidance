@@ -2,11 +2,12 @@ import argparse
 import json
 from pathlib import Path
 
-from stockguidance.cli.simulation_configuration import load_configuration
-from stockguidance.cli.simulation_setup import assemble_and_simulate
+from stockguidance.simulation.jobs import load_configuration
+from stockguidance.workflows.simulation_runtime import assemble_and_simulate
 from stockguidance.recommendations.configuration import ArtifactKind
 from stockguidance.reporting.simulation import render_simulation, simulation_payload
 from stockguidance.simulation.configuration import EvaluationPolicy
+from stockguidance.simulation.options import SimulationOptions
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -43,7 +44,8 @@ def main(argv: list[str] | None = None) -> int:
 		print(json.dumps({"successful": False, "stage": "request", "message": message}))
 		return 2
 	try:
-		result = assemble_and_simulate(configuration, arguments)
+		options = SimulationOptions(EvaluationPolicy(arguments.model_policy), arguments.artifact, arguments.artifact_id, ArtifactKind(arguments.artifact_kind), arguments.artifacts_directory)
+		result = assemble_and_simulate(configuration, options)
 		output = json.dumps(simulation_payload(result), sort_keys=True, allow_nan=False) if arguments.format == "json" else render_simulation(result)
 		print(output)
 		return 0 if result.successful and result.complete else 2 if result.successful else 1

@@ -1,7 +1,5 @@
 import argparse
 from datetime import date, timedelta
-from importlib import import_module
-import os
 from pathlib import Path
 
 from stockguidance.calendar.clock import SystemClock
@@ -9,12 +7,12 @@ from stockguidance.calendar.exchange import ExchangeCalendar
 from stockguidance.config.source import PriceAdjustment, SourceConfig, SourceIdentity
 from stockguidance.database.repositories.mysql_market_data import MySQLMarketDataRepository
 from stockguidance.database.update_schema import initialize_update_schema
-from stockguidance.database.write_connections import LegacyWriteConnectionFactory
+from stockguidance.database.connections import MySQLConnectionFactory
 from stockguidance.market_data.corrections import CorrectionPolicy
 from stockguidance.market_data.history import HistoryProvenance, UnknownHistoryBoundary, establish_history_boundary
 from stockguidance.market_data.history_store import JsonHistoryStore
-from stockguidance.market_data.providers.http import PolygonHttpTransport
-from stockguidance.market_data.providers.polygon import GROUPED_ENDPOINT, GROUPED_UNIVERSE, PolygonGroupedProvider
+from stockguidance.market_data.providers.configured_polygon import ConfiguredPolygonProvider
+from stockguidance.market_data.providers.polygon import GROUPED_ENDPOINT, GROUPED_UNIVERSE
 from stockguidance.market_data.publication import DailyPublicationPolicy
 from stockguidance.validation.repair import load_repair_plan
 from stockguidance.workflows.update_market_data import UpdateSettings, update_market_data
@@ -50,14 +48,8 @@ def assemble_and_update(arguments: argparse.Namespace) -> UpdateResult:
 		raise UnknownHistoryBoundary("Supported history is unknown")
 	boundary.validate_for(identity, calendar)
 	settings = UpdateSettings(start, end, DailyPublicationPolicy(timedelta(minutes=arguments.publication_delay_minutes), arguments.publication_evidence), CorrectionPolicy(timedelta(days=arguments.recent_window_days), timedelta(hours=arguments.recent_refresh_hours), timedelta(days=arguments.archive_refresh_days), arguments.correction_evidence), repair_plan)
-	api_key = getattr(arguments, "api_key", None) or os.environ.get("POLYGON_API_KEY")
-	if not api_key:
-		value: object = import_module("polygon_fetch").DEFAULT_API_KEY
-		if not isinstance(value, str) or not value:
-			raise ValueError("Provider credential is unavailable")
-		api_key = value
-	provider = PolygonGroupedProvider(PolygonHttpTransport(api_key, arguments.max_retries))
-	connect = LegacyWriteConnectionFactory()
+	provider = ConfiguredPolygonProvider(arguments.max_retries)
+	connect = MySQLConnectionFactory()
 	if arguments.initialize_schema:
 		initialize_update_schema(source, connect)
 	history_store.save(boundary)

@@ -7,14 +7,16 @@ from stockguidance.artifacts.decoding import decode_features, exact_mapping
 from stockguidance.calendar.clock import SystemClock
 from stockguidance.calendar.decisions import DecisionTiming
 from stockguidance.calendar.exchange import ExchangeCalendar
-from stockguidance.cli.training_configuration import decode_training_configuration, number
+from stockguidance.calendar.protocols import SessionCalendar
+from stockguidance.config.training import decode_training_configuration, number
 from stockguidance.config.source import SourceConfig
 from stockguidance.config.validation import require_aware_datetime
 from stockguidance.database.repositories.mysql_validation import MySQLValidationRepository
 from stockguidance.database.repositories.verified_closes import VerifiedCloseRepository
-from stockguidance.database.write_connections import LegacyWriteConnectionFactory
+from stockguidance.database.repositories.closes import CloseRepository
+from stockguidance.database.connections import MySQLConnectionFactory
 from stockguidance.features.specification import FeatureSpec
-from stockguidance.market_data.history import UnknownHistoryBoundary
+from stockguidance.market_data.history import HistoryBoundary, UnknownHistoryBoundary
 from stockguidance.market_data.history_store import JsonHistoryStore
 from stockguidance.market_data.identity import decode_source, mapping, text_field
 from stockguidance.market_data.publication import DailyPublicationPolicy
@@ -65,7 +67,16 @@ def load_job(path: Path) -> TrainingJob:
 	return TrainingJob(source, features, configuration, start, end, cutoff, publication, lead, evaluation_start, evaluation_end, evaluation_cutoff)
 
 
-def execute_job(job: TrainingJob, artifact_path: Path, *, checkpoint_path: Path | None = None, resume_from: Path | None = None) -> TrainingResult:
+@dataclass(frozen=True)
+class JobHistory:
+	boundary: HistoryBoundary
+	calendar: SessionCalendar
+	repository: CloseRepository
+	decisions: tuple[DecisionTiming, ...]
+	evaluation_decisions: tuple[DecisionTiming, ...]
+
+
+def open_job_history(job: TrainingJob) -> JobHistory:
 	boundary = JsonHistoryStore(job.source.data_root / "history").load(job.source.identity)
 	if boundary is None:
 		raise UnknownHistoryBoundary("Training requires evidenced, persisted source history")
@@ -78,6 +89,11 @@ def execute_job(job: TrainingJob, artifact_path: Path, *, checkpoint_path: Path 
 		return tuple(DecisionTiming(calendar.shift(session, -1), session, calendar.shift(session, 1), session.closes_at - job.decision_lead) for session in calendar.sessions(start, end))
 
 	evaluation_decisions = () if job.evaluation_start is None or job.evaluation_end is None else decisions(job.evaluation_start, job.evaluation_end)
-	request = HistoryTrainingRequest(decisions(job.start, job.end), job.cutoff, job.features, TargetSpec(), job.configuration, artifact_path, evaluation_decisions, job.evaluation_cutoff, checkpoint_path, resume_from)
-	repository = VerifiedCloseRepository(job.source, MySQLValidationRepository(job.source, LegacyWriteConnectionFactory()))
-	return train_from_history(request, boundary, calendar, job.publication, repository)
+	repository = VerifiedCloseRepository(job.source, MySQLValidationRepository(job.source, MySQLConnectionFactory()))
+	return JobHistory(boundary, calendar, repository, decisions(job.start, job.end), evaluation_decisions)
+
+
+def execute_job(job: TrainingJob, artifact_path: Path, *, checkpoint_path: Path | None = None, resume_from: Path | None = None) -> TrainingResult:
+	history = open_job_history(job)
+	request = HistoryTrainingRequest(history.decisions, job.cutoff, job.features, TargetSpec(), job.configuration, artifact_path, history.evaluation_decisions, job.evaluation_cutoff, checkpoint_path, resume_from)
+	return train_from_history(request, history.boundary, history.calendar, job.publication, history.repository)

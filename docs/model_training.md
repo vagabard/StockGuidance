@@ -4,8 +4,9 @@ Stage 6 provides a typed training API and standalone inference artifacts. Inputs
 are Stage 5's exact historical closing prices through the previous session;
 targets are raw `close(T+1) / close(T) - 1`. All old open-to-close datasets,
 NPZ caches, model manifests and checkpoints require rebuilding. No old file is
-deleted or relabeled. Recommendation and portfolio frontend migration remains
-Stages 7 and 8.
+deleted or relabeled. Recommendation, cash-rest planning and chronological
+simulation use the same package workflows. See [frontend integration](frontends.md)
+for current commands and remaining cleanup status.
 
 ## Environment and commands
 

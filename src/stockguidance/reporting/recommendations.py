@@ -10,6 +10,7 @@ def recommendation_payload(run: RecommendationRunResult) -> dict[str, object]:
 	result = run.recommendation
 	request, timing = result.request, result.request.timing
 	return {
+		"schema": "stockguidance-recommendation-1",
 		"successful": True, "kind": "ranked_suggestions" if run.order_plan is None else "portfolio_order_plan", "orders_planned": run.order_plan is not None and bool(run.order_plan.orders), "fills_recorded": False,
 		"cash_rest_enforced": run.order_plan is not None, "planning_status": "requires_supplied_portfolio_state" if run.order_plan is None else run.order_plan.state.value,
 		"supplied_portfolio": None if run.portfolio is None else portfolio_payload(run.portfolio),

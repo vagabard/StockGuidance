@@ -6,8 +6,11 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
 import torch.nn as nn
-from models.sparse_linear import RandomPercentLinear
-from models.multi_layer_mlp import MultiLayerLinearNet
+from stockguidance.models.sparse import random_percent_type
+from stockguidance.models.mlp import mlp_type
+
+RandomPercentLinear = random_percent_type()
+MultiLayerLinearNet = mlp_type()
 
 def test_random_percent_linear():
     print("Testing RandomPercentLinear directly...")

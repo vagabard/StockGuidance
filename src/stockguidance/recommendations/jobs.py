@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 from stockguidance.artifacts.decoding import decode_features, exact_mapping, integer
-from stockguidance.cli.training_configuration import decode_training_configuration, number
+from stockguidance.config.training import decode_training_configuration, number
 from stockguidance.config.source import SourceConfig
 from stockguidance.config.validation import require_positive_int
 from stockguidance.features.specification import FeatureSpec

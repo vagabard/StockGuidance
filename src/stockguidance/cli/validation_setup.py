@@ -6,7 +6,7 @@ from stockguidance.calendar.clock import SystemClock
 from stockguidance.calendar.exchange import ExchangeCalendar
 from stockguidance.config.source import PriceAdjustment, SourceConfig, SourceIdentity
 from stockguidance.database.repositories.mysql_validation import MySQLValidationRepository
-from stockguidance.database.write_connections import LegacyWriteConnectionFactory
+from stockguidance.database.connections import MySQLConnectionFactory
 from stockguidance.features.specification import FeatureSpec
 from stockguidance.market_data.history import HistoryProvenance, UnknownHistoryBoundary, establish_history_boundary
 from stockguidance.market_data.history_store import JsonHistoryStore
@@ -44,4 +44,4 @@ def assemble_and_validate(arguments: argparse.Namespace) -> ValidationResult:
 		raise ValueError("Known publication delay requires provenance")
 	publication = DailyPublicationPolicy(None if arguments.publication_delay_minutes is None else timedelta(minutes=arguments.publication_delay_minutes), arguments.publication_evidence or "Publication policy unknown")
 	settings = ValidationSettings(start, end, publication, cutoff, features)
-	return validate_database(source, settings, boundary, calendar, MySQLValidationRepository(source, LegacyWriteConnectionFactory()), clock)
+	return validate_database(source, settings, boundary, calendar, MySQLValidationRepository(source, MySQLConnectionFactory()), clock)

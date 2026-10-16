@@ -4,7 +4,9 @@ import pytest
 import torch
 import torch.nn as nn
 
-from models import make_model
+from stockguidance.features.specification import FeatureSpec
+from stockguidance.models.factory import build_model
+from stockguidance.models.specification import Activation, ModelSpec
 
 
 def _xavier_uniform_bound(weight: torch.Tensor) -> float:
@@ -34,16 +36,7 @@ def _kaiming_uniform_bound(weight: torch.Tensor, nonlinearity: str, a: float) ->
 )
 def test_dense_mlp_weight_init_ranges_match_activation(activation: str, expected_init: str) -> None:
     torch.manual_seed(1234)
-    model = make_model(
-        arch="mlp",
-        input_size=8,
-        output_size=3,
-        hidden_layers=[6, 5],
-        activation=activation,
-        final_activation="",
-        num_layers=3,
-        layer_types=["linear", "linear", "linear"],
-    )
+    model = build_model(ModelSpec(hidden_widths=(6, 5), activation=Activation(activation)), FeatureSpec((17, 3, 9), 2))
 
     linear_layers = [m for m in model.net if isinstance(m, nn.Linear)]
     assert linear_layers, "Expected at least one dense Linear layer."

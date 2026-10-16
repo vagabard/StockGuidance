@@ -1,14 +1,13 @@
 from datetime import date, datetime
 from pathlib import Path
-import runpy
-import sys
-from types import ModuleType, SimpleNamespace
+from types import SimpleNamespace
 
 import pytest
 
 from stockguidance.calendar.date_bounds import DateBoundResolver, DateBoundType
 from stockguidance.database.dates import normalize_date_id, normalize_session_date
-from stockguidance.database.legacy_connections import LegacyMySQLConnectionFactory
+from stockguidance.database.connections import MySQLConnectionFactory
+from stockguidance.database.configuration import DatabaseConfiguration
 from stockguidance.database.repositories.mysql_sessions import MySQLSessionRepository
 from stockguidance.database.repositories.sessions import SessionQuery, StoredSession
 from stockguidance.validation.coverage import CoverageState
@@ -145,49 +144,26 @@ def test_bound_resolution_and_offsets_follow_stored_chronology_not_id_arithmetic
 		DateBoundResolver(tuple(reversed(rows)))
 
 
-def test_legacy_connector_does_not_substitute_default_database_configuration(source_config, monkeypatch):
-	observed_paths = []
+def test_connector_does_not_substitute_default_database_configuration(source_config, monkeypatch):
+	observed_paths, parameters = [], []
 	connection = FakeConnection(FakeCursor(()))
 
-	def get_connection(*, dbinfo_file):
-		observed_paths.append(dbinfo_file)
+	def load_configuration(path):
+		observed_paths.append(path)
+		return DatabaseConfiguration("fixture", "fixture", "fixture", "")
+
+	def connect(**values):
+		parameters.append(values)
 		return connection
 
-	monkeypatch.setattr("stockguidance.database.legacy_connections.import_module", lambda name: SimpleNamespace(get_connection=get_connection))
-	assert LegacyMySQLConnectionFactory()(source_config.database_config) is connection
-	assert observed_paths == [str(source_config.database_config)]
+	monkeypatch.setattr("stockguidance.database.connections.load_database_configuration", load_configuration)
+	monkeypatch.setattr("stockguidance.database.connections.import_module", lambda name: SimpleNamespace(connect=connect))
+	assert MySQLConnectionFactory()(source_config.database_config) is connection
+	assert observed_paths == [source_config.database_config]
+	assert parameters[0]["autocommit"] is False
 
 
-def test_legacy_resolver_forwards_explicit_configuration_to_every_query(source_config, monkeypatch):
-	calls = []
-
-	def load_date_id_range(*, dbinfo_file, feature_vector_day_size_buffer):
-		calls.append((dbinfo_file, feature_vector_day_size_buffer))
-		return 901, 450
-
-	def get_offset_date_id(*, dbinfo_file, base_value, offset):
-		calls.append((dbinfo_file, base_value, offset))
-		return 11
-
-	queries = ModuleType("database.database_date_id_queries")
-	queries.load_date_id_range = load_date_id_range
-	queries.get_offset_date_id = get_offset_date_id
-	database = ModuleType("database")
-	database.database_date_id_queries = queries
-	monkeypatch.setitem(sys.modules, "database", database)
-	monkeypatch.setitem(sys.modules, "database.database_date_id_queries", queries)
-	legacy = runpy.run_path(str(Path(__file__).resolve().parents[2] / "trainer" / "util" / "date_bounds.py"))
-	resolver_type = legacy["DateBoundResolver"]
-	bound_type = legacy["DateBoundType"]
-	config_path = str(source_config.database_config)
-	resolver = resolver_type(2, dbinfo_file=config_path)
-	assert resolver.resolve_bound("+1", bound_type.START) == 11
-	assert resolver.resolve_bound("-1", bound_type.END) == 11
-	assert calls == [(config_path, 2), (config_path, 901, 1), (config_path, 450, -1)]
-	assert resolver.resolve_bound("+0", bound_type.START) == 901
-	assert resolver.resolve_bound("-0", bound_type.END) == 450
-	assert len(calls) == 3
-	with pytest.raises(TypeError):
-		resolver_type()
-	with pytest.raises(ValueError, match="explicit database configuration"):
-		resolver_type(dbinfo_file="")
+def test_missing_explicit_configuration_does_not_search_parent_directories(tmp_path, monkeypatch):
+	monkeypatch.setattr("stockguidance.database.connections.import_module", lambda name: pytest.fail("Missing config loaded a driver"))
+	with pytest.raises(ValueError, match="explicit database JSON"):
+		MySQLConnectionFactory()(tmp_path / "missing" / "dbinfo.id")

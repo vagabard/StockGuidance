@@ -1,5 +1,7 @@
 import torch
-from models import SigmoidRange
+from stockguidance.models.activations import sigmoid_range_type
+
+SigmoidRange = sigmoid_range_type()
 
 def test_sigmoid_range():
     act = SigmoidRange()

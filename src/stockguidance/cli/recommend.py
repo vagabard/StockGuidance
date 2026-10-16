@@ -2,12 +2,13 @@ import argparse
 import json
 from pathlib import Path
 
-from stockguidance.cli.recommendation_configuration import load_configuration
-from stockguidance.cli.recommendation_setup import assemble_and_recommend
+from stockguidance.recommendations.jobs import load_configuration
+from stockguidance.workflows.recommendation_runtime import assemble_and_recommend
 from stockguidance.models.policy import ModelRefreshPolicy
 from stockguidance.portfolio.precision import ExecutionPolicy
 from stockguidance.portfolio.serialization import decimal_text
 from stockguidance.recommendations.configuration import ArtifactKind
+from stockguidance.recommendations.options import RecommendationOptions
 from stockguidance.reporting.recommendations import recommendation_payload, render_recommendations
 from stockguidance.workflows.failures import StageExecutionError
 
@@ -57,7 +58,8 @@ def main(argv: list[str] | None = None) -> int:
 		print(json.dumps({"successful": False, "stage": "request", "failure": "invalid_request", "message": message}))
 		return 2
 	try:
-		result = assemble_and_recommend(configuration, arguments)
+		options = RecommendationOptions(ModelRefreshPolicy(arguments.policy), arguments.artifact, arguments.artifact_id, ArtifactKind(arguments.artifact_kind), arguments.max_retries, arguments.portfolio_state, arguments.capital, arguments.fee_per_fill)
+		result = assemble_and_recommend(configuration, options)
 		output = json.dumps(recommendation_payload(result), sort_keys=True, allow_nan=False) if arguments.format == "json" else render_recommendations(result)
 		print(output)
 		return 0

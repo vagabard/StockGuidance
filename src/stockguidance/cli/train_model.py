@@ -2,7 +2,7 @@ import argparse
 import json
 from pathlib import Path
 
-from stockguidance.cli.training_job import execute_job, load_job
+from stockguidance.training.jobs import execute_job, load_job
 from stockguidance.reporting.training import training_payload
 
 

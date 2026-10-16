@@ -24,7 +24,7 @@ def test_default_cli_has_no_writes_fetches_repairs_or_metadata_changes(harness, 
 	harness.database.statements.clear()
 	harness.provider.calls.clear()
 	monkeypatch.setattr(validation_setup, "SystemClock", lambda: harness.clock)
-	monkeypatch.setattr(validation_setup, "LegacyWriteConnectionFactory", lambda: harness.database)
+	monkeypatch.setattr(validation_setup, "MySQLConnectionFactory", lambda: harness.database)
 
 	def forbidden(*arguments, **keywords):
 		raise AssertionError("Default validation attempted a write or fetch")

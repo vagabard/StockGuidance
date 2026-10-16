@@ -4,7 +4,7 @@ import re
 
 import pytest
 
-from stockguidance.cli.simulation_configuration import load_configuration
+from stockguidance.simulation.jobs import load_configuration
 
 
 @pytest.mark.parametrize("retrain", [False, True])

@@ -5,7 +5,7 @@ import json
 import pytest
 
 from stockguidance.cli import simulate as cli
-from stockguidance.cli import simulation_setup as setup
+from stockguidance.workflows import simulation_runtime as setup
 from stockguidance.market_data.history_store import JsonHistoryStore
 from stockguidance.features.specification import FeatureSpec
 from stockguidance.workflows.train_model import HistoryTrainingRequest, train_from_history
@@ -15,7 +15,7 @@ from stockguidance.workflows.train_model import HistoryTrainingRequest, train_fr
 def simulation_json(simulation, tmp_path, monkeypatch):
 	JsonHistoryStore(tmp_path / "source" / "history").save(simulation.samples.boundary)
 	monkeypatch.setattr(setup, "ExchangeCalendar", lambda *values: simulation.calendar)
-	monkeypatch.setattr(setup, "LegacyWriteConnectionFactory", lambda: object())
+	monkeypatch.setattr(setup, "MySQLConnectionFactory", lambda: object())
 	monkeypatch.setattr(setup, "MySQLValidationRepository", lambda *values: object())
 	monkeypatch.setattr(setup, "VerifiedCloseRepository", lambda *values: simulation.samples.repository)
 	monkeypatch.setattr(setup, "VerifiedEligibilityRepository", lambda *values: simulation.liquidity)
@@ -133,7 +133,7 @@ def test_simulation_cli_uses_verified_sql_with_nonconsecutive_ids_without_writes
 	fields = {"source": asdict(job.source.identity), "data_root": str(job.source.data_root), "database_config": str(job.source.database_config), "features": asdict(features), "start_date": "2024-07-05", "end_date": "2024-07-08", "allocation": {"policy": "alternate_sessions", "anchor_date": "2024-07-05"}, "initial_capital": "1000.00", "decision_minutes_before_close": 30, "publication": {"delay_minutes": 15, "evidence": "Fixture-only publication"}, "execution_audit_cutoff": "2024-07-08T21:00:00+00:00", "eligibility": {"minimum_transactions": 1}, "top_k": 1, "fee_per_fill": "0.00", "retraining": None}
 	path = tmp_path / "verified-simulation.json"
 	path.write_text(json.dumps(fields), encoding="utf-8")
-	monkeypatch.setattr(setup, "LegacyWriteConnectionFactory", lambda: recommender.storage.database)
+	monkeypatch.setattr(setup, "MySQLConnectionFactory", lambda: recommender.storage.database)
 	for old, new in ((1, 901), (2, 11), (3, 450), (4, 2), (5, 100)):
 		for table, column in (("raw_stock_data", "date_id"), ("daily_delta_stock_data", "date_id"), ("transaction_dates", "id")):
 			recommender.storage.database.sql(f"UPDATE {table} SET {column} = ? WHERE {column} = ?", (new, old))

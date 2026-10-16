@@ -1,6 +1,8 @@
 import torch
 import unittest
-from models.sparse_linear import SparseLinear
+from stockguidance.models.sparse import sparse_linear_type
+
+SparseLinear = sparse_linear_type()
 
 class TestSparseLinear(unittest.TestCase):
     def test_connection_pattern(self):

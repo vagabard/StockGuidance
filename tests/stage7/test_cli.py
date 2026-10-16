@@ -7,15 +7,15 @@ import re
 import pytest
 
 from stockguidance.cli import recommend as cli
-from stockguidance.cli import recommendation_setup as setup
-from stockguidance.cli.recommendation_configuration import load_configuration
+from stockguidance.workflows import recommendation_runtime as setup
+from stockguidance.recommendations.jobs import load_configuration
 from stockguidance.market_data.history_store import JsonHistoryStore
 from stockguidance.workflows import recommend as workflow
 
 
 def configure_cli(recommender, monkeypatch):
 	monkeypatch.setattr(setup, "SystemClock", lambda: recommender.storage.clock)
-	monkeypatch.setattr(setup, "LegacyWriteConnectionFactory", lambda: recommender.storage.database)
+	monkeypatch.setattr(setup, "MySQLConnectionFactory", lambda: recommender.storage.database)
 	monkeypatch.setattr(setup, "ConfiguredPolygonProvider", lambda retries: recommender.storage.provider)
 
 

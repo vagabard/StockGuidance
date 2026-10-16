@@ -176,7 +176,7 @@ def test_cli_exact_feature_validation_remains_read_only(chronological_storage, c
 	from stockguidance.cli import validation_setup
 	harness = chronological_storage
 	monkeypatch.setattr(validation_setup, "SystemClock", lambda: harness.clock)
-	monkeypatch.setattr(validation_setup, "LegacyWriteConnectionFactory", lambda: harness.database)
+	monkeypatch.setattr(validation_setup, "MySQLConnectionFactory", lambda: harness.database)
 	commits = harness.database.commits
 	harness.database.statements.clear()
 	arguments = ["--data-root", str(harness.source.data_root), "--dbinfo-file", str(harness.source.database_config), "--history-start", "2024-07-01", "--history-evidence", "Fixture-only boundary", "--end-date", "2024-07-08", "--publication-delay-minutes", "15", "--publication-evidence", "Fixture-only policy", "--ticker-ids", "1", "--lookback-sessions", "3", "--format", "json"]

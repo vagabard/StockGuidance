@@ -5,6 +5,7 @@ from stockguidance.training.result import TrainingResult
 
 def training_payload(result: TrainingResult) -> dict[str, object]:
 	return {
+		"schema": "stockguidance-training-1", "successful": True,
 		"artifact": {"path": str(result.artifact.path), "artifact_id": result.artifact.artifact_id},
 		"completed_epochs": result.completed_epochs, "training_samples": result.training_samples,
 		"training_mae": result.training_mae, "training_metric_scope": "in_sample",
