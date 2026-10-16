@@ -131,10 +131,10 @@ Numerical repair findings identify their dependency date and defer to an existin
 source/import repair for that same cause. They never request rebuilding a legacy
 column as though it stored a new target.
 
-The root feature builder, window helpers, tensor loader, training provider,
-and `trainer/label/transform` are explicitly marked legacy. Their unmigrated
-callers remain isolated. Stage 6 migrates training to these samples and creates
-independent artifacts; Stage 7 migrates recommendation; Stage 8 migrates
-simulation; Stage 9 removes obsolete paths. Old datasets, caches, and models must
-be rebuilt. Never supply a new vector to an old model just because its dimensions
-match. No existing user data/model directory is deleted or rewritten.
+Stage 9 retires the root feature builder, guessed-window helpers, tensor loader,
+training provider and `trainer/label/transform`. Supported training,
+recommendation, simulation and diagnostic callers use these shared samples and
+independent artifacts. Old datasets, caches and models must be rebuilt; matching
+dimensions do not prove compatible semantics. The exact source-only deletions
+are [grouped by reason](stage9_retirement.md). No existing user data/model
+directory is deleted or rewritten.

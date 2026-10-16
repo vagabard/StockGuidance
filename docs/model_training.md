@@ -246,22 +246,19 @@ are unsupported.
 
 ## Migration and checks
 
-Root `models/` modules temporarily re-export the shared implementations for
-unmigrated consumers. `trainer/legacy_training.py` and
-`trainer/legacy_arguments.py` isolate the old controller frontend; the legacy
-recommendation/batch/incremental callers still use that explicit path until
-Stages 7-9 migrate them. They do not produce or accept the new artifacts.
-`trainer/state`, `trainer/model_loader.py`, `trainer/train_single_run.py` and
-`trainer/io_run.py` remain documented legacy internals. New training does not
-import them. Stage 9 must remove the temporary model/controller/connection
-adapters after their consumers migrate.
+Stage 9 removes the root `models/` re-exports, `trainer/` controller internals,
+legacy argument/configuration loaders and temporary connection adapters.
+Supported training, recommendation, batch and incremental frontends now call
+typed packages directly. User model implementations and numerical tests are
+retained in the package; old controller artifacts/datasets require rebuilding.
+See [the grouped retirement list](stage9_retirement.md) for exact source paths.
 
 The retained hardcoded provider key is `DEFAULT_API_KEY` in `polygon_fetch.py`;
 eventual external configuration remains future work. Training does not load it.
 
 ```powershell
 & '<configured-python>' -m pytest tests/stage6 tests/test_sparse_linear.py tests/test_random_percent_linear.py -q
-& '<configured-python>' -m pytest tests/stage1 tests/stage2 tests/stage3 tests/stage4 tests/stage5 tests/stage6 tests/test_simulate_trading_utils.py tests/test_sparse_linear.py tests/test_random_percent_linear.py -q
+& '<configured-python>' -m pytest tests -q
 & '<configured-python>' -m mypy
 ```
 

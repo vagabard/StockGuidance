@@ -26,6 +26,10 @@ training = ["torch>=2.6,<3"]
 database = ["mysql-connector-python>=9,<10"]
 viewers = ["streamlit>=1.40,<2"]
 
+[tool.setuptools]
+py-modules = ["polygon_fetch"]
+package-dir = {"" = ".", stockguidance = "src/stockguidance"}
+
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["stockguidance*"]

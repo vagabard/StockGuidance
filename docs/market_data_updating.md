@@ -140,20 +140,22 @@ The [recommendation workflow](recommendations.md), exposed through
 `choose_next_day_stocks.py` and `run_recommender_from_model_dir.py`, calls this
 typed updater and stops on required failure before recommendation/training.
 Both frontends require explicit close-based artifacts or a typed retraining job.
-`polygon_fetch.py` retains its other
-discovery/trade-download responsibilities. The old population scripts and their
-standalone entry points remain isolated migration paths for Stage 9 cleanup;
-use the new updater for complete reconciliation.
+`polygon_fetch.py` now retains only its credential constant and a thin updater
+delegation. Database population frontends also delegate to the shared updater;
+obsolete discovery/trade-download and duplicate import paths are retired.
+All supported updater commands use complete request-scoped reconciliation.
 
 The existing hardcoded provider key remains `DEFAULT_API_KEY` in
 `polygon_fetch.py`; the former recommendation parser's duplicate inline default
 was removed in Stage 7. Its value is not reproduced here. The new command uses
 `POLYGON_API_KEY` when set, otherwise the retained constant. Externalizing the
-remaining defaults is future work, not a prerequisite for updating. Legacy
-connector/credential loaders currently require running from the checkout and
-are temporary migration adapters, not a standalone wheel deployment contract.
+remaining defaults is future work, not a prerequisite for updating. The retained
+credential module is packaged for use outside the checkout. Direct lazy database
+connections load one explicit JSON configuration; temporary legacy connectors
+and parent-directory discovery have been removed.
 
-Stage 4 next supplies standalone, read-only database validation. Reuse
+Standalone, read-only [database validation](database_validation.md) reuses
 `ManifestStore.load`, `MySQLMarketDataRepository.inspect`, `SessionSnapshot`,
 `SnapshotIndex`, and `reconciled`; do not invoke this write workflow for a
-read-only check. There is no validation CLI implemented by Stage 3.
+read-only check. See [frontends.md](frontends.md) for final command examples and
+the [source retirement list](stage9_retirement.md) for the completed cleanup.

@@ -2,10 +2,6 @@
 <project version="4">
   <component name="DataSourcePerFileMappings">
     <file url="file://$PROJECT_DIR$/StockRecommenderFromModel.py" value="5431b6a8-86d4-49f1-a7e6-fac56f1ec7c5" />
-    <file url="file://$PROJECT_DIR$/load_database_rows_into_tensors.py" value="5431b6a8-86d4-49f1-a7e6-fac56f1ec7c5" />
-    <file url="file://$PROJECT_DIR$/load_latest_raw_stock_data_date.py" value="5431b6a8-86d4-49f1-a7e6-fac56f1ec7c5" />
-    <file url="file://$PROJECT_DIR$/load_raw_stock_data_rows.py" value="5431b6a8-86d4-49f1-a7e6-fac56f1ec7c5" />
-    <file url="file://$PROJECT_DIR$/populate_db_ticker_info.py" value="5431b6a8-86d4-49f1-a7e6-fac56f1ec7c5" />
     <file url="file://$PROJECT_DIR$/viewers/compare_runs_viewer.py" value="5431b6a8-86d4-49f1-a7e6-fac56f1ec7c5" />
   </component>
 </project>

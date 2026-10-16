@@ -181,4 +181,7 @@ to become external configuration. The new lazy provider uses `POLYGON_API_KEY`
 when present and loads the retained constant only if a download is needed. Its
 value is absent from new reports/configuration/artifacts. Native provider/MySQL
 deployment and historical revision reconstruction remain separate limitations.
-Stage 9 still owns the remaining legacy batch/incremental/diagnostic consumers.
+Stage 9 migrates all supported batch/incremental/diagnostic consumers and removes
+legacy controller/discovery paths. Root recommendation commands delegate to
+the same typed frontend; see [frontends.md](frontends.md) and the
+[grouped retirement list](stage9_retirement.md).

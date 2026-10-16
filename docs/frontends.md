@@ -1,11 +1,11 @@
 # Python frontend integration
 
-Stage 9 integration is in progress. The package module commands below are
-implemented. Retirement of old root batch/incremental/viewer sources and tests
-awaits explicit approval after automatic approval review blocked the cleanup.
-Until replacement, use the package module commands; old root entry points are
-not claimed migrated. The precise scope and recovery copy are recorded in
-[the retirement manifest](stage9_retirement.md).
+Stage 9 integration is complete. Supported root, script and viewer entry points
+are thin delegations to the typed package frontends below; they use the current
+arguments, not legacy formats or controller directories. The exact deletions,
+grouped by reason and distinguished from retained frontends, are recorded in
+[the retirement manifest](stage9_retirement.md). Original sources remain in Git
+history and the verified local recovery archive. User data/models are unchanged.
 
 Use PyCharm's configured Python and package manager. All supported model inputs
 are `previous_close`; every target is raw `close(T+1) / close(T) - 1`. Decisions
@@ -37,7 +37,8 @@ The retained hardcoded Polygon key is `DEFAULT_API_KEY` in `polygon_fetch.py`.
 Its value is intentionally absent here. `POLYGON_API_KEY` overrides it; resolving
 credentials happens only when a fetch is needed. Move this constant to external
 configuration eventually. No credential migration is required to use the new
-workflows.
+workflows. The retained module is packaged for installed use outside the checkout;
+its command delegates to the same updater and imports perform no downloads.
 
 ## Establish history and update
 
@@ -216,9 +217,10 @@ External exception details are excluded from CLI errors.
 ## Checks and scope
 
 ```powershell
-& $stockguidancePython -m pytest tests/stage1 tests/stage2 tests/stage3 tests/stage4 tests/stage5 tests/stage6 tests/stage7 tests/stage8 tests/stage9 tests/test_simulate_trading.py tests/test_sparse_linear.py tests/test_random_percent_linear.py tests/test_sigmoid_range.py tests/test_multi_layer_mlp_initialization.py -q --tb=short
+& $stockguidancePython -m pytest tests -q --tb=short
 & $stockguidancePython -m mypy
 git diff --check
+git diff --cached --check
 ```
 
 Fixtures use fake providers, temporary SQLite/fake MySQL adapters and tiny CPU

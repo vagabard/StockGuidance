@@ -1,137 +1,152 @@
-# Stage 9 source retirement review
+# Stage 9 source retirement and frontend migration
 
-Status: awaiting explicit approval. Automatic approval review rejected the bulk
-retirement because it affects uncommitted source/test files, even after recovery
-verification. No item in this manifest has been retired or replaced by that
-blocked patch. This is the exact reviewable cleanup scope, not a data purge.
+Status: approved by the user's renewed Stage 9 completion instruction after committing the source. Git was clean at commit `fae92d5` before this cleanup. The grouped list below is the exact scope: **85 deletions, 21 thin-frontend rewrites, and one retained credential module**. Cleanup changes source/tests only, not user data.
 
-All 107 current files have a byte-for-byte, SHA256-verified local recovery copy
-in `cache/stage9-source-before-retirement-20261015.zip` (Git-ignored).
+## Recovery and exclusions
+
+All 107 original files have a byte-for-byte, SHA256-verified local recovery copy in `cache/stage9-source-before-retirement-20261015.zip` (Git-ignored).
 Archive SHA256: `4CFEABD1485B96F7BCF7E1CB0EF057C7A39F2E31047EDAD53A0D0EA9021908A5`.
-Archive entries retain workspace-relative paths. Recover into a new, empty
-directory for inspection before restoring any source. The archive is local and
-must not be published; it preserves existing source contents, including any
-pre-existing private configuration literals.
+The originals are also retained in Git history. Recover archive entries into a new, empty directory for inspection before restoring source. Keep the archive local: it contains original source and may contain private configuration literals.
 
-Only Python source/tests are listed. Java, source datasets, models, NPZ files,
-CSV files, databases, caches, the Git index and user configuration are not
-cleanup targets. The user's model implementations already reside in
-`src/stockguidance/models`. Existing sparse/random/activation/initialization
-checks are migrated and retained. Obsolete controller/dense-window/intraday
-checks are superseded by the Stage 5-9 availability, artifact, workflow and
-portfolio behavioral suites; they will not be hidden by pytest exclusions.
+Java, source datasets, models, NPZ/CSV files, databases, caches, the Git index and user configuration are not cleanup targets. Only the Python source/test paths listed below are deleted or rewritten. Model implementations in `src/stockguidance/models` and their numerical tests are retained.
 
-The retained `polygon_fetch.py` key stays at its current location and value.
-Its obsolete downloader/discovery code will be removed, and its command will
-delegate to the shared updater. No credential value is copied to documentation,
-reports, new configuration or model artifacts.
+## Files deleted, grouped by reason
 
-| Current path | Disposition after approval |
+### Refactored into typed training, model and artifact packages (43)
+
+Implementations now live in `src/stockguidance/training`, `models`, `artifacts`, `config` and `reporting`. Mutable controllers, directory-discovery and temporary re-export adapters are no longer supported.
+
+- `models/__init__.py`
+- `models/convolution_transformer.py`
+- `models/multi_layer_mlp.py`
+- `models/sparse_linear.py`
+- `models/utils.py`
+- `trainer/__init__.py`
+- `trainer/ai_type.py`
+- `trainer/args_train.py`
+- `trainer/dataloaders.py`
+- `trainer/dataset/ticker_info_for_dates.py`
+- `trainer/dataset/time_training_instance.py`
+- `trainer/dataset_classification.py`
+- `trainer/datasets.py`
+- `trainer/factory.py`
+- `trainer/file_structure_family_run_handler.py`
+- `trainer/file_structure_single_run_handler.py`
+- `trainer/io_run.py`
+- `trainer/label/transform/__init__.py`
+- `trainer/label/transform/transformers.py`
+- `trainer/legacy_arguments.py`
+- `trainer/legacy_training.py`
+- `trainer/loss_functions/__init__.py`
+- `trainer/loss_functions/losses.py`
+- `trainer/loss_functions/ranking.py`
+- `trainer/loss_functions/ranking_error.py`
+- `trainer/metric_file_handler.py`
+- `trainer/metrics.py`
+- `trainer/model_loader.py`
+- `trainer/rep_handler.py`
+- `trainer/splits.py`
+- `trainer/state/__init__.py`
+- `trainer/state/family_run.py`
+- `trainer/state/single_run.py`
+- `trainer/torch_interface/__init__.py`
+- `trainer/torch_interface/compat.py`
+- `trainer/torch_interface/device.py`
+- `trainer/torch_interface/memory.py`
+- `trainer/train_single_run.py`
+- `trainer/training_bundle.py`
+- `trainer/util/__init__.py`
+- `trainer/util/argparse_utils.py`
+- `trainer/util/date_bounds.py`
+- `trainer/util/utils.py`
+
+### Refactored into shared close-based features, calendar and data repositories (15)
+
+Replaced by `src/stockguidance/features`, `targets`, `calendar`, `database/repositories`, `market_data` and `validation`. These remove intraday inputs, guessed window sizes, global-latest dates and duplicate database configuration.
+
+- `data_loading_shared.py`
+- `database/create_dbinfo.py`
+- `database/database_date_id_queries.py`
+- `database/db_connect.py`
+- `database/db_info.py`
+- `database/identify_tickers_with_missing_dates.py`
+- `database/query_tickers_by_date.py`
+- `feature_vector_builder.py`
+- `feature_windowing.py`
+- `get_ticker_position_on_date.py`
+- `load_database_rows_into_tensors.py`
+- `load_latest_raw_stock_data_date.py`
+- `load_raw_stock_data_rows.py`
+- `populate_db_ticker_info.py`
+- `training_instance_provider.py`
+
+### Obsolete controller, intraday and guessed-window tests (17)
+
+Their removed APIs and old target/layout assumptions are replaced by behavioral tests in `tests/stage5` through `tests/stage9`. No tests are hidden by collection exclusions. Numerical sparse/random/activation/initialization tests are retained and import the package models.
+
+- `test_reuse_tensors.py`
+- `test_training_instance_provider.py`
+- `tests/test_family_controller.py`
+- `tests/test_feature_vector_builder.py`
+- `tests/test_feature_vector_builder_from_db.py`
+- `tests/test_metrics_eval_epoch.py`
+- `tests/test_mse_loss_behavior.py`
+- `tests/test_mse_restricted.py`
+- `tests/test_ranking_metrics.py`
+- `tests/test_simulate_trading_utils.py`
+- `tests/test_split_datasets_floating_head_tail_provider.py`
+- `tests/test_splits_head_tail.py`
+- `tests/test_stock_recommender_from_existing_model_uniform_range.py`
+- `tests/test_stock_recommender_from_model_random_argmax.py`
+- `tests/test_ticker_id_persistence.py`
+- `tests/test_train_pytorch_dry_run_head_tail.py`
+- `tests/test_training_instance_provider_unit.py`
+
+### Obsolete CSV, directory-discovery and intraday benchmark utilities (10)
+
+Old run folders, saved scores, binary correlations and intraday performance assumptions have no supported conversion. Current report/artifact readers use explicit schema-identified inputs; close-based feature inspection is not misrepresented as a performance benchmark.
+
+- `benchmark_index_dataset.py`
+- `benchmark_score_reading.py`
+- `benchmark_score_reading_threaded.py`
+- `convert_correlations_to_binary.py`
+- `generate_rep_averages_to_compare_single_runs.py`
+- `organize_rep_runs.py`
+- `viewers/compare_runs_shared.py`
+- `viewers/correlation_matrix_viewer.py`
+- `viewers/populate_runs_viewer.py`
+- `viewers/populate_statistics_viewer.py`
+
+## Files retained as thin frontends (21; not deletions)
+
+Only argument handling/delegation remains at these paths. No compatibility parsing, old artifact fallback or duplicate application logic remains. Use the current frontend arguments documented in [frontends.md](frontends.md).
+
+| Retained path | Delegated package frontend |
 |---|---|
-| `StockRecommenderFromModel.py` | Replace with thin frontend for `stockguidance.cli.recommend` |
-| `batch_run.py` | Replace with thin frontend for `stockguidance.cli.batch` |
-| `benchmark_index_dataset.py` | Replace with thin frontend for `stockguidance.cli.inspect_features` |
-| `benchmark_score_reading.py` | Replace with thin frontend for `stockguidance.cli.inspect_features` |
-| `benchmark_score_reading_threaded.py` | Replace with thin frontend for `stockguidance.cli.inspect_features` |
-| `calculate_ticker_correlations.py` | Replace with thin frontend for `stockguidance.cli.inspect_features:correlation_main` |
-| `convert_correlations_to_binary.py` | Retire superseded source/test; preserve the local recovery copy |
-| `data_loading_shared.py` | Retire superseded source/test; preserve the local recovery copy |
-| `database/create_dbinfo.py` | Retire superseded source/test; preserve the local recovery copy |
-| `database/database_date_id_queries.py` | Retire superseded source/test; preserve the local recovery copy |
-| `database/db_connect.py` | Retire superseded source/test; preserve the local recovery copy |
-| `database/db_info.py` | Retire superseded source/test; preserve the local recovery copy |
-| `database/identify_tickers_with_missing_dates.py` | Retire superseded source/test; preserve the local recovery copy |
-| `database/populate_db_daily_delta_stock_data.py` | Replace with thin frontend for `stockguidance.cli.update_market_data` |
-| `database/populate_db_raw_stock_info.py` | Replace with thin frontend for `stockguidance.cli.update_market_data` |
-| `database/populate_db_ticker_info.py` | Replace with thin frontend for `stockguidance.cli.update_market_data` |
-| `database/query_tickers_by_date.py` | Retire superseded source/test; preserve the local recovery copy |
-| `debug_feature_logging.py` | Replace with thin frontend for `stockguidance.cli.inspect_features` |
-| `feature_vector_builder.py` | Retire superseded source/test; preserve the local recovery copy |
-| `feature_windowing.py` | Retire superseded source/test; preserve the local recovery copy |
-| `generate_rep_averages_to_compare_single_runs.py` | Retire superseded source/test; preserve the local recovery copy |
-| `get_ticker_position_on_date.py` | Retire superseded source/test; preserve the local recovery copy |
-| `incremental_training_harness.py` | Replace with thin frontend for `stockguidance.cli.incremental` |
-| `load_database_rows_into_tensors.py` | Retire superseded source/test; preserve the local recovery copy |
-| `load_latest_raw_stock_data_date.py` | Retire superseded source/test; preserve the local recovery copy |
-| `load_raw_stock_data_rows.py` | Retire superseded source/test; preserve the local recovery copy |
-| `models/__init__.py` | Retire superseded source/test; preserve the local recovery copy |
-| `models/convolution_transformer.py` | Retire superseded source/test; preserve the local recovery copy |
-| `models/multi_layer_mlp.py` | Retire superseded source/test; preserve the local recovery copy |
-| `models/sparse_linear.py` | Retire superseded source/test; preserve the local recovery copy |
-| `models/utils.py` | Retire superseded source/test; preserve the local recovery copy |
-| `organize_rep_runs.py` | Retire superseded source/test; preserve the local recovery copy |
-| `polygon_fetch.py` | Retain existing credential constant; delegate command to the shared updater |
-| `populate_db_ticker_info.py` | Retire superseded source/test; preserve the local recovery copy |
-| `scripts/aggregate_run_options.py` | Replace with thin frontend for `stockguidance.cli.reports` |
-| `scripts/generate_simulation_stats.py` | Replace with thin frontend for `stockguidance.cli.reports` |
-| `scripts/get_metrics_for_runs.py` | Replace with thin frontend for `stockguidance.cli.reports` |
-| `test_reuse_tensors.py` | Retire superseded source/test; preserve the local recovery copy |
-| `test_training_instance_provider.py` | Retire superseded source/test; preserve the local recovery copy |
-| `tests/test_family_controller.py` | Retire superseded source/test; preserve the local recovery copy |
-| `tests/test_feature_vector_builder.py` | Retire superseded source/test; preserve the local recovery copy |
-| `tests/test_feature_vector_builder_from_db.py` | Retire superseded source/test; preserve the local recovery copy |
-| `tests/test_metrics_eval_epoch.py` | Retire superseded source/test; preserve the local recovery copy |
-| `tests/test_mse_loss_behavior.py` | Retire superseded source/test; preserve the local recovery copy |
-| `tests/test_mse_restricted.py` | Retire superseded source/test; preserve the local recovery copy |
-| `tests/test_ranking_metrics.py` | Retire superseded source/test; preserve the local recovery copy |
-| `tests/test_simulate_trading_utils.py` | Retire superseded source/test; preserve the local recovery copy |
-| `tests/test_split_datasets_floating_head_tail_provider.py` | Retire superseded source/test; preserve the local recovery copy |
-| `tests/test_splits_head_tail.py` | Retire superseded source/test; preserve the local recovery copy |
-| `tests/test_stock_recommender_from_existing_model_uniform_range.py` | Retire superseded source/test; preserve the local recovery copy |
-| `tests/test_stock_recommender_from_model_random_argmax.py` | Retire superseded source/test; preserve the local recovery copy |
-| `tests/test_ticker_id_persistence.py` | Retire superseded source/test; preserve the local recovery copy |
-| `tests/test_train_pytorch_dry_run_head_tail.py` | Retire superseded source/test; preserve the local recovery copy |
-| `tests/test_training_instance_provider_unit.py` | Retire superseded source/test; preserve the local recovery copy |
-| `trainer/__init__.py` | Retire superseded source/test; preserve the local recovery copy |
-| `trainer/ai_type.py` | Retire superseded source/test; preserve the local recovery copy |
-| `trainer/args_train.py` | Retire superseded source/test; preserve the local recovery copy |
-| `trainer/dataloaders.py` | Retire superseded source/test; preserve the local recovery copy |
-| `trainer/dataset/ticker_info_for_dates.py` | Retire superseded source/test; preserve the local recovery copy |
-| `trainer/dataset/time_training_instance.py` | Retire superseded source/test; preserve the local recovery copy |
-| `trainer/dataset_classification.py` | Retire superseded source/test; preserve the local recovery copy |
-| `trainer/datasets.py` | Retire superseded source/test; preserve the local recovery copy |
-| `trainer/factory.py` | Retire superseded source/test; preserve the local recovery copy |
-| `trainer/file_structure_family_run_handler.py` | Retire superseded source/test; preserve the local recovery copy |
-| `trainer/file_structure_single_run_handler.py` | Retire superseded source/test; preserve the local recovery copy |
-| `trainer/io_run.py` | Retire superseded source/test; preserve the local recovery copy |
-| `trainer/label/transform/__init__.py` | Retire superseded source/test; preserve the local recovery copy |
-| `trainer/label/transform/transformers.py` | Retire superseded source/test; preserve the local recovery copy |
-| `trainer/legacy_arguments.py` | Retire superseded source/test; preserve the local recovery copy |
-| `trainer/legacy_training.py` | Retire superseded source/test; preserve the local recovery copy |
-| `trainer/loss_functions/__init__.py` | Retire superseded source/test; preserve the local recovery copy |
-| `trainer/loss_functions/losses.py` | Retire superseded source/test; preserve the local recovery copy |
-| `trainer/loss_functions/ranking.py` | Retire superseded source/test; preserve the local recovery copy |
-| `trainer/loss_functions/ranking_error.py` | Retire superseded source/test; preserve the local recovery copy |
-| `trainer/metric_file_handler.py` | Retire superseded source/test; preserve the local recovery copy |
-| `trainer/metrics.py` | Retire superseded source/test; preserve the local recovery copy |
-| `trainer/model_loader.py` | Retire superseded source/test; preserve the local recovery copy |
-| `trainer/rep_handler.py` | Retire superseded source/test; preserve the local recovery copy |
-| `trainer/splits.py` | Retire superseded source/test; preserve the local recovery copy |
-| `trainer/state/__init__.py` | Retire superseded source/test; preserve the local recovery copy |
-| `trainer/state/family_run.py` | Retire superseded source/test; preserve the local recovery copy |
-| `trainer/state/single_run.py` | Retire superseded source/test; preserve the local recovery copy |
-| `trainer/torch_interface/__init__.py` | Retire superseded source/test; preserve the local recovery copy |
-| `trainer/torch_interface/compat.py` | Retire superseded source/test; preserve the local recovery copy |
-| `trainer/torch_interface/device.py` | Retire superseded source/test; preserve the local recovery copy |
-| `trainer/torch_interface/memory.py` | Retire superseded source/test; preserve the local recovery copy |
-| `trainer/train_single_run.py` | Retire superseded source/test; preserve the local recovery copy |
-| `trainer/training_bundle.py` | Retire superseded source/test; preserve the local recovery copy |
-| `trainer/util/__init__.py` | Retire superseded source/test; preserve the local recovery copy |
-| `trainer/util/argparse_utils.py` | Retire superseded source/test; preserve the local recovery copy |
-| `trainer/util/date_bounds.py` | Retire superseded source/test; preserve the local recovery copy |
-| `trainer/util/utils.py` | Retire superseded source/test; preserve the local recovery copy |
-| `training_instance_provider.py` | Retire superseded source/test; preserve the local recovery copy |
-| `verify_operations/verify_daily_delta_stock_data.py` | Replace with thin frontend for `stockguidance.cli.validate_database` |
-| `verify_operations/verify_daily_delta_stock_data_per_ticker.py` | Replace with thin frontend for `stockguidance.cli.validate_database` |
-| `verify_operations/verify_raw_stock_load.py` | Replace with thin frontend for `stockguidance.cli.validate_database` |
-| `viewers/compare_run_statistics_viewer.py` | Replace with thin frontend for `stockguidance.viewers.reports` |
-| `viewers/compare_runs_shared.py` | Retire superseded source/test; preserve the local recovery copy |
-| `viewers/compare_runs_viewer.py` | Replace with thin frontend for `stockguidance.viewers.reports` |
-| `viewers/correlation_matrix_viewer.py` | Retire superseded source/test; preserve the local recovery copy |
-| `viewers/examine_models_viewer.py` | Replace with thin frontend for `stockguidance.viewers.artifacts` |
-| `viewers/pages/compare_runs.py` | Replace with thin frontend for `stockguidance.viewers.reports` |
-| `viewers/pages/compare_statistics.py` | Replace with thin frontend for `stockguidance.viewers.reports` |
-| `viewers/pages/examine_models.py` | Replace with thin frontend for `stockguidance.viewers.artifacts` |
-| `viewers/populate_runs_viewer.py` | Retire superseded source/test; preserve the local recovery copy |
-| `viewers/populate_statistics_viewer.py` | Retire superseded source/test; preserve the local recovery copy |
-| `viewers/run_selection_dashboard.py` | Replace with thin frontend for `stockguidance.viewers.reports` |
+| `StockRecommenderFromModel.py` | `stockguidance.cli.recommend` |
+| `batch_run.py` | `stockguidance.cli.batch` |
+| `calculate_ticker_correlations.py` | `stockguidance.cli.inspect_features:correlation_main` |
+| `database/populate_db_daily_delta_stock_data.py` | `stockguidance.cli.update_market_data` |
+| `database/populate_db_raw_stock_info.py` | `stockguidance.cli.update_market_data` |
+| `database/populate_db_ticker_info.py` | `stockguidance.cli.update_market_data` |
+| `debug_feature_logging.py` | `stockguidance.cli.inspect_features` |
+| `incremental_training_harness.py` | `stockguidance.cli.incremental` |
+| `scripts/aggregate_run_options.py` | `stockguidance.cli.reports` |
+| `scripts/generate_simulation_stats.py` | `stockguidance.cli.reports` |
+| `scripts/get_metrics_for_runs.py` | `stockguidance.cli.reports` |
+| `verify_operations/verify_daily_delta_stock_data.py` | `stockguidance.cli.validate_database` |
+| `verify_operations/verify_daily_delta_stock_data_per_ticker.py` | `stockguidance.cli.validate_database` |
+| `verify_operations/verify_raw_stock_load.py` | `stockguidance.cli.validate_database` |
+| `viewers/compare_run_statistics_viewer.py` | `stockguidance.viewers.reports` |
+| `viewers/compare_runs_viewer.py` | `stockguidance.viewers.reports` |
+| `viewers/examine_models_viewer.py` | `stockguidance.viewers.artifacts` |
+| `viewers/pages/compare_runs.py` | `stockguidance.viewers.reports` |
+| `viewers/pages/compare_statistics.py` | `stockguidance.viewers.reports` |
+| `viewers/pages/examine_models.py` | `stockguidance.viewers.artifacts` |
+| `viewers/run_selection_dashboard.py` | `stockguidance.viewers.reports` |
+
+## Credential module retained (not a deletion)
+
+- `polygon_fetch.py`: keep the existing `DEFAULT_API_KEY` constant at its original location and value; remove obsolete discovery/downloader code and delegate command execution to `stockguidance.cli.update_market_data`. Package the module so lazy credential lookup also works outside the checkout. Never copy the credential into documentation, configuration, reports or artifacts.
+
+The three obsolete benchmark files are retired rather than redirected to feature inspection: inspection does not benchmark their former CSV/intraday workloads. `entry_open` remains deferred Stage 10.
