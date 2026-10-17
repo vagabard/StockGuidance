@@ -117,12 +117,7 @@ def test_unknown_history_requires_evidence_without_creating_directories(job, tmp
 	assert not (tmp_path / "source").exists()
 
 
-def test_module_and_root_frontends_are_thin_and_parse_explicit_paths(tmp_path, capsys):
-	import train_pytorch_network
-	import train_pytorch_network_cli
-
-	assert train_pytorch_network.main is cli.main
-	assert train_pytorch_network_cli.build_parser is cli.build_parser
+def test_module_frontend_parses_explicit_paths(capsys):
 	arguments = cli.parse_args(["--config", "job.json", "--artifact", "model.sgmodel", "--resume", "state.pt"])
 	assert arguments.artifact.name == "model.sgmodel"
 	with pytest.raises(SystemExit) as error:
@@ -142,7 +137,7 @@ def test_documented_job_is_valid_without_accessing_live_data(tmp_path):
 	assert job.configuration.model.final_activation == "none"
 
 
-def test_supported_frontends_parse_without_importing_controllers():
+def test_package_frontends_parse_without_importing_controllers():
 	root = Path(__file__).resolve().parents[2]
-	for path in ("train_pytorch_network.py", "choose_next_day_stocks.py", "incremental_training_harness.py", "batch_run.py", "src/stockguidance/training/jobs.py", "src/stockguidance/workflows/batch.py"):
+	for path in ("src/stockguidance/cli/train_model.py", "src/stockguidance/cli/recommend.py", "src/stockguidance/cli/incremental.py", "src/stockguidance/cli/batch.py", "src/stockguidance/training/jobs.py", "src/stockguidance/workflows/batch.py"):
 		ast.parse((root / path).read_text(encoding="utf-8"), filename=path)

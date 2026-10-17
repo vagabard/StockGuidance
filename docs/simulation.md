@@ -158,7 +158,6 @@ chronological-retraining configuration is
 
 ```powershell
 & '<configured-python>' -m stockguidance.cli.simulate --config simulation.json --model-policy fixed --artifact models/pre-period.sgmodel --artifact-id '<64-character-artifact-sha256>'
-& '<configured-python>' simulate_trading.py --config simulation.json --model-policy fixed --artifact models/pre-period.sgmodel --artifact-id '<64-character-artifact-sha256>' --format text
 ```
 
 Set `allocation.policy` to `staggered_halves` for the second schedule. Initial

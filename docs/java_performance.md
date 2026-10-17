@@ -119,25 +119,12 @@ was available, so no Java production speedup or hotspot port is claimed. Stage
 The Java sources under `StockGuidance/java/src/stockguidance` are not a valid
 performance baseline:
 
-- `DatabaseRowsToTensors` buffers the full result in nested Java collections,
-  uses database date/ticker IDs as the working chronology, calls `getDouble`
-  without checking `ResultSet.wasNull`, and has identical flattened-array
-  branches for `return2d`.
-- `JsonUtils` and `SingleRun` use regular expressions for JSON, so escaped
-  strings, nulls, nested structures, exponent numbers, and malformed input do
-  not have the typed contract required by the current Python path.
-- `DbInfo` has a minimal regex/key-value decoder, while `DbConnect` searches
-  parent directories and opens a mutable MySQL connection without the current
-  explicit-path, read-only transaction, allowlisted-identifier, and
-  credential-safe error contract.
-- `StockRecommenderFromSavedScores` emits `index + 1` instead of the supplied
-  ordered ticker IDs. `SimulationEngine` also uses legacy date IDs and CSV
-  output rather than the current source, revision, receipt, availability,
-  calendar, and portfolio-event contracts.
-- Those historical prototypes had no Java build, pinned dependency set, real
-  JSON parser, interchange contract, parity fixture set, or read-only
-  transaction test. Stage 7 supplied the foundation and Stage 8 supplied the
-  bounded validator; neither is a measured production performance result.
+The historical prototypes were retired because they buffered full results,
+used legacy IDs and CSV formats, parsed configuration/JSON without the current
+typed contract, and lacked a Java build or parity fixture set. They remain in
+Git history for source archaeology, but are not a baseline for future work.
+Stage 7 supplied the foundation and Stage 8 supplied the bounded validator;
+neither is a measured production performance result.
 
 If a later review establishes a real bottleneck, the candidate order remains
 streaming read-only reconciliation, bulk imports, then frozen-score simulation.

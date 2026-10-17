@@ -1,11 +1,11 @@
 # Python frontend integration
 
-Stage 9 integration is complete. Supported root, script and viewer entry points
-are thin delegations to the typed package frontends below; they use the current
-arguments, not legacy formats or controller directories. The exact deletions,
-grouped by reason and distinguished from retained frontends, are recorded in
-[the retirement manifest](stage9_retirement.md). Original sources remain in Git
-history and the verified local recovery archive. User data/models are unchanged.
+The supported interfaces are the typed package frontends below. Root scripts,
+legacy packages, and viewer shims have been retired; they do not provide
+compatibility parsing, old artifact fallback, or controller-directory discovery.
+The retirement history is recorded in [the retirement manifest](stage9_retirement.md).
+Original sources remain in Git history and the verified local recovery archive.
+User data/models are unchanged.
 
 Use PyCharm's configured Python and package manager. All supported model inputs
 are `previous_close` or the distinct Stage 10 `entry_open` specification; every
@@ -38,8 +38,8 @@ The retained hardcoded Polygon key is `DEFAULT_API_KEY` in `polygon_fetch.py`.
 Its value is intentionally absent here. `POLYGON_API_KEY` overrides it; resolving
 credentials happens only when a fetch is needed. Move this constant to external
 configuration eventually. No credential migration is required to use the new
-workflows. The retained module is packaged for installed use outside the checkout;
-its command delegates to the same updater and imports perform no downloads.
+workflows. The retained module is packaged for installed use outside the checkout,
+is imported lazily only for provider access, and is not a supported command.
 
 ## Discover history and update
 
@@ -200,8 +200,8 @@ Choose explicit files; no directory, checkpoint or saved-score fallback exists.
 & $stockguidancePython -m stockguidance.cli.reports summary output/simulation.json
 & $stockguidancePython -m stockguidance.cli.reports compare output/alternate.json output/staggered.json
 & $stockguidancePython -m stockguidance.cli.reports artifact --artifact output/model.sgmodel --artifact-id '<artifact identity>'
-& $stockguidancePython -m streamlit run viewers/compare_runs_viewer.py
-& $stockguidancePython -m streamlit run viewers/examine_models_viewer.py
+& $stockguidancePython -m streamlit run src/stockguidance/viewers/reports.py
+& $stockguidancePython -m streamlit run src/stockguidance/viewers/artifacts.py
 ```
 
 The optional `viewers` dependency supplies Streamlit. UI imports are lazy and

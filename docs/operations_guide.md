@@ -399,31 +399,14 @@ correct batched/vectorized Python implementation with Java before choosing.
 | Torch models, fitting and feature specifications | Keep in Python initially; do not rebuild the ML stack to optimize database work |
 | Provider/history policy and exchange chronology | Keep one authoritative contract; export explicit session/policy data rather than maintaining divergent rules |
 
-The Stage 8 validator is a separate current implementation; historical Java
-files still need correctness work before they can be used for a speed
-comparison:
-
-- `database/DatabaseRowsToTensors.java` reads legacy derived targets, orders by
-  numeric IDs, builds the full dataset in memory, uses a global `missing_dates`
-  filter, and reads nullable SQL numbers without `wasNull()`. Its shape branches
-  currently produce the same flattened layout.
-- `simulator/SimulationEngine.java` loads an unbounded upper date range and
-  calculates `close / open` ratios. It lacks the current evidence/portfolio
-  contract needed for close-to-next-close evaluation.
-- `simulator/StockRecommenderFromSavedScores.java` returns `index + 1` rather
-  than the actual ticker ID and does not enforce the requested top-K limit in
-  its result loop.
-- `database/DbInfo.java` and `util/JsonUtils.java` parse JSON with regular
-  expressions. `DbConnect.java` searches parent directories for configuration,
-  whereas current Python uses an explicit selected JSON file.
-- `stockguidance.validation.ValidatorMain` is the current explicit-path,
-  read-only CLI. It is opt-in and does not replace the Python validator.
-
-These historical observations are source review findings, not Java runtime test
-results. Stage 8's fixture-backed JDBC tests prove selected-operation parity
-behavior, null/duplicate/orphan handling and zero writes. A disposable MySQL
-benchmark including JVM startup and transport was not available, so the Python
-implementation remains the default and no production speedup is claimed.
+The Stage 8 validator is the only current Java implementation. The incompatible,
+Maven-excluded historical prototypes were retired; recover them from Git history
+only for source archaeology, not as a basis for a production port.
+`stockguidance.validation.ValidatorMain` remains an opt-in, explicit-path,
+read-only CLI and does not replace the Python validator. Any future Java work
+starts from the Python contracts and parity tests, then requires an end-to-end
+benchmark including JVM startup and transport. Python remains the default until
+that work demonstrates a benefit.
 
 ## Current completion checklist
 

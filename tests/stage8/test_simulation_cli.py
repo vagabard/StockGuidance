@@ -111,13 +111,10 @@ def test_required_setup_or_reporting_failure_is_redacted(simulation, simulation_
 	assert not json.loads(output)["successful"] and "password" not in output
 
 
-def test_text_cli_frontend_uses_new_package_without_legacy_directory_discovery(simulation, simulation_json, tmp_path, capsys):
-	import simulate_trading
-
-	assert simulate_trading.main is cli.main
+def test_text_cli_uses_new_package_without_legacy_directory_discovery(simulation, simulation_json, tmp_path, capsys):
 	path = tmp_path / "job.json"
 	path.write_text(json.dumps(simulation_json), encoding="utf-8")
-	assert simulate_trading.main(arguments(simulation, path) + ["--format", "text"]) == 0
+	assert cli.main(arguments(simulation, path) + ["--format", "text"]) == 0
 	output = capsys.readouterr().out
 	assert "Close-to-next-session-close simulation" in output and "end positions:" in output
 

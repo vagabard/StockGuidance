@@ -124,16 +124,11 @@ def test_reporting_failure_is_nonzero_without_a_success_payload(recommender, job
 	assert payload["successful"] is False and "password" not in str(payload)
 
 
-def test_text_output_and_root_frontends_use_the_same_cli(recommender, job_json, tmp_path, monkeypatch, capsys):
-	import choose_next_day_stocks
-	import run_recommender_from_model_dir
-
-	assert choose_next_day_stocks.main is cli.main
-	assert run_recommender_from_model_dir.main is cli.main
+def test_text_output_uses_the_package_cli(recommender, job_json, tmp_path, monkeypatch, capsys):
 	configure_cli(recommender, monkeypatch)
 	path = tmp_path / "job.json"
 	path.write_text(json.dumps(job_json), encoding="utf-8")
-	assert choose_next_day_stocks.main(arguments(recommender, path) + ["--format", "text"]) == 0
+	assert cli.main(arguments(recommender, path) + ["--format", "text"]) == 0
 	output = capsys.readouterr().out
 	assert "Ranked suggestions" in output and "supplied portfolio state" in output
 	assert "2024-07-09" in output and "2024-07-10" in output

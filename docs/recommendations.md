@@ -110,11 +110,9 @@ an entry at T-1 is immature before T closes. If refreshed historical evidence
 cannot establish availability at earlier decisions, those samples are excluded;
 the workflow fails when none remain. It never fabricates historical availability.
 
-Both root commands, `choose_next_day_stocks.py` and
-`run_recommender_from_model_dir.py`, accept these same arguments and delegate to
-the same CLI. Their former switches are removed. The `recommend` console script
-is registered on the next ordinary editable install. No install refresh is
-required for module/root commands in this checkout.
+Use `python -m stockguidance.cli.recommend` from a checkout. The `recommend`
+console script is registered after an ordinary editable install. The former root
+commands and their legacy switches are retired.
 
 ## Eligibility and results
 
@@ -185,6 +183,6 @@ when present and loads the retained constant only if a download is needed. Its
 value is absent from new reports/configuration/artifacts. Native provider/MySQL
 deployment and historical revision reconstruction remain separate limitations.
 Stage 9 migrates all supported batch/incremental/diagnostic consumers and removes
-legacy controller/discovery paths. Root recommendation commands delegate to
-the same typed frontend; see [frontends.md](frontends.md) and the
+legacy controller/discovery paths. Package frontends are the only supported
+entry points; see [frontends.md](frontends.md) and the
 [grouped retirement list](stage9_retirement.md).

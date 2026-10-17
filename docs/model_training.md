@@ -22,7 +22,6 @@ Run from the checkout without refreshing the editable installation:
 
 ```powershell
 & '<configured-python>' -m stockguidance.cli.train_model --config training-job.json --artifact output/model.sgmodel
-& '<configured-python>' train_pytorch_network.py --config training-job.json --artifact output/model.sgmodel
 & '<configured-python>' -m stockguidance.cli.train_model --config training-job.json --artifact output/model.sgmodel --checkpoint output/training.pt
 & '<configured-python>' -m stockguidance.cli.train_model --config resumed-job.json --artifact output/resumed.sgmodel --resume output/training.pt
 ```

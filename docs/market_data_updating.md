@@ -6,9 +6,8 @@ and integrity checks; `--repair-plan validation.json` applies automatic proposal
 only when explicitly invoked and rejects plans requiring manual review.
 
 Run commands from the repository root using PyCharm's configured Python. The
-supported frontend is `python -m stockguidance.cli.update_market_data`; the root
-`update_market_data.py` wrapper runs the same frontend. Installing the updated
-`pyproject.toml` also exposes the `update_market_data` console command.
+supported frontend is `python -m stockguidance.cli.update_market_data`.
+Installing `pyproject.toml` also exposes the `update_market_data` console command.
 
 ## Required evidence and policy
 
@@ -154,14 +153,12 @@ boundary/dependency observations remain null. This is not Stage 5's close-to-clo
 target or new model input construction; those datasets and models still require
 rebuilding in their assigned stages.
 
-The [recommendation workflow](recommendations.md), exposed through
-`choose_next_day_stocks.py` and `run_recommender_from_model_dir.py`, calls this
-typed updater and stops on required failure before recommendation/training.
-Both frontends require explicit close-based artifacts or a typed retraining job.
-`polygon_fetch.py` now retains only its credential constant and a thin updater
-delegation. Database population frontends also delegate to the shared updater;
-obsolete discovery/trade-download and duplicate import paths are retired.
-All supported updater commands use complete request-scoped reconciliation.
+The [recommendation workflow](recommendations.md) calls this typed updater and
+stops on required failure before recommendation/training. It requires explicit
+close-based artifacts or a typed retraining job. `polygon_fetch.py` retains only
+its credential fallback; obsolete discovery/trade-download, database-population,
+and duplicate import paths are retired. All supported updater commands use
+complete request-scoped reconciliation.
 
 The existing hardcoded provider key remains `DEFAULT_API_KEY` in
 `polygon_fetch.py`; the former recommendation parser's duplicate inline default

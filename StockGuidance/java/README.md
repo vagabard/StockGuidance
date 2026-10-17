@@ -1,9 +1,10 @@
 # StockGuidance Java foundation
 
 Stage 7 establishes the current Java contract under `src/main/java`. The
-existing files under `src/stockguidance` are historical prototypes and are not
-compiled by this build. Their model readers and CSV simulator do not implement
-the current Python contracts and must not be treated as compatible inputs.
+historical prototypes formerly kept under `src/stockguidance` were retired
+because their model readers and CSV simulator did not implement the current
+Python contracts. Recover them from Git history only for source archaeology;
+future Java work starts from the current contract and parity tests.
 
 ## Build and test
 

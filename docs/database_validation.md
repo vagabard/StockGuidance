@@ -12,7 +12,6 @@ Run validation independently of downloading, importing, training, or recommendin
 
 ```powershell
 & '<configured-python>' -m stockguidance.cli.validate_database --help
-& '<configured-python>' validate_database.py --help
 ```
 
 The `validate_database` console entry point is declared in `pyproject.toml` and becomes available after refreshing the editable installation. Use PyCharm's configured interpreter. Python has been repaired; historical base-installation workarounds in `REFACTORING_PROMPTS.md` are no longer current setup guidance. See the operations guide for the verified interpreter and checkout invocation.

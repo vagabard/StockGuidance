@@ -1,6 +1,9 @@
 # Stage 9 source retirement and frontend migration
 
-Status: complete (2026-10-17). The approved scope is **85 deletions, 21 thin-frontend rewrites, and one retained credential module**. Cleanup changes source/tests only, not user data.
+Status: complete (2026-10-17). Stage 9 deleted 85 obsolete implementations;
+the subsequent source cleanup retired its 21 thin frontends and the remaining
+root-level adapters. The credential fallback module remains. Cleanup changes
+source/tests only, not user data.
 
 ## Recovery and exclusions
 
@@ -117,36 +120,17 @@ Old run folders, saved scores, binary correlations and intraday performance assu
 - `viewers/populate_runs_viewer.py`
 - `viewers/populate_statistics_viewer.py`
 
-## Files retained as thin frontends (21; not deletions)
+## Subsequent frontend retirement
 
-Only argument handling/delegation remains at these paths. No compatibility parsing, old artifact fallback or duplicate application logic remains. Use the current frontend arguments documented in [frontends.md](frontends.md).
-
-| Retained path | Delegated package frontend |
-|---|---|
-| `StockRecommenderFromModel.py` | `stockguidance.cli.recommend` |
-| `batch_run.py` | `stockguidance.cli.batch` |
-| `calculate_ticker_correlations.py` | `stockguidance.cli.inspect_features:correlation_main` |
-| `database/populate_db_daily_delta_stock_data.py` | `stockguidance.cli.update_market_data` |
-| `database/populate_db_raw_stock_info.py` | `stockguidance.cli.update_market_data` |
-| `database/populate_db_ticker_info.py` | `stockguidance.cli.update_market_data` |
-| `debug_feature_logging.py` | `stockguidance.cli.inspect_features` |
-| `incremental_training_harness.py` | `stockguidance.cli.incremental` |
-| `scripts/aggregate_run_options.py` | `stockguidance.cli.reports` |
-| `scripts/generate_simulation_stats.py` | `stockguidance.cli.reports` |
-| `scripts/get_metrics_for_runs.py` | `stockguidance.cli.reports` |
-| `verify_operations/verify_daily_delta_stock_data.py` | `stockguidance.cli.validate_database` |
-| `verify_operations/verify_daily_delta_stock_data_per_ticker.py` | `stockguidance.cli.validate_database` |
-| `verify_operations/verify_raw_stock_load.py` | `stockguidance.cli.validate_database` |
-| `viewers/compare_run_statistics_viewer.py` | `stockguidance.viewers.reports` |
-| `viewers/compare_runs_viewer.py` | `stockguidance.viewers.reports` |
-| `viewers/examine_models_viewer.py` | `stockguidance.viewers.artifacts` |
-| `viewers/pages/compare_runs.py` | `stockguidance.viewers.reports` |
-| `viewers/pages/compare_statistics.py` | `stockguidance.viewers.reports` |
-| `viewers/pages/examine_models.py` | `stockguidance.viewers.artifacts` |
-| `viewers/run_selection_dashboard.py` | `stockguidance.viewers.reports` |
+The thin frontends above and the remaining root-level adapters are now deleted.
+Use `python -m stockguidance.cli.<command>` from a checkout, or the console
+commands declared in `pyproject.toml` after installation. Streamlit views run
+from `src/stockguidance/viewers/reports.py` and
+`src/stockguidance/viewers/artifacts.py`. The deleted paths remain recoverable
+from Git history; no redirect or compatibility parser remains.
 
 ## Credential module retained (not a deletion)
 
-- `polygon_fetch.py`: keep the existing `DEFAULT_API_KEY` constant at its original location and value; remove obsolete discovery/downloader code and delegate command execution to `stockguidance.cli.update_market_data`. Package the module so lazy credential lookup also works outside the checkout. Never copy the credential into documentation, configuration, reports or artifacts.
+- `polygon_fetch.py`: keep the existing `DEFAULT_API_KEY` constant at its original location and value. Package the module so lazy credential lookup also works outside the checkout. It is a credential fallback, not an executable updater frontend. Never copy the credential into documentation, configuration, reports or artifacts.
 
 The three obsolete benchmark files are retired rather than redirected to feature inspection: inspection does not benchmark their former CSV/intraday workloads. Stage 9 deferred `entry_open`; the subsequently requested enhancement is documented in [entry_open.md](entry_open.md).
