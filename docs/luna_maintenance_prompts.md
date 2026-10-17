@@ -415,11 +415,11 @@ skipped stages; report any blockers and checks that could not run.
 
 ## Stage handoffs
 
-Initial status (2026-10-16): prompts prepared; Stages 1-4 are complete and Stages
-5-10 remain pending. Documentation review confirmed the repaired configured
+Initial status (2026-10-16): prompts prepared; Stages 1-5 are complete and Stages
+6-10 remain pending. Documentation review confirmed the repaired configured
 Python can run the four main CLI help commands. No production database/provider
-operations, training, Java build or performance measurements were performed for
-this brief.
+operations, live training, Java build or performance measurements were performed
+for this brief.
 
 ### Stage 1 handoff (2026-10-16)
 
@@ -561,6 +561,35 @@ time, entry-open rejection, mature-label enforcement, and no live provider or
 production database operations. Commands used the configured PyCharm Python
 3.14.8 executable with `PYTHONPATH=src`.
 
-Stage 5 may now add reproducible subset-training and later-simulation examples;
-those examples must preserve strict defaults and explicitly label/use the Stage
-4 research fields only when intended. Stages 6-10 remain pending.
+### Stage 5 handoff (2026-10-16)
+
+Status: complete. Added three complete parser-valid, non-secret fixture
+configurations under `examples/stage5/`: a previous-close entry-date training
+subset, a strictly later fixed-model simulation, and a chronological-retraining
+simulation with explicit bootstrap history and anchored cadence. All examples
+use strict availability, explicit ordered ticker IDs, decimal capital/fees,
+staggered independent allocations, and disposable fixture storage paths. The
+guides now identify the exact files and commands, distinguish entry-date scope
+from lookback/next-session dependencies, explain why same-period fixed models
+are rejected, and show how to read `artifact.path` and the canonical
+`artifact.artifact_id` from training JSON.
+
+The new offline acceptance fixture in
+`tests/stage5/test_examples_acceptance.py` trains a deterministic tiny CPU
+model through the existing in-memory close repository, reads the reported
+artifact reference, exports/reloads it, and simulates a later range through the
+existing simulation engine. It checks exact ticker order, no future features or
+labels, canonical artifact identity, fees, independent cash-rest balances,
+anchored allocation parity, a missing-entry skip, an open end position and
+event/accounting semantics. No MySQL, provider, schema setup or production
+write is used.
+
+Accepted checks: the configured PyCharm Python 3.14.8 executable ran
+`python -m pytest tests/stage5 -q` with 78 passed and
+`python -m pytest tests/stage5 tests/stage6 tests/stage7 tests/stage8 -q` with
+313 passed and 3 existing Torch warnings. The same executable, with
+`PYTHONPATH=src`, parsed all three example JSON files through
+`training.jobs.load_job`/`simulation.jobs.load_configuration`. No live provider,
+MySQL, schema setup or production write was used. Stage 6 remains pending and
+is limited to performance measurement; no Java or performance work was
+introduced here. Stages 7-10 remain pending.

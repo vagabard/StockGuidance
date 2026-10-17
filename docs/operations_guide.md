@@ -207,6 +207,15 @@ Keep the full archive; choose training entry dates in the job JSON. Do not delet
 rows or renumber database IDs. Start with the complete configuration example in
 [model_training.md](model_training.md), save it as `training-job.json`, and edit:
 
+For a parser-valid disposable starting point, use
+[`examples/stage5/previous-close-training-subset.json`](../examples/stage5/previous-close-training-subset.json).
+The fixed later-period and chronological-retraining companions are
+[`examples/stage5/fixed-later-simulation.json`](../examples/stage5/fixed-later-simulation.json)
+and
+[`examples/stage5/chronological-retraining-simulation.json`](../examples/stage5/chronological-retraining-simulation.json).
+All three are fixture-only configurations with no credentials and strict
+previous-close availability by default.
+
 | Field | Choice |
 |---|---|
 | `source`, `data_root`, `database_config` | Your verified source and storage |
@@ -244,6 +253,14 @@ usable entry can be later than the local archive minimum.
   --artifact output/subset.sgmodel --checkpoint output/subset-training.pt > output/training-result.json
 $trainingExit = $LASTEXITCODE
 ```
+
+The small offline acceptance fixture is `tests/stage5/test_examples_acceptance.py`.
+It trains a CPU model through the in-memory repository, reads the reported
+`artifact.path` and canonical `artifact.artifact_id`, exports and reloads the
+model, then simulates a strictly later range. It also checks fees, independent
+staggered balances, anchored skips, end positions, exact ticker order and the
+absence of future feature/label reads. It never initializes MySQL or calls a
+provider.
 
 Inspect `training_samples`, `excluded_training`, the artifact reference and
 metrics. A small CPU trial should establish readiness before a long fit. The

@@ -148,6 +148,14 @@ email or trade submission occur in simulation.
 }
 ```
 
+The same parser-valid, non-secret fixed-period fixture is checked in at
+[`examples/stage5/fixed-later-simulation.json`](../examples/stage5/fixed-later-simulation.json).
+It uses disposable `fixture-data`/`fixture-database.json` paths and strict
+previous-close inputs; replace those paths and source identity with the rebuilt
+artifact's verified storage before an operational run. The corresponding
+chronological-retraining configuration is
+[`examples/stage5/chronological-retraining-simulation.json`](../examples/stage5/chronological-retraining-simulation.json).
+
 ```powershell
 & '<configured-python>' -m stockguidance.cli.simulate --config simulation.json --model-policy fixed --artifact models/pre-period.sgmodel --artifact-id '<64-character-artifact-sha256>'
 & '<configured-python>' simulate_trading.py --config simulation.json --model-policy fixed --artifact models/pre-period.sgmodel --artifact-id '<64-character-artifact-sha256>' --format text
@@ -174,6 +182,10 @@ For chronological retraining replace `retraining: null` with:
 ```powershell
 & '<configured-python>' -m stockguidance.cli.simulate --config simulation-retrain.json --model-policy chronological_retrain --artifacts-directory models/walk-forward
 ```
+
+The walk-forward example begins before the evaluation range so its first model
+has bootstrap history. Each retraining artifact is written only to the explicit
+`--artifacts-directory`; it is never discovered from an experiment directory.
 
 The only writes are explicitly requested retraining artifacts. Output is JSON
 on stdout by default or text with `--format text`. Reports contain event-ledger

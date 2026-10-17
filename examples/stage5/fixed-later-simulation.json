@@ -1,0 +1,42 @@
+{
+  "source": {
+    "provider": "fixture",
+    "endpoint": "/fixture/daily-closes/{date}",
+    "market": "us-stocks",
+    "universe": "fixture-ordered-universe",
+    "adjustment": "adjusted",
+    "interval": "1d"
+  },
+  "data_root": "examples/stage5/fixture-data",
+  "database_config": "examples/stage5/fixture-database.json",
+  "features": {
+    "ticker_ids": [17, 3],
+    "lookback_sessions": 1,
+    "signal_mode": "previous_close",
+    "interval": "1d",
+    "missing_history": "unavailable",
+    "feature_order": ["close_over_first_window_close_minus_one"],
+    "adjustment": "adjusted"
+  },
+  "start_date": "2024-07-08",
+  "end_date": "2024-07-11",
+  "availability_policy": "strict",
+  "data_snapshot": null,
+  "allocation": {
+    "policy": "staggered_halves",
+    "anchor_date": "2024-07-08"
+  },
+  "initial_capital": "1000.00",
+  "decision_minutes_before_close": 30,
+  "publication": {
+    "delay_minutes": 15,
+    "evidence": "Stage 5 fixture-only publication policy"
+  },
+  "execution_audit_cutoff": "2024-07-11T21:00:00+00:00",
+  "eligibility": {
+    "minimum_transactions": 200
+  },
+  "top_k": 1,
+  "fee_per_fill": "0.50",
+  "retraining": null
+}

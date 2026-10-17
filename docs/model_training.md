@@ -34,6 +34,12 @@ configuration; exit 1 indicates failed data readiness, fitting, checkpointing or
 export. CLI failures use fixed messages without external exception bodies.
 The typed API raises the underlying exception for application error handling.
 
+To validate the checked-in fixture without touching a provider or database:
+
+```powershell
+& '<configured-python>' -c "from pathlib import Path; from stockguidance.training.jobs import load_job; load_job(Path('examples/stage5/previous-close-training-subset.json'))"
+```
+
 ## Explicit job configuration
 
 This is a **fixture example**, not a statement about live Polygon history or
@@ -41,6 +47,13 @@ publication. Supply real evidenced policies and an existing source-specific
 history boundary established by the updater. The command only reads market data;
 it does not update data, initialize schemas, persist a guessed history boundary,
 send email, simulate trades or discover models in experiment directories.
+
+The parser-valid, non-secret Stage 5 subset configuration is checked in at
+[`examples/stage5/previous-close-training-subset.json`](../examples/stage5/previous-close-training-subset.json).
+Its `start_date` and `end_date` select entry sessions only; the lookback sessions
+and next-session close needed for each label are separate dependencies. The
+`fixture` source and `fixture-data` paths are placeholders for disposable
+acceptance storage, not live provider access.
 
 ```json
 {
