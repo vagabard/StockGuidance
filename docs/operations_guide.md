@@ -74,14 +74,15 @@ gap that cannot be fetched must remain an explicit unresolved finding. It must
 not trigger deletion, a fabricated replacement, or a claim of complete history.
 Raw database rows alone do not prove source identity or original availability.
 
-**Current limitation:** the shared Stage 1 resolver in
-`market_data/discovery.py` now keeps retained observations, verified source
-coverage, provider capability, and requested/effective session bounds separate.
-`cli/update_setup.py` and `cli/validation_setup.py` still require either
-persisted source history or `--history-start` with `--history-evidence`; Stage 2
-and Stage 3 migrate those consumers while retaining the arguments as optional
-overrides. Omitting the arguments in the current CLIs therefore still works only
-when matching history metadata already exists.
+**Current validation behavior:** the validator uses the Stage 1 resolver to
+inventory source-bound manifests and legacy database observations without
+writing discovery metadata. With date and history arguments omitted, it audits
+the observed retained scope through the latest expected published session. It
+reports local observed bounds, verified retained sessions and holes, cached
+provider capability/freshness, the effective audit scope, and unresolved
+earliest/provider limits separately. The history arguments remain optional,
+source-bound overrides; validation never persists them. The updater remains on
+its explicit-boundary workflow until Stage 3.
 
 Stage 1 discovery is read-only and takes an injected clock, authoritative session
 calendar, publication policy, optional local inventory, and an optional typed
@@ -127,19 +128,18 @@ $historyArgs = @()
 New-Item -ItemType Directory -Force -Path 'output' | Out-Null
 ```
 
-For a current checkout without history metadata, set `$historyArgs` once from
-inspected source evidence. This is a temporary prerequisite, not automatic
-discovery, and the current single boundary cannot fully represent the retained
-archive/provider distinction. Avoid a broad update if that distinction applies;
-use explicit fetchable bounds until prompts 1-3 are complete.
+For a current checkout with a known source boundary, `$historyArgs` may be
+provided as an in-memory validation override and as the updater's persisted
+boundary input. It is not required for validation when retained local evidence
+can establish an auditable scope. A conflicting override remains an error.
 
 ```powershell
 $historyArgs = @('--history-start', '<evidenced-first-supported-session>',
     '--history-evidence', '<non-secret provenance>')
 ```
 
-Replace the bracketed strings before use. If history is already persisted, leave
-`$historyArgs` empty. A conflicting explicit boundary fails today. Validation
+Replace the bracketed strings before use. If history is already persisted or
+local retained evidence is discoverable, leave `$historyArgs` empty. Validation
 uses an explicit boundary only in memory; the updater persists it.
 
 ```powershell

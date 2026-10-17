@@ -363,6 +363,8 @@ def discover_coverage(
 		diagnostics.append(DiscoveryDiagnostic("provider_capability_stale", DiagnosticSeverity.WARNING, "Provider capability evidence is retained but outside its freshness window"))
 	if capability.state is not CapabilityState.VERIFIED:
 		diagnostics.append(DiscoveryDiagnostic("provider_capability_unresolved", DiagnosticSeverity.WARNING, f"Provider fetch bounds are not trusted: {capability.state.value}"))
+	if history_boundary is None and not (capability.is_fresh_at(now) and capability.earliest_session is not None):
+		diagnostics.append(DiscoveryDiagnostic("history_earliest_unresolved", DiagnosticSeverity.WARNING, "The earliest expected source session is unknown; the first local observation is only an audit floor"))
 
 	start_candidates = [value for value in (None if history_boundary is None else history_boundary.history_start, local_bounds.first_observed) if value is not None]
 	if capability.is_fresh_at(now) and capability.earliest_session is not None:

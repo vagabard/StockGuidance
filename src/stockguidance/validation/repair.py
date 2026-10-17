@@ -19,6 +19,7 @@ class RepairAction(StrEnum):
 	REVIEW_RECORDS = "review_records"
 	ESTABLISH_POLICY = "establish_publication_policy"
 	CAPTURE_OPENING = "capture_opening_evidence"
+	BLOCKED_OUT_OF_ACCESS = "blocked_out_of_access"
 
 
 AUTOMATIC_ACTIONS = frozenset({RepairAction.REFRESH_SOURCE, RepairAction.REIMPORT, RepairAction.REBUILD_DERIVED, RepairAction.COMPLETE_MANIFEST})
@@ -30,6 +31,7 @@ class RepairItem:
 	session_date: date | None
 	check: ValidationCheck
 	tickers: tuple[str, ...] = ()
+	reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -55,6 +57,8 @@ class RepairPlan:
 				raise ValueError("Automatic repair requires an exact session")
 			if not isinstance(item.tickers, tuple) or any(not isinstance(ticker, str) or not ticker for ticker in item.tickers):
 				raise ValueError("Invalid repair ticker layout")
+			if not isinstance(item.reason, str):
+				raise ValueError("Invalid repair reason")
 
 	def validate_for_update(self, source: SourceIdentity, start: date, end: date, cutoff: datetime) -> None:
 		if self.source != source or self.start != start or self.end != end or self.as_of > cutoff:
@@ -63,10 +67,21 @@ class RepairPlan:
 			raise ValueError("Repair plan requires manual schema, integrity, or policy review before updating")
 
 	def payload(self) -> dict[str, object]:
-		return {"schema_version": 1, "source": asdict(self.source), "start": self.start.isoformat(), "end": self.end.isoformat(), "as_of": self.as_of.isoformat(), "items": [{"action": item.action.value, "session_date": None if item.session_date is None else item.session_date.isoformat(), "check": item.check.value, "tickers": list(item.tickers)} for item in self.items]}
+		version = 2 if any(item.reason or item.action is RepairAction.BLOCKED_OUT_OF_ACCESS for item in self.items) else 1
+		return {"schema_version": version, "source": asdict(self.source), "start": self.start.isoformat(), "end": self.end.isoformat(), "as_of": self.as_of.isoformat(), "items": [{"action": item.action.value, "session_date": None if item.session_date is None else item.session_date.isoformat(), "check": item.check.value, "tickers": list(item.tickers), **({"reason": item.reason} if version >= 2 else {})} for item in self.items]}
 
 
-def plan_repairs(source: SourceIdentity, start: date, end: date, cutoff: datetime, findings: tuple[ValidationFinding, ...]) -> RepairPlan:
+def plan_repairs(
+	source: SourceIdentity,
+	start: date,
+	end: date,
+	cutoff: datetime,
+	findings: tuple[ValidationFinding, ...],
+	*,
+	fetchable_start: date | None = None,
+	fetchable_end: date | None = None,
+	capability_resolved: bool = True,
+) -> RepairPlan:
 	items: list[RepairItem] = []
 	for finding in findings:
 		if not finding.blocking:
@@ -86,14 +101,21 @@ def plan_repairs(source: SourceIdentity, start: date, end: date, cutoff: datetim
 		elif finding.check is ValidationCheck.SOURCE and finding.category is FindingCategory.INCOMPLETE:
 			action = RepairAction.COMPLETE_MANIFEST
 		elif finding.check in {ValidationCheck.SOURCE, ValidationCheck.SESSION}:
-			action = RepairAction.REFRESH_SOURCE
+			in_access = capability_resolved and (fetchable_start is None or finding.session_date >= fetchable_start) and (fetchable_end is None or finding.session_date <= fetchable_end)
+			if capability_resolved and in_access:
+				action = RepairAction.REFRESH_SOURCE
+			else:
+				action = RepairAction.BLOCKED_OUT_OF_ACCESS
 		elif finding.check in {ValidationCheck.RAW_KEYS, ValidationCheck.RAW_VALUES, ValidationCheck.IMPORT}:
 			action = RepairAction.REIMPORT
 		elif finding.check in {ValidationCheck.FEATURE, ValidationCheck.TARGET}:
 			action = RepairAction.REVIEW_RECORDS
 		else:
 			action = RepairAction.REBUILD_DERIVED
-		item = RepairItem(action, finding.session_date, finding.check, finding.tickers)
+		reason = ""
+		if action is RepairAction.BLOCKED_OUT_OF_ACCESS:
+			reason = "No fresh verified provider capability bounds authorize an automatic refresh for this session"
+		item = RepairItem(action, finding.session_date, finding.check, finding.tickers, reason)
 		if item not in items:
 			items.append(item)
 	return RepairPlan(source, start, end, cutoff, tuple(items))
@@ -104,7 +126,7 @@ def load_repair_plan(path: Path) -> RepairPlan:
 	if "repair_plan" in payload:
 		payload = mapping(payload["repair_plan"])
 	values = payload.get("items")
-	if type(payload.get("schema_version")) is not int or payload["schema_version"] != 1 or not isinstance(values, list):
+	if type(payload.get("schema_version")) is not int or payload["schema_version"] not in {1, 2} or not isinstance(values, list):
 		raise ValueError("Unsupported repair plan")
 	items: list[RepairItem] = []
 	for value in values:
@@ -112,5 +134,8 @@ def load_repair_plan(path: Path) -> RepairPlan:
 		tickers = row["tickers"]
 		if not isinstance(tickers, list) or any(not isinstance(ticker, str) for ticker in tickers):
 			raise ValueError("Invalid repair tickers")
-		items.append(RepairItem(RepairAction(text_field(row, "action")), None if row["session_date"] is None else date.fromisoformat(text_field(row, "session_date")), ValidationCheck(text_field(row, "check")), tuple(tickers)))
+		reason = row.get("reason", "")
+		if not isinstance(reason, str):
+			raise ValueError("Invalid repair reason")
+		items.append(RepairItem(RepairAction(text_field(row, "action")), None if row["session_date"] is None else date.fromisoformat(text_field(row, "session_date")), ValidationCheck(text_field(row, "check")), tuple(tickers), reason))
 	return RepairPlan(decode_source(payload["source"]), date.fromisoformat(text_field(payload, "start")), date.fromisoformat(text_field(payload, "end")), datetime.fromisoformat(text_field(payload, "as_of")), tuple(items))

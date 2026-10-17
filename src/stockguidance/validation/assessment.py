@@ -25,7 +25,8 @@ def assess_session(source: SourceIdentity, item: SessionUpdate, manifest: Source
 		return tuple(findings)
 	if item.expected_available_at is None:
 		add(FindingCategory.UNVERIFIED, ValidationCheck.SESSION, "Provider publication policy is unknown; no data query is authorized")
-		return tuple(findings)
+		if manifest is None and snapshot is None:
+			return tuple(findings)
 	if manifest is None:
 		add(FindingCategory.UNVERIFIED, ValidationCheck.SOURCE, "Validated request-scoped source evidence is missing or corrupt")
 	elif manifest.source != source or manifest.download.session != item.session:

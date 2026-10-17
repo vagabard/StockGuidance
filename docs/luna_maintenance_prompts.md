@@ -415,10 +415,11 @@ skipped stages; report any blockers and checks that could not run.
 
 ## Stage handoffs
 
-Initial status (2026-10-16): prompts prepared; Stage 1 is complete and Stages 2-10
-remain pending. Documentation review confirmed the repaired configured Python can
-run the four main CLI help commands. No production database/provider operations,
-training, Java build or performance measurements were performed for this brief.
+Initial status (2026-10-16): prompts prepared; Stages 1-2 are complete and Stages
+3-10 remain pending. Documentation review confirmed the repaired configured
+Python can run the four main CLI help commands. No production database/provider
+operations, training, Java build or performance measurements were performed for
+this brief.
 
 ### Stage 1 handoff (2026-10-16)
 
@@ -442,3 +443,24 @@ JSON remains loadable; v2 discovery metadata is written only to a separate
 report conflicts rather than silently rewriting persisted history.
 
 Accepted checks: `python -m pytest tests/stage1` passed 73 tests; `python -m pytest tests/stage2 tests/stage3/test_provider.py` passed 90 tests; the complete `python -m pytest` suite passed 722 tests; and `python -m mypy src/stockguidance/market_data src/stockguidance/database/repositories/mysql_sessions.py` passed with no issues in 32 source files. The commands used the configured PyCharm Python 3.14.8 executable with `PYTHONPATH=src`; no live HTTP, production database, or metadata writes were used. Stage 2 prerequisites are migrating validation to these contracts, including offline inventory/audit, explicit unresolved provider capability, and zero-write guarantees.
+
+### Stage 2 handoff (2026-10-16)
+
+Status: complete. Validation now uses Stage 1 discovery when history and date
+arguments are omitted. `cli/validation_setup.py` performs one bounded local
+inventory of source-bound manifests and legacy database observations, loads only
+valid cached provider capability metadata, and never constructs a live provider.
+The validator audits the discovered retained scope through the latest expected
+published session, while a synthetic read-only query floor keeps an unknown
+earliest source boundary from being reported as a historical claim.
+
+Reports expose local observed bounds, verified retained sessions and holes,
+provider capability/freshness, effective scope, latest expected publication, and
+unresolved limits independently from integrity findings and model-input
+readiness. Explicit start/end, as-of, history overrides, source validation,
+immature labels, and existing numerical/feature checks remain supported. Repair
+plans retain version 1 decoding and use version 2 only when a
+`blocked_out_of_access` item with a reason prevents an impossible automatic
+refresh.
+
+Accepted checks: `python -m pytest tests/stage2 tests/stage4 tests/stage5/test_repository_and_validation.py` passed 142 tests; the complete `python -m pytest` suite passed 725 tests with 3 existing model warnings; and the affected mypy check over 17 source files passed with no issues. The new Stage 2 tests cover omitted history bounds, local/provider separation, interior gaps, zero provider calls, zero validation writes, rollback-preserving inspection, cached capability and blocked old-gap repair. Commands used the configured PyCharm Python 3.14.8 executable with `PYTHONPATH=src`; no live HTTP or production writes were used. Stage 3 prerequisites are migrating updater setup and planning to the shared resolver without changing this validator's offline contract.

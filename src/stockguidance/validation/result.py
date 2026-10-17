@@ -6,6 +6,7 @@ from stockguidance.database.repositories.validation import SessionRecordCounts
 from stockguidance.datasets.sample import Sample
 from stockguidance.features.specification import FeatureSpec
 from stockguidance.market_data.coverage import CoveragePlan
+from stockguidance.market_data.discovery import CoverageDiscoveryResult
 from stockguidance.market_data.manifests import SourceManifest
 from stockguidance.validation.coverage import CoverageResult, CoverageState
 from stockguidance.validation.findings import FindingCategory, ValidationFinding
@@ -24,6 +25,7 @@ class ValidationResult:
 	record_counts: tuple[SessionRecordCounts, ...]
 	samples: tuple[Sample, ...] = ()
 	feature_specification: FeatureSpec | None = None
+	discovery: CoverageDiscoveryResult | None = None
 
 	@property
 	def failed(self) -> bool:

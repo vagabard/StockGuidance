@@ -2,11 +2,10 @@
 
 For the recommended update/validation/training/simulation order, see the
 [operations guide](operations_guide.md). Shared Stage 1 source-scoped discovery
-is implemented in `market_data/discovery.py`; preservation of archives older than
-current download access is represented there but validation consumers are not
-migrated yet. Conditional Java work and the later read-only validation integration
-are specified in [Luna implementation prompts](luna_maintenance_prompts.md). The
-boundary requirements below describe the current commands.
+and the Stage 2 read-only validator are implemented in
+`market_data/discovery.py` and `cli/validation_setup.py`. Conditional Java work
+and later update integration remain specified in
+[Luna implementation prompts](luna_maintenance_prompts.md).
 
 Run validation independently of downloading, importing, training, or recommending:
 
@@ -17,7 +16,12 @@ Run validation independently of downloading, importing, training, or recommendin
 
 The `validate_database` console entry point is declared in `pyproject.toml` and becomes available after refreshing the editable installation. Use PyCharm's configured interpreter. Python has been repaired; historical base-installation workarounds in `REFACTORING_PROMPTS.md` are no longer current setup guidance. See the operations guide for the verified interpreter and checkout invocation.
 
-Use the same data root, database configuration, adjustment, history evidence, and publication policy as the updater. The live provider's first supported session and publication delay remain unknown. Replace the bracketed values with inspected evidence:
+Use the same data root, database configuration and adjustment as the updater.
+Publication evidence is required when a delay is supplied; otherwise validation
+reports an unresolved publication limit while still inspecting local rows and
+source evidence. History/date arguments are optional when local retained
+evidence establishes a scope. Replace the bracketed values with inspected
+evidence when using explicit overrides:
 
 ```powershell
 & '.venv\Scripts\python.exe' -m stockguidance.cli.validate_database `
@@ -27,7 +31,13 @@ Use the same data root, database configuration, adjustment, history evidence, an
   --publication-delay-minutes '<documented delay>' --publication-evidence '<publication provenance>'
 ```
 
-An explicit boundary is used in memory and is **not saved** by validation. When source-specific metadata exists under `<data-root>/history/`, omit `--history-start` and `--history-evidence`. A conflicting boundary fails. Missing history metadata fails before database access; database minima never replace the supported boundary. Omitting the publication delay reports unverified sessions without querying the database. A supplied delay requires evidence.
+An explicit boundary is used in memory and is **not saved** by validation. When
+source-specific metadata exists under `<data-root>/history/`, or local manifests
+or legacy rows establish an observed scope, omit `--history-start` and
+`--history-evidence`. A conflicting boundary fails. Database minima and local
+minimum dates are reported as observations, never as proof that no earlier
+history is expected. Cached discovery capability metadata may be used, but
+validation never contacts a live provider.
 
 Add `--as-of '<timezone-aware ISO timestamp>'` for a historical cutoff no later than the current/injected clock. Queries never cross supported history or include unfinished/unpublished sessions. Importing old bars today does not prove availability at a historical decision. Validation does not reconstruct earlier revisions of corrected data.
 
@@ -45,7 +55,15 @@ Add `--format json` for machine-readable output. Redirect stdout to save a repor
 | 2 | Validation completed with missing, invalid, incomplete, or unverified data, or with no available trading session. Argument parsing also uses 2. |
 | 1 | Validation could not run or a required schema/row inspection failed. Exception text is sanitized. |
 
-JSON includes non-secret source identity, requested bounds/cutoff, supported history and provenance, observed minima separately, inspected sessions including context, source keys/counts, physical database counts, successfully decoded keys, receipt times, provider count evidence, checks assessed, typed findings, and a versioned repair plan. Invalid/duplicate rows remain in physical counts even when excluded from validated snapshots. Findings identify dates, tickers, and mapping IDs when available. Deferred sessions do not claim price/derived checks or expose future record keys.
+JSON includes non-secret source identity, requested bounds/cutoff, local observed
+bounds, verified retained coverage and holes, cached provider capability and
+freshness, effective scope, latest expected published session, unresolved limits,
+inspected sessions including context, source keys/counts, physical database
+counts, successfully decoded keys, receipt times, provider count evidence,
+checks assessed, typed findings, and a versioned repair plan. Invalid/duplicate
+rows remain in physical counts even when excluded from validated snapshots.
+Findings identify dates, tickers, and mapping IDs when available. Deferred
+sessions do not claim price/derived checks or expose future record keys.
 
 | Finding category | Meaning |
 |---|---|
@@ -70,7 +88,11 @@ Queries include at most two available neighboring sessions on each side for lega
 
 Validation issues read queries and rolls back its transaction. It never invokes schema initialization, provider fetch, import, derived replacement, history save, or manifest completion. There is no repair/delete/schema flag. Missing/incompatible schemas require review before explicit updater setup; validation never converts engines or deletes records.
 
-Apply automatic proposals by passing saved validation JSON (or its standalone `repair_plan` object) to the updater explicitly:
+Apply automatic proposals by passing saved validation JSON (or its standalone
+`repair_plan` object) to the updater explicitly. Plans with schema version 2 may
+contain `blocked_out_of_access` items with a reason; those are manual-review
+records and are rejected by the updater until an authorized, evidenced scope is
+provided:
 
 ```powershell
 & '.venv\Scripts\python.exe' -m stockguidance.cli.update_market_data `
