@@ -1,12 +1,12 @@
 # Operating StockGuidance
 
 This guide describes the current Python commands and the shared automatic
-history discovery contract. Stages 1-6 of the implementation prompts are
+history discovery contract. Stages 1-7 of the implementation prompts are
 complete; validation and updating now use the shared resolver. Implementation prompts are in
-[luna_maintenance_prompts.md](luna_maintenance_prompts.md). Those prompts have
-not all been implemented by adding this guide. Start with the Python workflow.
-The Java sources remain unfinished legacy prototypes; Stage 6 measured the
-Python paths without treating them as semantically equivalent. See
+[luna_maintenance_prompts.md](luna_maintenance_prompts.md). Later conditional
+stages remain pending. Start with the Python workflow. The historical Java
+prototypes remain unfinished and separate from the Stage 7 foundation; Stage 6
+measured the Python paths without treating them as semantically equivalent. See
 [java_performance.md](java_performance.md) for the reproducible offline study.
 
 ## Java and performance status+
@@ -19,15 +19,22 @@ largest measured CPU/allocation path; no SQL/query or transfer measurement was
 possible because no disposable SQL service was available. No production schema,
 index, provider, or database change was made.
 
-The current Java prototypes are not a correctness baseline. Their JSON parsing
-is regex-based, `DatabaseRowsToTensors` buffers rows and does not distinguish
-SQL `NULL` through `ResultSet.wasNull`, `DbConnect` performs parent-directory
-configuration discovery, and saved-score recommendations use `index + 1`
-rather than the supplied ticker IDs. They also lack the current source,
-adjustment/interval, receipt, availability, calendar, revision, and portfolio
-contracts. No Java timing or port recommendation is therefore claimed. Any
-future Java work must establish typed contracts and parity fixtures first;
-Python remains the semantic and performance reference.
+Stage 7 is complete as a typed Java foundation under
+[`StockGuidance/java/README.md`](../StockGuidance/java/README.md). The Maven
+build targets Java 21, uses Jackson 2.15.2 and JUnit Jupiter 5.13.4, and pins
+the bundled MySQL Connector/J 9.6.0. The current source tree is separate from
+the historical prototypes, which are excluded from the build and remain
+unsupported legacy readers.
+
+The active database path decodes only an explicit JSON file, applies the
+Python-compatible database/schema conflict rules and type checks, keeps
+credentials out of errors, uses read-only repeatable-read transactions with
+rollback, and binds date values through prepared statements with allowlisted
+identifiers. The versioned interchange contract covers source identity,
+calendar/exchange dates, ordered ticker IDs, coverage provenance, receipt times,
+availability policy, nulls, revisions, errors, findings, canonical hashes and
+BigDecimal money rounding. Python remains the semantic reference; no Java
+provider, writer, validator, or model-training implementation was introduced.
 
 ## Recommended order
 

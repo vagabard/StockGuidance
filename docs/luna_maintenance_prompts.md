@@ -2,8 +2,8 @@
 
 These are implementation tasks for the model you select as Luna 5.6. Use one
 numbered prompt per conversation, in order, with the shared preamble below.
-Prompts 4 and 7-9 are conditional as described. Stage 1 is marked complete in
-the handoff below; later stages remain pending. Read [operations_guide.md](operations_guide.md) for current commands
+Prompts 4 and 7-9 are conditional as described. Stages 1-7 are marked complete
+in the handoffs below; Stages 8-10 remain pending. Read [operations_guide.md](operations_guide.md) for current commands
 and [database_validation.md](database_validation.md) for the existing audit contract.
 
 This brief updates the history requirement in `REFACTORING_PROMPTS.md`: retained
@@ -626,7 +626,49 @@ completion with all semantic guards passing across three fixture sizes. The
 run recorded Python 3.14.8, NumPy 2.5.4, Torch 2.14.1+cu132, one Torch CPU
 thread, Windows 11, and a 24-CPU AMD64 host. No disposable SQL service was
 available, so database query/transfer acceptance is explicitly not claimed.
-Stage 7 prerequisites are a decision on whether the measured Python hotspot
-justifies Java work, followed by a reproducible Java build, typed JSON and
-database contracts, and Python/Java golden parity fixtures. The current Python
-implementation remains the reference.
+Stage 7 prerequisites were the reproducible Java build, typed JSON and database
+contracts, and Python/Java golden parity fixtures recorded in the next handoff.
+The current Python implementation remains the semantic reference.
+
+### Stage 7 handoff (2026-10-17)
+
+Status: complete. Established a Maven Java 21 foundation under
+`StockGuidance/java/` with current sources in `src/main/java`; historical files
+under `src/stockguidance` remain outside the build as unsupported legacy readers.
+The active configuration path now uses Jackson typed tree decoding from an
+explicit JSON path, rejects unknown fields, wrong types, missing required values,
+and conflicting `database`/`schema` names, and keeps passwords out of object and
+error text. JDBC access has an explicit MySQL factory, allowlisted identifiers,
+prepared date parameters, read-only repeatable-read transactions, and rollback
+on both successful and failed inspections.
+
+The versioned interchange v1 contract covers source identity, calendar and
+exchange dates, ordered ticker IDs, observed/verified/hole coverage with
+provenance, actual receipt times, UTC `Z` timestamp serialization, availability
+policy, nullable values, revisions, errors, findings, canonical SHA-256 bytes,
+and BigDecimal money with scale-four `HALF_UP` rounding. The fixture
+`StockGuidance/java/fixtures/interchange-v1.json` was generated from current
+Python reference values by `tools/stage7_generate_fixtures.py`; Java tests
+consume its golden hash and verify escaped Unicode, negative/exponent numbers,
+nulls, missing fields, ID gaps/reordering, invalid config, secret-free errors,
+prepared parameters, identifier allowlists, and rollback behavior.
+
+Files changed: `StockGuidance/java/pom.xml`,
+`StockGuidance/java/README.md`, the current Java source/test trees and fixture,
+`src/stockguidance/interchange.py`, `tools/stage7_generate_fixtures.py`, and
+the Java status section in `docs/operations_guide.md`.
+
+Accepted checks: the configured PyCharm Python 3.14.8 executable ran
+`tools/stage7_generate_fixtures.py` and produced fixture hash
+`5e1fa46e012effbb02606d065b410e61a045f7bfddb3b7489f59205e6854ca05`.
+With Maven 3.9.9 and OpenJDK 26.0.2.1 compiling Java 21 bytecode, offline
+`mvn -o test` passed 12 tests and offline `mvn -o -DskipTests package` passed.
+The build uses cached Jackson 2.15.2, JUnit Jupiter 5.13.4, compiler 3.13.0,
+Surefire 3.5.3, and the bundled MySQL Connector/J 9.6.0 system jar. Maven
+reports the expected system-path warning; no network dependency download, live
+provider call, database connection, schema setup, production write, or model
+port was used.
+
+Stages 8-10 remain pending. Stage 8 must select a bounded measured validator
+operation and compare complete Python/Java report parity before any opt-in
+backend is considered.
