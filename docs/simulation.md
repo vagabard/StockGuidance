@@ -262,3 +262,8 @@ stored original receipts and the same execution/schedule rules. Missing openings
 skip anchored decisions without dropping positions or moving sale sessions. The
 retained hardcoded key is `DEFAULT_API_KEY` in `polygon_fetch.py`; eventual
 external configuration remains future work and its value is never copied here.
+
+The cross-stage acceptance fixture also proves the fixed-model chronology: the
+subset artifact's final mature label precedes the later simulation range, the
+simulation performs no retraining, and feature/label reads do not cross each
+decision cutoff. Use the reported artifact ID rather than an archive file hash.

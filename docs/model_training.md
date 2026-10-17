@@ -287,6 +287,12 @@ See [the grouped retirement list](stage9_retirement.md) for exact source paths.
 The retained hardcoded provider key is `DEFAULT_API_KEY` in `polygon_fetch.py`;
 eventual external configuration remains future work. Training does not load it.
 
+Stage 10 acceptance uses the same typed training workflow to fit a small ordered
+subset, reads `artifact.path` and the canonical `artifact.artifact_id` from the
+training result, and evaluates that artifact only over a later fixed period.
+The acceptance fixture is `tests/stage10/test_cross_stage_acceptance.py`; it uses
+fake receipts and a disposable close repository, not live provider history.
+
 ```powershell
 & '<configured-python>' -m pytest tests/stage6 tests/test_sparse_linear.py tests/test_random_percent_linear.py -q
 & '<configured-python>' -m pytest tests -q

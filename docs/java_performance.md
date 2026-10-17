@@ -96,6 +96,24 @@ change was justified by this offline run. A future read-only reconciliation
 profile should first test bounded streaming row batches and reuse of already
 decoded session maps before considering a port.
 
+## Stage 7/8 current status
+
+Stage 7 is the supported Java foundation. It uses the explicit JSON database
+configuration, typed Jackson decoding, the versioned Python/Java interchange
+contract, prepared SQL parameters, allowlisted identifiers, and read-only
+repeatable-read transactions. Run its offline checks from
+`StockGuidance/java` with `mvn -o test` and `mvn -o -DskipTests package`.
+
+Stage 8 is an opt-in `stockguidance.validation.ValidatorMain` backend for the
+bounded raw/derived reconciliation operation. It streams bounded read-only
+queries, preserves nullable values and chronology, and reports unsupported
+checks explicitly. The Python validator remains the default; the Java backend
+does not download, write, repair, initialize schema, or update manifests.
+
+No disposable MySQL benchmark including JVM startup, transport, and peak memory
+was available, so no Java production speedup or hotspot port is claimed. Stage
+9 did not add a Java import or simulation port.
+
 ## Java correctness review
 
 The Java sources under `StockGuidance/java/src/stockguidance` are not a valid

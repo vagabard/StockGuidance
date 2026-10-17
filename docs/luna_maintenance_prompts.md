@@ -2,8 +2,8 @@
 
 These are implementation tasks for the model you select as Luna 5.6. Use one
 numbered prompt per conversation, in order, with the shared preamble below.
-Prompts 4 and 7-9 are conditional as described. Stages 1-9 are marked complete
-in the handoffs below; Stage 10 remains pending. Read [operations_guide.md](operations_guide.md) for current commands
+Prompts 4 and 7-9 are conditional as described. Stages 1-10 are marked complete
+in the handoffs below. Read [operations_guide.md](operations_guide.md) for current commands
 and [database_validation.md](database_validation.md) for the existing audit contract.
 
 This brief updates the history requirement in `REFACTORING_PROMPTS.md`: retained
@@ -736,5 +736,41 @@ batch/incremental workflows, repair round-trip behavior and chronology. No
 live provider, production database, schema setup, production write or
 credential-bearing subprocess was used.
 
-Stage 10 remains pending: reconcile the user-facing documentation and run its
-cross-stage offline acceptance checks.
+### Stage 10 handoff (2026-10-17)
+
+Status: complete. Reconciled the user-facing README and operations, validation,
+updating, training, simulation, and Java-performance guides with the implemented
+Stages 1-9 contracts. The documentation now describes automatic local/current
+discovery, optional source-bound overrides, old-archive preservation, unresolved
+capability and gap findings, strict versus explicitly opted-in research mode,
+subset lookback/label context, later fixed evaluation, walk-forward training,
+canonical artifact ID retrieval, and the supported Java foundation/opt-in
+read-only validator status.
+
+Added `tests/stage10/test_cross_stage_acceptance.py`, an offline disposable
+fixture covering retained 2010 data with provider access beginning in 2021,
+capability-bounded fetches, in-access gap repair, a blocked old gap, subset
+training, artifact identity, and a later fixed simulation without future reads.
+The fixture uses fake provider/database/close repositories and performs no live
+provider calls, production database writes, schema setup, or repairs. The
+post-Stage-9 import regression fix in commit `f90a67c` remains intact.
+
+Accepted checks: the configured PyCharm Python 3.14.8 executable ran
+`python -m pytest tests/stage10 -q` with 57 passed in 39.45 seconds, and the
+complete `python -m pytest tests -q --tb=short` suite passed 738 tests with the
+three existing Torch nested-tensor warnings. The four main CLI `--help` checks
+passed, and parser validation of all three Stage 5 JSON examples passed. The
+post-Stage-9 import regression remains covered by the full suite and the Stage
+6/9 tests.
+
+From `StockGuidance/java`, offline `mvn -o test` passed 17 Java tests and
+`mvn -o -DskipTests package` passed. Maven emitted its existing system-scoped
+MySQL connector warning; no network dependency resolution was used. The full
+`python -m mypy` check remains limited by the pre-existing
+`src/stockguidance/validation/java_backend.py:70` `Any | None` iteration error;
+no Stage 10 production Python source changed, so that unrelated Stage 8 issue
+was not broadened here. `git diff --check` passed.
+
+No live provider calls, production database writes, schema setup, production
+repairs, or credential-bearing subprocesses were used. Stage 10 has no remaining
+prerequisites; Python remains the default operational and semantic backend.

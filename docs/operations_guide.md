@@ -1,15 +1,16 @@
 # Operating StockGuidance
 
 This guide describes the current Python commands and the shared automatic
-history discovery contract. Stages 1-9 of the implementation prompts are
-complete; validation and updating now use the shared resolver. Implementation prompts are in
-[luna_maintenance_prompts.md](luna_maintenance_prompts.md). Stage 10 remains
-pending. Start with the Python workflow. The historical Java
-prototypes remain unfinished and separate from the Stage 7 foundation; Stage 6
-measured the Python paths without treating them as semantically equivalent. See
+history discovery contract. Stages 1-10 of the implementation prompts are
+complete; validation and updating use the shared resolver. Implementation prompts are in
+[luna_maintenance_prompts.md](luna_maintenance_prompts.md). Start with the
+Python workflow. The historical Java prototypes remain unfinished and separate
+from the Stage 7 foundation; Stage 6 measured the Python paths without treating
+them as semantically equivalent. See
 [java_performance.md](java_performance.md) for the reproducible offline study.
 
-## Java and performance status+
+
+## Java and performance status
 
 Stage 6 is complete as a bounded offline performance study. The large fixed
 fixture measured raw/derived reconciliation, JSON response decoding and
@@ -33,8 +34,18 @@ rollback, and binds date values through prepared statements with allowlisted
 identifiers. The versioned interchange contract covers source identity,
 calendar/exchange dates, ordered ticker IDs, coverage provenance, receipt times,
 availability policy, nulls, revisions, errors, findings, canonical hashes and
-BigDecimal money rounding. Python remains the semantic reference; no Java
-provider, writer, validator, or model-training implementation was introduced.
+BigDecimal money rounding. Stage 8 adds an opt-in bounded read-only Java
+validator for the measured raw/derived reconciliation operation. It does not
+fetch providers, write databases, repair rows, or replace the Python default.
+Python remains the semantic reference and owns provider, calendar, feature,
+training, and simulation policy.
+
+From `StockGuidance/java`, the offline Java checks are:
+
+```powershell
+mvn -o test
+mvn -o -DskipTests package
+```
 
 ## Recommended order
 
@@ -291,6 +302,11 @@ staggered balances, anchored skips, end positions, exact ticker order and the
 absence of future feature/label reads. It never initializes MySQL or calls a
 provider.
 
+The cross-stage Stage 10 acceptance fixture is
+`tests/stage10/test_cross_stage_acceptance.py`. It keeps retained 2010 evidence
+when provider access begins in 2021, repairs an in-access gap, blocks an older
+gap, trains a subset, and runs a later fixed simulation without future reads.
+
 Inspect `training_samples`, `excluded_training`, the artifact reference and
 metrics. A small CPU trial should establish readiness before a long fit. The
 checkpoint supports a compatible continuation; use a new fit for an independent
@@ -409,11 +425,12 @@ behavior, null/duplicate/orphan handling and zero writes. A disposable MySQL
 benchmark including JVM startup and transport was not available, so the Python
 implementation remains the default and no production speedup is claimed.
 
-## Completion checklist
+## Current completion checklist
 
-After the prompts are implemented, a normal run should discover retained history
-and current published coverage without history arguments, preserve older local
-data outside current provider access, report unrecoverable gaps explicitly, and
-support explicit subsets. Record the resolved bounds, provenance, data revision,
-training exclusions, artifact ID and simulation configuration with each experiment.
-Never describe a stage as implemented solely because its prompt or guide exists.
+A normal run discovers retained history and current published coverage without
+history arguments, preserves older local data outside current provider access,
+reports unrecoverable gaps explicitly, and supports explicit subsets. Record the
+resolved bounds, provenance, data revision, training exclusions, canonical
+artifact ID and simulation configuration with each experiment. The offline
+cross-stage acceptance fixture covers these handoffs without live downloads or
+production repairs.

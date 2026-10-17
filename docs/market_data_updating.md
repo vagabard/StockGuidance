@@ -29,6 +29,13 @@ still reconciles source evidence and database records throughout the requested
 scope. Rechecking an archive does download its due sessions; it is not an
 assumption that old provider data can never change.
 
+The safe operational sequence is `validate -> update/repair -> validate`.
+Validation is always offline and read-only. An update may reconcile retained
+local evidence before attempting network work, but a missing or corrupt archive
+outside current provider capability remains unresolved and is never deleted or
+marked complete. A fresh verified capability beginning in 2021 can therefore
+bound fetches while preserving a retained 2010 archive.
+
 This PowerShell template intentionally requires real, supplied values:
 
 ```powershell
@@ -123,6 +130,10 @@ closures, deferred availability, stale refreshes, failures, and the resulting
 - `2`: incomplete or unverified coverage, or no currently available trading data.
   Argument parsing also uses argparse's exit code `2`.
 - `1`: required setup, provider, storage, or completion-persistence failure.
+
+The offline cross-stage acceptance fixture in
+`tests/stage10/test_cross_stage_acceptance.py` exercises this preservation and
+bounded-fetch behavior with a fake provider and disposable SQLite storage.
 
 Data revisions include source/request/interval identity, normalized raw contents,
 actual stored derived contents, dependency fingerprints, and the derived spec.

@@ -3,15 +3,16 @@
 For the recommended update/validation/training/simulation order, see the
 [operations guide](operations_guide.md). Shared Stage 1 source-scoped discovery
 and the Stage 2 read-only validator are implemented in
-`market_data/discovery.py` and `cli/validation_setup.py`. Conditional Java work
-and later update integration remain specified in
-[Luna implementation prompts](luna_maintenance_prompts.md).
+`market_data/discovery.py` and `cli/validation_setup.py`. The opt-in Java
+validator is documented in [java_performance.md](java_performance.md); Python
+remains the default. Stage 10 documentation and acceptance checks are recorded
+in [Luna implementation prompts](luna_maintenance_prompts.md).
 
 Run validation independently of downloading, importing, training, or recommending:
 
 ```powershell
-& '.venv\Scripts\python.exe' -m stockguidance.cli.validate_database --help
-& '.venv\Scripts\python.exe' validate_database.py --help
+& '<configured-python>' -m stockguidance.cli.validate_database --help
+& '<configured-python>' validate_database.py --help
 ```
 
 The `validate_database` console entry point is declared in `pyproject.toml` and becomes available after refreshing the editable installation. Use PyCharm's configured interpreter. Python has been repaired; historical base-installation workarounds in `REFACTORING_PROMPTS.md` are no longer current setup guidance. See the operations guide for the verified interpreter and checkout invocation.
@@ -24,7 +25,7 @@ evidence establishes a scope. Replace the bracketed values with inspected
 evidence when using explicit overrides:
 
 ```powershell
-& '.venv\Scripts\python.exe' -m stockguidance.cli.validate_database `
+& '<configured-python>' -m stockguidance.cli.validate_database `
   --data-root 'data' --dbinfo-file 'dbinfo.id' --adjustment adjusted `
   --history-start '<first-supported-session>' --history-evidence '<boundary provenance>' `
   --start-date '<requested-first-date>' --end-date '<requested-last-date>' `
@@ -44,7 +45,7 @@ Add `--as-of '<timezone-aware ISO timestamp>'` for a historical cutoff no later 
 Add `--format json` for machine-readable output. Redirect stdout to save a report; validation itself does not persist one:
 
 ```powershell
-& '.venv\Scripts\python.exe' -m stockguidance.cli.validate_database <same-arguments> --format json > validation.json
+& '<configured-python>' -m stockguidance.cli.validate_database <same-arguments> --format json > validation.json
 ```
 
 ## Results and exit codes
@@ -95,7 +96,7 @@ records and are rejected by the updater until an authorized, evidenced scope is
 provided:
 
 ```powershell
-& '.venv\Scripts\python.exe' -m stockguidance.cli.update_market_data `
+& '<configured-python>' -m stockguidance.cli.update_market_data `
   --data-root 'data' --dbinfo-file 'dbinfo.id' --adjustment adjusted `
   --repair-plan 'validation.json' `
   --publication-delay-minutes '<documented delay>' --publication-evidence '<publication provenance>' `
@@ -119,7 +120,7 @@ Updater and validator share source/raw/derived assessment and database integrity
 
 The retained hardcoded key is `DEFAULT_API_KEY` in `polygon_fetch.py`; it should eventually become external configuration. Validation does not load it or contact the provider. Reports and repair plans contain no credentials.
 
-Stage 10 adds `--signal-mode entry_open` with explicit `--ticker-ids` and
+The implemented entry-opening workflow adds `--signal-mode entry_open` with explicit `--ticker-ids` and
 `--lookback-sessions`. It audits read-only opening receipts, including the current
 unfinished daily session, without querying that session's final daily bar.
 `entry_open_observations` findings distinguish missing/unverified/late openings.
