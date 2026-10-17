@@ -4,9 +4,10 @@ from enum import StrEnum
 from stockguidance.calendar.decisions import DecisionTiming
 from stockguidance.config.source import PriceAdjustment
 from stockguidance.config.validation import require_enum, require_positive_int
-from stockguidance.market_data.availability import ObservationTiming
+from stockguidance.market_data.availability import AvailabilityPolicy, ObservationTiming
 from stockguidance.market_data.intervals import ObservationInterval, require_daily_interval
 from stockguidance.market_data.openings import OPENING_ENDPOINT, OPENING_METHOD
+from stockguidance.market_data.publication import DailyPublicationPolicy
 
 
 class SignalMode(StrEnum):
@@ -91,9 +92,12 @@ class FeatureSpec:
 			return None
 		return {"endpoint": OPENING_ENDPOINT, "method": OPENING_METHOD, "availability": "actual_receipt_after_first_minute_and_no_later_than_decision_cutoff", "missing_policy": "entire_sample_unavailable_if_any_ordered_ticker_is_missing", "transformation": CloseFeature.ENTRY_OPEN_RETURN.value}
 
-	def validate_observation(self, observation: ObservationTiming, timing: DecisionTiming) -> None:
+	def validate_observation(self, observation: ObservationTiming, timing: DecisionTiming, *, availability_policy: AvailabilityPolicy = AvailabilityPolicy.STRICT, publication: DailyPublicationPolicy | None = None) -> None:
 		if not isinstance(observation, ObservationTiming) or not isinstance(timing, DecisionTiming):
 			raise ValueError("Feature availability requires observation and decision timing contracts")
+		if not isinstance(availability_policy, AvailabilityPolicy):
+			raise ValueError("Feature availability requires a typed availability policy")
+		availability_policy.validate_features(self)
 		if observation.session.calendar_id != timing.entry_session.calendar_id:
 			raise ValueError("Feature observations must use the decision calendar")
 		if observation.session.sequence > timing.previous_session.sequence:
@@ -102,5 +106,5 @@ class FeatureSpec:
 			raise ValueError("Feature observation falls outside the specified lookback")
 		if observation.observed_at > timing.previous_session.closes_at:
 			raise ValueError("Feature observation must not follow the previous completed close")
-		if not observation.is_available_at(timing.decision_cutoff):
+		if not availability_policy.observation_available_at(observation, timing.decision_cutoff, publication):
 			raise ValueError("Feature observation was not available at the decision cutoff")

@@ -89,6 +89,8 @@ send email, simulate trades or discover models in experiment directories.
   "start_date": "2024-07-03",
   "end_date": "2024-07-08",
   "training_cutoff": "2024-07-09T19:00:00+00:00",
+  "availability_policy": "strict",
+  "data_snapshot": null,
   "publication_delay_minutes": 15,
   "publication_evidence": "Fixture-only policy; replace with actual evidence",
   "decision_minutes_before_close": 30,
@@ -114,6 +116,20 @@ receipt timestamps. A historical download made today is not evidence of earlier
 availability. Current evidence cannot reconstruct overwritten revisions. Missing
 or late historical observations remain unavailable; the command never invents
 receipt times or falls back to legacy caches/derived target columns.
+
+`availability_policy` defaults to `strict`. The explicit opt-in value
+`retrospective_daily_previous_close` is for research only and requires an aware
+`data_snapshot` timestamp at or after `training_cutoff`. It accepts verified
+backfilled daily previous closes and labels when the calendar close plus the
+evidenced `publication_delay_minutes` would have preceded each sample cutoff.
+The stored `ObservationTiming.available_at` receipt remains unchanged, and the
+snapshot, policy and data revision are retained in sample/cache identities and
+the exported artifact. This is an availability assumption, not an original
+point-in-time replay; corrected/adjusted history and the selected universe may
+contain hindsight. The policy rejects `entry_open`, synthetic opening evidence,
+future snapshots and immature labels. Strict and retrospective caches/artifacts
+cannot be mixed; strict artifacts remain strict when their legacy metadata is
+unambiguous. Production recommendation commands reject retrospective artifacts.
 
 ## Programmatic API and chronology
 

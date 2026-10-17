@@ -63,11 +63,11 @@ def recommend(job: RecommendationJob, boundary: HistoryBoundary, calendar: Sessi
 		validation = validate_database(job.source, ValidationSettings(job.start, job.end, job.publication, request.timing.decision_cutoff, close_features, job.target), boundary, calendar, services.validation, clock)
 		if not validation.complete:
 			raise ValueError("Incomplete validation")
-		sample = build_sample(job.features, job.target, request.timing, boundary, calendar, job.publication, services.closes)
+		sample = build_sample(job.features, job.target, request.timing, boundary, calendar, job.publication, services.closes, availability_policy=job.availability_policy)
 		if sample.features.values is None:
 			raise ValueError("Unavailable inference sample")
 		query = CloseQuery(SessionQuery(boundary, (request.timing.previous_session,), request.timing.decision_cutoff), job.features.ticker_ids)
-		eligibility = assess_eligibility(job.features.ticker_ids, job.eligibility, request.timing, services.eligibility.read(query))
+		eligibility = assess_eligibility(job.features.ticker_ids, job.eligibility, request.timing, services.eligibility.read(query), job.availability_policy, job.publication)
 		if any(item.state is EligibilityState.UNAVAILABLE for item in eligibility):
 			raise _failure(WorkflowStage.VALIDATION, FailureCode.NOT_READY, "Required previous-session transaction counts are unavailable by the decision cutoff")
 		if not any(item.state is EligibilityState.ELIGIBLE for item in eligibility):
@@ -80,7 +80,7 @@ def recommend(job: RecommendationJob, boundary: HistoryBoundary, calendar: Sessi
 	if job.retraining is not None:
 		try:
 			plan = job.retraining
-			training_request = HistoryTrainingRequest(plan.decisions, request.timing.decision_cutoff, job.features, job.target, plan.configuration, plan.artifact_path)
+			training_request = HistoryTrainingRequest(plan.decisions, request.timing.decision_cutoff, job.features, job.target, plan.configuration, plan.artifact_path, availability_policy=job.availability_policy)
 			training = (trainer or train_from_history)(training_request, boundary, calendar, job.publication, services.closes)
 		except Exception:
 			raise _failure(WorkflowStage.TRAINING, FailureCode.TRAINING_FAILED, "Required mature-outcome training or artifact export failed") from None

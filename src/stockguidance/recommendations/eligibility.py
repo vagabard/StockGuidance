@@ -3,8 +3,9 @@ from enum import StrEnum
 
 from stockguidance.calendar.decisions import DecisionTiming
 from stockguidance.config.validation import require_enum, require_positive_int, require_text
-from stockguidance.market_data.availability import ObservationTiming
+from stockguidance.market_data.availability import AvailabilityPolicy, ObservationTiming
 from stockguidance.market_data.identity import content_id
+from stockguidance.market_data.publication import DailyPublicationPolicy
 
 
 @dataclass(frozen=True)
@@ -53,18 +54,20 @@ class TickerEligibility:
 			raise ValueError("Unavailable eligibility must remain explicit")
 
 
-def assess_eligibility(ticker_ids: tuple[int, ...], policy: EligibilityPolicy, timing: DecisionTiming, observations: tuple[LiquidityObservation, ...]) -> tuple[TickerEligibility, ...]:
+def assess_eligibility(ticker_ids: tuple[int, ...], policy: EligibilityPolicy, timing: DecisionTiming, observations: tuple[LiquidityObservation, ...], availability_policy: AvailabilityPolicy = AvailabilityPolicy.STRICT, publication: DailyPublicationPolicy | None = None) -> tuple[TickerEligibility, ...]:
 	if not isinstance(policy, EligibilityPolicy) or not isinstance(timing, DecisionTiming) or not isinstance(ticker_ids, tuple) or not ticker_ids or len(set(ticker_ids)) != len(ticker_ids):
 		raise ValueError("Eligibility requires a policy, timing and unique ordered ticker IDs")
 	if not isinstance(observations, tuple) or any(not isinstance(item, LiquidityObservation) for item in observations):
 		raise ValueError("Liquidity observations must be an immutable typed tuple")
+	if not isinstance(availability_policy, AvailabilityPolicy):
+		raise ValueError("Eligibility requires a typed availability policy")
 	if len({item.ticker_id for item in observations}) != len(observations) or any(item.ticker_id not in ticker_ids for item in observations):
 		raise ValueError("Liquidity observations contain duplicate or unexpected ticker IDs")
 	by_ticker = {item.ticker_id: item for item in observations}
 	result: list[TickerEligibility] = []
 	for ticker_id in ticker_ids:
 		observation = by_ticker.get(ticker_id)
-		if observation is None or observation.timing.session != timing.previous_session or observation.timing.available_at > timing.decision_cutoff:
+		if observation is None or observation.timing.session != timing.previous_session or not availability_policy.observation_available_at(observation.timing, timing.decision_cutoff, publication):
 			result.append(TickerEligibility(ticker_id, EligibilityState.UNAVAILABLE, "Required previous-session transaction count is unavailable by the decision cutoff", None))
 		else:
 			allowed = observation.transactions >= policy.minimum_transactions

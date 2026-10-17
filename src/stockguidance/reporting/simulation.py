@@ -28,6 +28,8 @@ def simulation_payload(result: SimulationResult) -> dict[str, object]:
 		"cadence_basis": "scheduled_buy_decisions_from_allocation_anchor_including_skips",
 		"evaluation": "fixed_pre_period_model" if result.score_policy.retrain_every_buy_decisions is None else "chronological_retraining",
 		"source": asdict(request.source), "features": {**asdict(request.features), "version": request.features.version, "layout": request.features.layout},
+		"availability_policy": request.availability_policy.value, "availability_assumption": request.availability_policy.assumption, "point_in_time_replay": not request.availability_policy.retrospective, "data_snapshot": None if request.data_snapshot is None else request.data_snapshot.isoformat(),
+		"research_disclaimer": None if not request.availability_policy.retrospective else "Retrospective research assumes historical publication timing; corrected/adjusted history and the selected universe may contain hindsight and do not establish an original point-in-time replay.",
 		"target": {**asdict(request.target), "formula": request.target.raw_formula},
 		"calendar": {"id": request.allocation.anchor_session.calendar_id, "version": result.calendar_version},
 		"start_session": request.start.isoformat(), "end_session": request.end.isoformat(), "decision_lead_seconds": request.decision_lead.total_seconds(),

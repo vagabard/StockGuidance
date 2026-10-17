@@ -9,7 +9,8 @@ from stockguidance.config.source import SourceConfig
 from stockguidance.config.validation import require_positive_int
 from stockguidance.features.specification import FeatureSpec
 from stockguidance.market_data.corrections import CorrectionPolicy
-from stockguidance.market_data.identity import decode_source, text_field
+from stockguidance.market_data.availability import AvailabilityPolicy
+from stockguidance.market_data.identity import decode_source, mapping, text_field
 from stockguidance.market_data.providers.polygon import GROUPED_ENDPOINT, GROUPED_UNIVERSE
 from stockguidance.market_data.publication import DailyPublicationPolicy
 from stockguidance.portfolio.policy import AllocationPolicy
@@ -39,6 +40,7 @@ class RecommendationConfiguration:
 	eligibility: EligibilityPolicy
 	top_k: int
 	retraining: RetrainingConfiguration | None
+	availability_policy: AvailabilityPolicy = AvailabilityPolicy.STRICT
 
 	def __post_init__(self) -> None:
 		require_positive_int(self.top_k, "top_k")
@@ -51,7 +53,10 @@ class RecommendationConfiguration:
 
 
 def load_configuration(path: Path) -> RecommendationConfiguration:
-	fields = exact_mapping(json.loads(path.read_text(encoding="utf-8")), ("source", "data_root", "database_config", "features", "start_date", "end_date", "entry_date", "allocation", "publication", "corrections", "eligibility", "top_k", "retraining"))
+	fields = mapping(json.loads(path.read_text(encoding="utf-8")))
+	required = ("source", "data_root", "database_config", "features", "start_date", "end_date", "entry_date", "allocation", "publication", "corrections", "eligibility", "top_k", "retraining")
+	if set(fields) - {*required, "availability_policy"} or any(name not in fields for name in required):
+		raise ValueError("Incomplete or unsupported recommendation configuration fields")
 	identity = decode_source(exact_mapping(fields["source"], ("provider", "endpoint", "market", "universe", "adjustment", "interval")))
 	if (identity.provider, identity.endpoint, identity.market, identity.universe) != ("polygon", GROUPED_ENDPOINT, "us-stocks", GROUPED_UNIVERSE):
 		raise ValueError("This CLI requires the declared Polygon grouped request; typed workflows accept injected sources")
@@ -69,4 +74,4 @@ def load_configuration(path: Path) -> RecommendationConfiguration:
 		if start > end or not timedelta(0) < lead < timedelta(days=1):
 			raise ValueError("Invalid retraining bounds or decision lead")
 		retraining = RetrainingConfiguration(start, end, lead, decode_training_configuration(training["training"], training["model"]))
-	return RecommendationConfiguration(source, features, None if fields["start_date"] is None else date.fromisoformat(text_field(fields, "start_date")), date.fromisoformat(text_field(fields, "end_date")), date.fromisoformat(text_field(fields, "entry_date")), AllocationPolicy(text_field(allocation, "policy")), date.fromisoformat(text_field(allocation, "anchor_date")), DailyPublicationPolicy(timedelta(minutes=number(publication["delay_minutes"])), text_field(publication, "evidence")), CorrectionPolicy(timedelta(days=number(corrections["recent_window_days"])), timedelta(hours=number(corrections["recent_refresh_hours"])), timedelta(days=number(corrections["archive_refresh_days"])), text_field(corrections, "evidence")), EligibilityPolicy(integer(eligibility["minimum_transactions"])), integer(fields["top_k"]), retraining)
+	return RecommendationConfiguration(source, features, None if fields["start_date"] is None else date.fromisoformat(text_field(fields, "start_date")), date.fromisoformat(text_field(fields, "end_date")), date.fromisoformat(text_field(fields, "entry_date")), AllocationPolicy(text_field(allocation, "policy")), date.fromisoformat(text_field(allocation, "anchor_date")), DailyPublicationPolicy(timedelta(minutes=number(publication["delay_minutes"])), text_field(publication, "evidence")), CorrectionPolicy(timedelta(days=number(corrections["recent_window_days"])), timedelta(hours=number(corrections["recent_refresh_hours"])), timedelta(days=number(corrections["archive_refresh_days"])), text_field(corrections, "evidence")), EligibilityPolicy(integer(eligibility["minimum_transactions"])), integer(fields["top_k"]), retraining, AvailabilityPolicy(str(fields.get("availability_policy", AvailabilityPolicy.STRICT.value))))

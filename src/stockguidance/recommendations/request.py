@@ -4,6 +4,7 @@ from stockguidance.calendar.decisions import DecisionTiming
 from stockguidance.config.source import SourceConfig
 from stockguidance.features.specification import FeatureSpec
 from stockguidance.market_data.requests import MarketDataRequest
+from stockguidance.market_data.availability import AvailabilityPolicy
 from stockguidance.models.policy import ModelSelection
 from stockguidance.portfolio.policy import AllocationSpec
 from stockguidance.config.validation import require_positive_int
@@ -22,6 +23,7 @@ class RecommendationRequest:
 	allocation: AllocationSpec
 	eligibility: EligibilityPolicy = EligibilityPolicy()
 	top_k: int = 5
+	availability_policy: AvailabilityPolicy = AvailabilityPolicy.STRICT
 
 	def __post_init__(self) -> None:
 		for value, expected in (
@@ -34,6 +36,10 @@ class RecommendationRequest:
 			if not isinstance(value, expected):
 				raise ValueError("Recommendation fields must use their typed contracts")
 		require_positive_int(self.top_k, "top_k")
+		if not isinstance(self.availability_policy, AvailabilityPolicy):
+			raise ValueError("Recommendation requires a typed availability policy")
+		if self.availability_policy is not AvailabilityPolicy.STRICT:
+			raise ValueError("Retrospective research artifacts are not supported for production recommendations")
 		if self.source.identity != self.coverage.source:
 			raise ValueError("Coverage and configured source identities differ")
 		if self.features.interval is not self.source.identity.interval:

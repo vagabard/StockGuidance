@@ -62,8 +62,9 @@ def samples(calendar):
 			entry = calendar.session(date(2024, 7, day))
 			return DecisionTiming(calendar.shift(entry, -1), entry, calendar.shift(entry, 1), entry.closes_at - timedelta(minutes=30))
 
-		def build(self, day=5, *, label_cutoff=None, specification=None, publication_override=None):
-			return build_sample(specification or self.specification, self.target, self.decision(day), boundary, calendar, publication_override or publication, repository, label_cutoff=label_cutoff)
+		def build(self, day=5, *, label_cutoff=None, specification=None, publication_override=None, availability_policy=None, data_snapshot=None):
+			kwargs = {} if availability_policy is None else {"availability_policy": availability_policy, "data_snapshot": data_snapshot}
+			return build_sample(specification or self.specification, self.target, self.decision(day), boundary, calendar, publication_override or publication, repository, label_cutoff=label_cutoff, **kwargs)
 
 		def revise(self, day, ticker_id, close):
 			key = calendar.session(date(2024, 7, day)), ticker_id

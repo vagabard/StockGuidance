@@ -1,7 +1,7 @@
 # Operating StockGuidance
 
 This guide describes the current Python commands and the shared automatic
-history discovery contract. Stages 1-3 of the implementation prompts are
+history discovery contract. Stages 1-4 of the implementation prompts are
 complete; validation and updating now use the shared resolver. Implementation prompts are in
 [luna_maintenance_prompts.md](luna_maintenance_prompts.md). Those prompts have
 not all been implemented by adding this guide. Start with the Python workflow;
@@ -215,6 +215,8 @@ rows or renumber database IDs. Start with the complete configuration example in
 | `features.signal_mode` | `previous_close` for the initial workflow |
 | `start_date`, `end_date` | Inclusive **entry-session** training subset |
 | `training_cutoff` | Aware timestamp when fitting is allowed to know its mature labels |
+| `availability_policy` | `strict` (default) or explicitly opted-in `retrospective_daily_previous_close` research mode |
+| `data_snapshot` | Required aware research snapshot; keep `null` for strict mode |
 | Publication fields | Your evidenced delay and provenance |
 | `evaluation` | A strictly later holdout, or `null` initially |
 
@@ -250,7 +252,7 @@ experiment or changed split. Training MAE is an in-sample statistic.
 
 ### Historical downloads and original decision times
 
-**A successful download today does not currently make old dates trainable.**
+**A successful download today does not make old dates strict-trainable.**
 `datasets/building.py` preserves each sample's original feature-decision cutoff,
 and the verified repository checks actual receipt evidence. Prices fetched in
 2026 for a 2022 sample cannot prove that those exact observations were known in
@@ -258,13 +260,16 @@ and the verified repository checks actual receipt evidence. Prices fetched in
 feature decision to today. Fabricating earlier receipt times would hide this issue.
 
 For strict historical evaluation, use original contemporaneous evidence and
-preserved revisions. Where it is missing, samples remain excluded. If you want
-research on a backfilled archive, prompt 4 specifies a separate, explicitly
-labeled retrospective mode that assumes historical publication availability.
-It is proposed functionality: **there is no such CLI switch today**. It must
-retain real receipt times, reject future-session inputs, and label correction,
-adjustment and universe hindsight limitations. It cannot claim a point-in-time
-replay. `entry_open` needs separate evidence and is excluded from that proposal.
+preserved revisions. Where it is missing, samples remain excluded. For research
+on a verified backfilled archive, set the training and simulation JSON field
+`availability_policy` to `retrospective_daily_previous_close` and provide the
+aware `data_snapshot` timestamp. This assumes each daily previous close and
+mature label was available at calendar close plus the evidenced publication
+delay; it never edits `available_at` or fabricates opening evidence. The policy
+is rejected for `entry_open`, future/unpublished input, immature labels and
+production recommendations. Reports and artifacts retain the policy, snapshot
+and revisions and must state that corrected/adjusted history and the chosen
+universe may contain hindsight; this is not an original point-in-time replay.
 
 ## Simulate the resulting model
 

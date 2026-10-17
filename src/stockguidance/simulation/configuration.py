@@ -1,11 +1,12 @@
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
 
 from stockguidance.config.source import SourceIdentity
-from stockguidance.config.validation import require_date, require_enum, require_positive_int
+from stockguidance.config.validation import require_aware_datetime, require_date, require_enum, require_positive_int
 from stockguidance.features.specification import FeatureSpec
+from stockguidance.market_data.availability import AvailabilityPolicy
 from stockguidance.portfolio.policy import AllocationSpec
 from stockguidance.portfolio.precision import ExecutionPolicy, require_money
 from stockguidance.recommendations.eligibility import EligibilityPolicy
@@ -30,6 +31,8 @@ class SimulationRequest:
 	eligibility: EligibilityPolicy = EligibilityPolicy()
 	top_k: int = 5
 	execution: ExecutionPolicy = ExecutionPolicy()
+	availability_policy: AvailabilityPolicy = AvailabilityPolicy.STRICT
+	data_snapshot: datetime | None = None
 
 	def __post_init__(self) -> None:
 		for value, expected in ((self.source, SourceIdentity), (self.features, FeatureSpec), (self.target, TargetSpec), (self.allocation, AllocationSpec), (self.eligibility, EligibilityPolicy), (self.execution, ExecutionPolicy)):
@@ -39,6 +42,13 @@ class SimulationRequest:
 		require_date(self.end, "simulation end")
 		require_money(self.initial_capital, "initial capital")
 		require_positive_int(self.top_k, "top_k")
+		if not isinstance(self.availability_policy, AvailabilityPolicy):
+			raise ValueError("Simulation requires a typed availability policy")
+		self.availability_policy.validate_features(self.features)
+		if self.data_snapshot is not None:
+			require_aware_datetime(self.data_snapshot, "data snapshot")
+		if self.availability_policy.retrospective and self.data_snapshot is None:
+			raise ValueError("Retrospective simulation requires an explicit data snapshot")
 		if self.start > self.end or self.start < self.allocation.anchor_session.session_date or self.initial_capital <= 0:
 			raise ValueError("Invalid evaluation period, anchor or capital")
 		if self.source.adjustment is not self.features.adjustment or self.source.interval is not self.features.interval:

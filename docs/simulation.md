@@ -134,6 +134,8 @@ email or trade submission occur in simulation.
   },
   "start_date": "2024-07-08",
   "end_date": "2024-07-11",
+  "availability_policy": "strict",
+  "data_snapshot": null,
   "allocation": {"policy": "alternate_sessions", "anchor_date": "2024-07-08"},
   "initial_capital": "1000.00",
   "decision_minutes_before_close": 30,
@@ -183,6 +185,18 @@ fills/marks/mature benchmarks; **1** means a required setup/model/training/
 execution/reporting failure. Expected end-period open positions and immature
 benchmarks do not by themselves make a run incomplete. Inspect `successful`,
 `complete`, events and per-benchmark completeness separately.
+
+Simulation configuration accepts the same `availability_policy` values as
+training. `strict` is the default and uses actual receipts at each historical
+decision cutoff. `retrospective_daily_previous_close` requires the explicit
+aware `data_snapshot` and the matching research artifact; it applies the
+evidenced close-plus-publication-delay assumption to verified previous-close
+features, labels and liquidity while preserving actual receipt times. The
+policy and snapshot are reported, included in sample/cache and artifact
+identities, and must match fixed or chronological-retraining evaluation. It
+rejects `entry_open`, future/unpublished inputs and immature labels. Results
+must be described as retrospective research, not original point-in-time replay;
+current corrected/adjusted history and the chosen universe can contain hindsight.
 
 ## Capital-aware recommendations and state
 

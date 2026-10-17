@@ -8,6 +8,7 @@ from stockguidance.config.validation import require_aware_datetime, require_enum
 from stockguidance.datasets.identity import feature_identity, sample_identity
 from stockguidance.features.construction import FeatureValues
 from stockguidance.features.history_window import WindowState
+from stockguidance.market_data.availability import AvailabilityPolicy
 from stockguidance.targets.construction import TargetValues
 from stockguidance.targets.specification import TargetSpec
 
@@ -33,12 +34,19 @@ class Sample:
 	feature_revision: str
 	data_revision: str
 	calendar_version: str
+	availability_policy: AvailabilityPolicy = AvailabilityPolicy.STRICT
+	data_snapshot: datetime | None = None
 
 	def __post_init__(self) -> None:
 		if not isinstance(self.source, SourceIdentity) or not isinstance(self.timing, DecisionTiming) or not isinstance(self.features, FeatureValues) or not isinstance(self.targets, TargetValues) or not isinstance(self.target_specification, TargetSpec):
 			raise ValueError("Invalid sample contracts")
 		require_enum(self.feature_state, WindowState, "feature state")
 		require_enum(self.target_state, TargetState, "target state")
+		require_enum(self.availability_policy, AvailabilityPolicy, "availability policy")
+		if self.data_snapshot is not None:
+			require_aware_datetime(self.data_snapshot, "data snapshot")
+		if self.availability_policy.retrospective and self.data_snapshot is None:
+			raise ValueError("Retrospective samples require an explicit data snapshot")
 		if self.source.adjustment is not self.features.specification.adjustment or self.source.interval is not self.features.specification.interval:
 			raise ValueError("Sample source and feature semantics differ")
 		if len(self.targets.raw) != len(self.features.specification.ticker_ids):
@@ -62,8 +70,8 @@ class Sample:
 
 	@property
 	def feature_cache_key(self) -> str:
-		return feature_identity(self.source, self.features.specification, self.timing, self.feature_revision, self.calendar_version)
+		return feature_identity(self.source, self.features.specification, self.timing, self.feature_revision, self.calendar_version, self.availability_policy, self.data_snapshot)
 
 	@property
 	def cache_key(self) -> str:
-		return sample_identity(self.feature_cache_key, self.target_specification, self.label_cutoff, self.data_revision)
+		return sample_identity(self.feature_cache_key, self.target_specification, self.label_cutoff, self.data_revision, self.availability_policy, self.data_snapshot)

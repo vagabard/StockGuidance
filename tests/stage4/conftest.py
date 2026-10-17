@@ -3,6 +3,7 @@ from dataclasses import dataclass
 import pytest
 
 from stage3.conftest import calendar, harness
+from stage5.conftest import samples
 from stockguidance.database.repositories.mysql_validation import MySQLValidationRepository
 from stockguidance.workflows.validate_database import ValidationSettings, validate_database
 

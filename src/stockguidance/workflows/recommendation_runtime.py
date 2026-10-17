@@ -46,7 +46,7 @@ def assemble_and_recommend(configuration: RecommendationConfiguration, arguments
 		settings = configuration.retraining
 		decisions = tuple(DecisionTiming(calendar.shift(session, -1), session, calendar.shift(session, 1), session.closes_at - settings.decision_lead) for session in calendar.sessions(settings.start, settings.end))
 		retraining = RetrainingPlan(decisions, settings.training, arguments.artifact)
-	job = RecommendationJob(configuration.source, configuration.start or boundary.history_start, configuration.end, configuration.entry_date, configuration.features, TargetSpec(), ModelSelection(policy, None if reference is None else reference.artifact_id), AllocationSpec(configuration.allocation_policy, calendar.session(configuration.anchor_date)), configuration.publication, configuration.corrections, configuration.eligibility, configuration.top_k, reference, ArtifactKind(arguments.artifact_kind), retraining)
+	job = RecommendationJob(configuration.source, configuration.start or boundary.history_start, configuration.end, configuration.entry_date, configuration.features, TargetSpec(), ModelSelection(policy, None if reference is None else reference.artifact_id), AllocationSpec(configuration.allocation_policy, calendar.session(configuration.anchor_date)), configuration.publication, configuration.corrections, configuration.eligibility, configuration.top_k, reference, ArtifactKind(arguments.artifact_kind), retraining, configuration.availability_policy)
 	clock = SystemClock()
 	portfolio = None
 	if arguments.portfolio_state is not None:

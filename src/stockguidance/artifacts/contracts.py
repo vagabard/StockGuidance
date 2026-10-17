@@ -5,6 +5,7 @@ from pathlib import Path
 from stockguidance.config.source import SourceIdentity
 from stockguidance.config.validation import require_aware_datetime, require_date, require_text
 from stockguidance.features.specification import FeatureSpec
+from stockguidance.market_data.availability import AvailabilityPolicy
 from stockguidance.models.specification import ModelSpec
 from stockguidance.targets.specification import TargetSpec
 
@@ -17,6 +18,7 @@ class ModelSemantics:
 	calendar_id: str
 	calendar_version: str
 	execution_assumption: str = "pre_close_decision_same_close_fill"
+	availability_policy: AvailabilityPolicy = AvailabilityPolicy.STRICT
 
 	def __post_init__(self) -> None:
 		if not isinstance(self.source, SourceIdentity) or not isinstance(self.features, FeatureSpec) or not isinstance(self.target, TargetSpec):
@@ -25,6 +27,9 @@ class ModelSemantics:
 			raise ValueError("Source and feature semantics disagree")
 		require_text(self.calendar_id, "calendar ID")
 		require_text(self.calendar_version, "calendar version")
+		if not isinstance(self.availability_policy, AvailabilityPolicy):
+			raise ValueError("Availability policy must be typed")
+		self.availability_policy.validate_features(self.features)
 		if self.execution_assumption != "pre_close_decision_same_close_fill":
 			raise ValueError("Unsupported execution assumption")
 
@@ -42,6 +47,7 @@ class TrainingProvenance:
 	excluded_sample_keys: tuple[str, ...]
 	seed: int
 	completed_epochs: int
+	data_snapshot: datetime | None = None
 
 	def __post_init__(self) -> None:
 		require_aware_datetime(self.training_cutoff, "training cutoff")
@@ -51,6 +57,8 @@ class TrainingProvenance:
 		for value in (self.first_entry, self.last_entry, self.last_exit):
 			require_date(value, "training session")
 		require_aware_datetime(self.last_exit_close_at, "last training exit close")
+		if self.data_snapshot is not None:
+			require_aware_datetime(self.data_snapshot, "training data snapshot")
 		if not self.first_entry <= self.last_entry < self.last_exit or self.last_exit_close_at > self.training_cutoff:
 			raise ValueError("Training session chronology is invalid")
 		require_text(self.data_revision, "data revision")

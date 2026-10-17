@@ -11,6 +11,7 @@ from stockguidance.features.opening_values import opening_values
 from stockguidance.features.history_window import WindowState, plan_feature_history
 from stockguidance.features.specification import FeatureSpec, SignalMode
 from stockguidance.market_data.closes import PriceState
+from stockguidance.market_data.availability import AvailabilityPolicy
 from stockguidance.market_data.history import HistoryBoundary
 from stockguidance.market_data.identity import content_id
 from stockguidance.market_data.publication import DailyPublicationPolicy
@@ -22,6 +23,7 @@ def build_sample(
 	specification: FeatureSpec, target: TargetSpec, timing: DecisionTiming,
 	boundary: HistoryBoundary, calendar: SessionCalendar, publication: DailyPublicationPolicy,
 	repository: CloseRepository, *, label_cutoff: datetime | None = None,
+	availability_policy: AvailabilityPolicy = AvailabilityPolicy.STRICT, data_snapshot: datetime | None = None,
 ) -> Sample:
 	"""One construction path for inference and historical training/evaluation.
 
@@ -31,6 +33,9 @@ def build_sample(
 	if not isinstance(specification, FeatureSpec) or not isinstance(target, TargetSpec) or not isinstance(timing, DecisionTiming):
 		raise ValueError("Sample construction requires explicit specifications and decision timing")
 	boundary.validate_for(boundary.source, calendar)
+	if not isinstance(availability_policy, AvailabilityPolicy):
+		raise ValueError("Sample construction requires a typed availability policy")
+	availability_policy.validate_features(specification)
 	if specification.adjustment is not boundary.source.adjustment or specification.interval is not boundary.source.interval:
 		raise ValueError("Feature adjustment/interval does not match the data source")
 	if any(session != calendar.session(session.session_date) for session in (timing.previous_session, timing.entry_session, timing.exit_session)):
@@ -40,6 +45,7 @@ def build_sample(
 		if label_cutoff < timing.decision_cutoff:
 			raise ValueError("Training cutoff precedes the sample decision")
 	cutoff = timing.decision_cutoff if label_cutoff is None else label_cutoff
+	query_as_of = availability_policy.query_as_of(cutoff, data_snapshot)
 	window = plan_feature_history(calendar, boundary, specification, timing, publication)
 	sessions = set(window.sessions if window.state is WindowState.EXPECTED_AVAILABLE else ())
 	target_state = TargetState.NOT_REQUESTED
@@ -59,12 +65,12 @@ def build_sample(
 	if window.state is WindowState.EXPECTED_AVAILABLE and specification.signal_mode is SignalMode.ENTRY_OPEN:
 		openings = opening_values(specification, timing, boundary, repository)
 	if sessions:
-		query = CloseQuery(SessionQuery(boundary, tuple(sorted(sessions, key=lambda session: session.sequence)), cutoff), specification.ticker_ids)
+		query = CloseQuery(SessionQuery(boundary, tuple(sorted(sessions, key=lambda session: session.sequence)), query_as_of), specification.ticker_ids)
 		data = repository.read(query)
 		if not isinstance(data, CloseData) or data.query != query:
 			raise ValueError("Close repository changed the requested source, sessions, cutoff, or ticker layout")
 	if window.state is WindowState.EXPECTED_AVAILABLE and data is not None:
-		features = construct_features(specification, timing, window.sessions, data, openings)
+		features = construct_features(specification, timing, window.sessions, data, openings, availability_policy, publication)
 	else:
 		features = FeatureValues(specification, window.sessions, None)
 	values = (None,) * len(specification.ticker_ids)
@@ -80,9 +86,9 @@ def build_sample(
 				target_state = TargetState.UNAVAILABLE
 	feature_revision = content_id({"window_state": window.state.value, "history_start": boundary.history_start.isoformat()})
 	if data is not None and window.state is WindowState.EXPECTED_AVAILABLE:
-		feature_query = CloseQuery(SessionQuery(boundary, window.sessions, cutoff), specification.ticker_ids)
+		feature_query = CloseQuery(SessionQuery(boundary, window.sessions, query_as_of), specification.ticker_ids)
 		feature_revision = CloseData(feature_query, tuple(item for item in data.observations if item.timing.session in window.sessions), tuple(issue for issue in data.issues if issue.session in window.sessions)).revision
 	if openings is not None:
 		feature_revision = content_id({"closes": feature_revision, "openings": openings.revision})
 	revision = content_id({"closes": feature_revision if data is None else data.revision, "openings": None if openings is None else openings.revision}) if openings is not None else feature_revision if data is None else data.revision
-	return Sample(boundary.source, timing, features, window.state, target, targets, target_state, label_cutoff, feature_revision, revision, calendar.version)
+	return Sample(boundary.source, timing, features, window.state, target, targets, target_state, label_cutoff, feature_revision, revision, calendar.version, availability_policy, query_as_of)

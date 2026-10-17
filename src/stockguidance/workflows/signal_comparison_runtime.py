@@ -28,8 +28,13 @@ def assemble_signal_comparison(configuration: SimulationConfiguration, artifacts
 	if boundary is None:
 		raise UnknownHistoryBoundary("Signal comparison requires evidenced supported history")
 	calendar = ExchangeCalendar(boundary.calendar_id, min(boundary.history_start, configuration.anchor_date) - timedelta(days=14), configuration.end + timedelta(days=14))
+	if configuration.availability_policy.retrospective:
+		latest_signal = calendar.shift(calendar.session(configuration.end), -1)
+		expected = configuration.publication.expected_at(latest_signal)
+		if expected is None or configuration.data_snapshot is None or configuration.data_snapshot < expected:
+			raise ValueError("Retrospective data_snapshot must include the latest previous-close publication")
 	closes = VerifiedCloseRepository(configuration.source, MySQLValidationRepository(configuration.source, MySQLConnectionFactory()))
-	signals = HistoricalSignals(boundary, calendar, configuration.publication, SignalRepository(closes, OpeningStore(configuration.source.data_root)), VerifiedEligibilityRepository(closes))
+	signals = HistoricalSignals(boundary, calendar, configuration.publication, SignalRepository(closes, OpeningStore(configuration.source.data_root)), VerifiedEligibilityRepository(closes), configuration.availability_policy, configuration.data_snapshot)
 	request = SimulationRequest(configuration.source.identity, configuration.features, TargetSpec(), AllocationSpec(configuration.allocation_policy, calendar.session(configuration.anchor_date)), configuration.start, configuration.end, configuration.initial_capital, configuration.decision_lead, configuration.eligibility, configuration.top_k, configuration.execution)
 	decisions = tuple(DecisionTiming(calendar.shift(session, -1), session, calendar.shift(session, 1), session.closes_at - settings.decision_lead) for session in calendar.sessions(settings.start, settings.end))
 	plan = WalkForwardTraining(decisions, settings.configuration, artifacts_directory, settings.every_buy_decisions)

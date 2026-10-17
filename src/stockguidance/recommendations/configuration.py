@@ -9,6 +9,7 @@ from stockguidance.config.source import SourceConfig
 from stockguidance.config.validation import require_date, require_enum, require_positive_int
 from stockguidance.features.specification import FeatureSpec
 from stockguidance.market_data.corrections import CorrectionPolicy
+from stockguidance.market_data.availability import AvailabilityPolicy
 from stockguidance.market_data.publication import DailyPublicationPolicy
 from stockguidance.models.policy import ModelRefreshPolicy, ModelSelection
 from stockguidance.portfolio.policy import AllocationSpec
@@ -54,6 +55,7 @@ class RecommendationJob:
 	current_artifact: ArtifactReference | None = None
 	artifact_kind: ArtifactKind = ArtifactKind.MODEL
 	retraining: RetrainingPlan | None = None
+	availability_policy: AvailabilityPolicy = AvailabilityPolicy.STRICT
 
 	def __post_init__(self) -> None:
 		for value, expected in ((self.source, SourceConfig), (self.features, FeatureSpec), (self.target, TargetSpec), (self.model, ModelSelection), (self.allocation, AllocationSpec), (self.publication, DailyPublicationPolicy), (self.corrections, CorrectionPolicy), (self.eligibility, EligibilityPolicy)):
@@ -63,6 +65,10 @@ class RecommendationJob:
 			require_date(session_date, "recommendation session")
 		require_enum(self.artifact_kind, ArtifactKind, "artifact kind")
 		require_positive_int(self.top_k, "top_k")
+		if not isinstance(self.availability_policy, AvailabilityPolicy):
+			raise ValueError("Recommendation requires a typed availability policy")
+		if self.availability_policy is not AvailabilityPolicy.STRICT:
+			raise ValueError("Retrospective research artifacts are not supported for production recommendations")
 		if self.start > self.end or self.end > self.entry_date:
 			raise ValueError("Coverage must be chronological and end by the entry session")
 		if self.features.adjustment is not self.source.identity.adjustment or self.features.interval is not self.source.identity.interval:

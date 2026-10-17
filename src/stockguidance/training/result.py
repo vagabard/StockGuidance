@@ -3,6 +3,7 @@ from datetime import date, datetime
 from enum import StrEnum
 
 from stockguidance.artifacts.contracts import ArtifactReference
+from stockguidance.market_data.availability import AvailabilityPolicy
 
 
 class EvaluationKind(StrEnum):
@@ -41,3 +42,6 @@ class TrainingResult:
 	evaluation_revision: str | None
 	device: str
 	precision: str
+	availability_policy: AvailabilityPolicy = AvailabilityPolicy.STRICT
+	data_snapshot: datetime | None = None
+	data_revision: str | None = None

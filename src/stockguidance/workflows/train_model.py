@@ -9,6 +9,7 @@ from stockguidance.database.repositories.closes import CloseRepository
 from stockguidance.datasets.training import build_training_dataset
 from stockguidance.features.specification import FeatureSpec
 from stockguidance.market_data.history import HistoryBoundary
+from stockguidance.market_data.availability import AvailabilityPolicy
 from stockguidance.market_data.publication import DailyPublicationPolicy
 from stockguidance.targets.specification import TargetSpec
 from stockguidance.training.configuration import TrainingConfig
@@ -28,9 +29,18 @@ class HistoryTrainingRequest:
 	evaluation_cutoff: datetime | None = None
 	checkpoint_path: Path | None = None
 	resume_from: Path | None = None
+	availability_policy: AvailabilityPolicy = AvailabilityPolicy.STRICT
+	data_snapshot: datetime | None = None
 
 	def __post_init__(self) -> None:
 		require_aware_datetime(self.training_cutoff, "training cutoff")
+		if not isinstance(self.availability_policy, AvailabilityPolicy):
+			raise ValueError("History training requires a typed availability policy")
+		self.availability_policy.validate_features(self.features)
+		if self.data_snapshot is not None:
+			require_aware_datetime(self.data_snapshot, "data snapshot")
+		if self.availability_policy.retrospective and self.data_snapshot is None:
+			raise ValueError("Retrospective history training requires an explicit data snapshot")
 		if not isinstance(self.features, FeatureSpec) or not isinstance(self.target, TargetSpec) or not isinstance(self.configuration, TrainingConfig) or not isinstance(self.artifact_path, Path):
 			raise ValueError("History training requires typed specifications, settings and an explicit artifact path")
 		if not isinstance(self.decisions, tuple) or not self.decisions or not isinstance(self.evaluation_decisions, tuple):
@@ -50,6 +60,6 @@ class HistoryTrainingRequest:
 
 
 def train_from_history(request: HistoryTrainingRequest, boundary: HistoryBoundary, calendar: SessionCalendar, publication: DailyPublicationPolicy, repository: CloseRepository) -> TrainingResult:
-	dataset = build_training_dataset(request.decisions, request.training_cutoff, request.features, request.target, boundary, calendar, publication, repository)
-	evaluation = None if request.evaluation_cutoff is None else build_training_dataset(request.evaluation_decisions, request.evaluation_cutoff, request.features, request.target, boundary, calendar, publication, repository)
+	dataset = build_training_dataset(request.decisions, request.training_cutoff, request.features, request.target, boundary, calendar, publication, repository, request.availability_policy, request.data_snapshot)
+	evaluation = None if request.evaluation_cutoff is None else build_training_dataset(request.evaluation_decisions, request.evaluation_cutoff, request.features, request.target, boundary, calendar, publication, repository, request.availability_policy, request.data_snapshot)
 	return train_model(dataset, request.configuration, request.artifact_path, evaluation=evaluation, checkpoint_path=request.checkpoint_path, resume_from=request.resume_from)

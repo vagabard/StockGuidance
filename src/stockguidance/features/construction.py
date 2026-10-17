@@ -5,8 +5,10 @@ from stockguidance.calendar.decisions import DecisionTiming
 from stockguidance.calendar.sessions import TradingSession
 from stockguidance.database.repositories.closes import CloseData
 from stockguidance.features.specification import CloseFeature, FeatureSpec
+from stockguidance.market_data.availability import AvailabilityPolicy
 from stockguidance.market_data.closes import CloseIssue, PriceState
 from stockguidance.market_data.openings import OpeningData
+from stockguidance.market_data.publication import DailyPublicationPolicy
 
 
 @dataclass(frozen=True)
@@ -28,7 +30,8 @@ class FeatureValues:
 				raise ValueError("Feature sessions must be exactly adjacent")
 
 
-def construct_features(specification: FeatureSpec, timing: DecisionTiming, sessions: tuple[TradingSession, ...], data: CloseData, openings: OpeningData | None = None) -> FeatureValues:
+def construct_features(specification: FeatureSpec, timing: DecisionTiming, sessions: tuple[TradingSession, ...], data: CloseData, openings: OpeningData | None = None, availability_policy: AvailabilityPolicy = AvailabilityPolicy.STRICT, publication: DailyPublicationPolicy | None = None) -> FeatureValues:
+	availability_policy.validate_features(specification)
 	if len(sessions) != specification.lookback_sessions or tuple(session.sequence for session in sessions) != tuple(range(timing.entry_session.sequence - specification.lookback_sessions, timing.entry_session.sequence)):
 		raise ValueError("Feature history must be the exact prior-session window")
 	by_key = {(item.timing.session, item.ticker_id): item for item in data.observations}
@@ -45,10 +48,10 @@ def construct_features(specification: FeatureSpec, timing: DecisionTiming, sessi
 				if not any(issue.session == session and issue.ticker_id == ticker_id for issue in issues):
 					raise ValueError("Feature result omits a required session/ticker key")
 				continue
-			if observation.timing.available_at > timing.decision_cutoff:
+			if not availability_policy.observation_available_at(observation.timing, timing.decision_cutoff, publication):
 				issues.append(CloseIssue(ticker_id, session, PriceState.NOT_YET_AVAILABLE, "Historical close was published after the sample decision"))
 			else:
-				specification.validate_observation(observation.timing, timing)
+				specification.validate_observation(observation.timing, timing, availability_policy=availability_policy, publication=publication)
 	if issues:
 		return FeatureValues(specification, sessions, None, tuple(issues))
 	values: list[float] = []

@@ -10,7 +10,8 @@ from stockguidance.config.training import decode_training_configuration, number
 from stockguidance.config.source import SourceConfig
 from stockguidance.config.validation import require_aware_datetime, require_positive_int
 from stockguidance.features.specification import FeatureSpec
-from stockguidance.market_data.identity import decode_source, text_field
+from stockguidance.market_data.availability import AvailabilityPolicy
+from stockguidance.market_data.identity import decode_source, mapping, text_field
 from stockguidance.market_data.publication import DailyPublicationPolicy
 from stockguidance.portfolio.policy import AllocationPolicy
 from stockguidance.portfolio.precision import ExecutionPolicy, require_money
@@ -44,11 +45,20 @@ class SimulationConfiguration:
 	top_k: int
 	execution: ExecutionPolicy
 	retraining: WalkForwardConfiguration | None
+	availability_policy: AvailabilityPolicy = AvailabilityPolicy.STRICT
+	data_snapshot: datetime | None = None
 
 	def __post_init__(self) -> None:
 		require_money(self.initial_capital, "initial capital")
 		require_positive_int(self.top_k, "top_k")
 		require_aware_datetime(self.audit_cutoff, "execution audit cutoff")
+		if not isinstance(self.availability_policy, AvailabilityPolicy):
+			raise ValueError("Simulation requires a typed availability policy")
+		self.availability_policy.validate_features(self.features)
+		if self.data_snapshot is not None:
+			require_aware_datetime(self.data_snapshot, "data snapshot")
+		if self.availability_policy.retrospective and self.data_snapshot is None:
+			raise ValueError("Retrospective simulation requires an explicit data snapshot")
 		if self.start > self.end or self.anchor_date > self.start or self.initial_capital <= 0 or not timedelta(0) < self.decision_lead < timedelta(days=1):
 			raise ValueError("Invalid simulation bounds, capital, anchor or decision lead")
 		if self.features.adjustment is not self.source.identity.adjustment or self.features.interval is not self.source.identity.interval:
@@ -58,7 +68,10 @@ class SimulationConfiguration:
 
 
 def load_configuration(path: Path) -> SimulationConfiguration:
-	fields = exact_mapping(json.loads(path.read_text(encoding="utf-8")), ("source", "data_root", "database_config", "features", "start_date", "end_date", "allocation", "initial_capital", "decision_minutes_before_close", "publication", "execution_audit_cutoff", "eligibility", "top_k", "fee_per_fill", "retraining"))
+	fields = mapping(json.loads(path.read_text(encoding="utf-8")))
+	required = ("source", "data_root", "database_config", "features", "start_date", "end_date", "allocation", "initial_capital", "decision_minutes_before_close", "publication", "execution_audit_cutoff", "eligibility", "top_k", "fee_per_fill", "retraining")
+	if set(fields) - {*required, "availability_policy", "data_snapshot"} or any(name not in fields for name in required):
+		raise ValueError("Incomplete or unsupported simulation configuration fields")
 	identity = decode_source(exact_mapping(fields["source"], ("provider", "endpoint", "market", "universe", "adjustment", "interval")))
 	source = SourceConfig(identity, Path(text_field(fields, "data_root")), Path(text_field(fields, "database_config")))
 	allocation = exact_mapping(fields["allocation"], ("policy", "anchor_date"))
@@ -73,4 +86,12 @@ def load_configuration(path: Path) -> SimulationConfiguration:
 		cadence = integer(training["every_buy_decisions"])
 		require_positive_int(cadence, "retraining cadence")
 		retraining = WalkForwardConfiguration(date.fromisoformat(text_field(training, "start_date")), date.fromisoformat(text_field(training, "end_date")), timedelta(minutes=number(training["decision_minutes_before_close"])), decode_training_configuration(training["training"], training["model"]), cadence)
-	return SimulationConfiguration(source, decode_features(fields["features"]), date.fromisoformat(text_field(fields, "start_date")), date.fromisoformat(text_field(fields, "end_date")), AllocationPolicy(text_field(allocation, "policy")), date.fromisoformat(text_field(allocation, "anchor_date")), decimal_text(fields["initial_capital"]), timedelta(minutes=number(fields["decision_minutes_before_close"])), DailyPublicationPolicy(timedelta(minutes=number(publication["delay_minutes"])), text_field(publication, "evidence")), cutoff, EligibilityPolicy(integer(eligibility["minimum_transactions"])), integer(fields["top_k"]), ExecutionPolicy(decimal_text(fields["fee_per_fill"])), retraining)
+	availability_policy = AvailabilityPolicy(str(fields.get("availability_policy", AvailabilityPolicy.STRICT.value)))
+	data_snapshot = None if fields.get("data_snapshot") is None else datetime.fromisoformat(text_field(fields, "data_snapshot"))
+	if data_snapshot is not None:
+		require_aware_datetime(data_snapshot, "data snapshot")
+	if availability_policy.retrospective and data_snapshot is None:
+		raise ValueError("Retrospective simulation requires data_snapshot")
+	if data_snapshot is not None and data_snapshot > SystemClock().now():
+		raise ValueError("Data snapshot cannot be in the future")
+	return SimulationConfiguration(source, decode_features(fields["features"]), date.fromisoformat(text_field(fields, "start_date")), date.fromisoformat(text_field(fields, "end_date")), AllocationPolicy(text_field(allocation, "policy")), date.fromisoformat(text_field(allocation, "anchor_date")), decimal_text(fields["initial_capital"]), timedelta(minutes=number(fields["decision_minutes_before_close"])), DailyPublicationPolicy(timedelta(minutes=number(publication["delay_minutes"])), text_field(publication, "evidence")), cutoff, EligibilityPolicy(integer(eligibility["minimum_transactions"])), integer(fields["top_k"]), ExecutionPolicy(decimal_text(fields["fee_per_fill"])), retraining, availability_policy, data_snapshot)

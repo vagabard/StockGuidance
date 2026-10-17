@@ -415,8 +415,8 @@ skipped stages; report any blockers and checks that could not run.
 
 ## Stage handoffs
 
-Initial status (2026-10-16): prompts prepared; Stages 1-3 are complete and Stages
-4-10 remain pending. Documentation review confirmed the repaired configured
+Initial status (2026-10-16): prompts prepared; Stages 1-4 are complete and Stages
+5-10 remain pending. Documentation review confirmed the repaired configured
 Python can run the four main CLI help commands. No production database/provider
 operations, training, Java build or performance measurements were performed for
 this brief.
@@ -511,5 +511,56 @@ changed Python modules passed with no issues; the command was
 The four main CLI `--help` smoke checks also passed. Commands used the
 configured PyCharm Python 3.14.8 executable with `PYTHONPATH=src`. No live
 provider calls, production database writes, schema setup, or destructive cleanup were used.
-Stage 4 prerequisites are unchanged: retrospective research availability is
-not implemented and strict point-in-time behavior remains the default.
+Stage 4 prerequisites were the explicit retrospective policy, strict default,
+and unchanged actual receipt evidence; they are recorded in the Stage 4 handoff
+below. Strict point-in-time behavior remains the default.
+
+### Stage 4 handoff (2026-10-16)
+
+Status: complete. Added the typed `AvailabilityPolicy` with `strict` as the
+default and the explicitly opted-in `retrospective_daily_previous_close` mode.
+Research mode accepts only verified daily previous-close observations and uses
+an explicit aware `data_snapshot` for read scope; it treats calendar close plus
+the evidenced publication delay as an eligibility assumption. Actual
+`ObservationTiming.available_at` receipts, source verification, revisions and
+execution audit timestamps remain separate and unchanged. Entry-open signals
+are rejected in research mode, and labels still mature at each fitting cutoff.
+
+Policy and snapshot identity now flow through samples/cache keys, training and
+evaluation datasets, model semantics/provenance/artifacts, fixed and
+chronological simulation, eligibility, training/recommendation/simulation
+reports, and JSON job/config decoding. Research artifacts cannot mix with a
+different policy or snapshot in simulation; production recommendation jobs and
+artifacts reject research mode. Existing strict artifact metadata remains
+loadable with an unambiguous strict migration. Reports identify the assumption,
+actual receipt preservation, point-in-time status, and the hindsight limitation
+of corrected/adjusted history and the selected universe.
+
+Files changed: `src/stockguidance/market_data/availability.py`,
+`src/stockguidance/features/specification.py`,
+`src/stockguidance/features/construction.py`,
+`src/stockguidance/datasets/building.py`,
+`src/stockguidance/datasets/identity.py`,
+`src/stockguidance/datasets/sample.py`,
+`src/stockguidance/datasets/training.py`,
+`src/stockguidance/artifacts/contracts.py`,
+`src/stockguidance/artifacts/decoding.py`,
+`src/stockguidance/training/`, `src/stockguidance/recommendations/`,
+`src/stockguidance/simulation/`, `src/stockguidance/workflows/`, and
+`src/stockguidance/reporting/`, plus `docs/model_training.md`,
+`docs/simulation.md`, `docs/operations_guide.md`, and the focused Stage 4
+fixture in `tests/stage4/test_retrospective_availability.py`.
+
+Accepted checks: `python -m pytest tests/stage4 tests/stage5 tests/stage6
+tests/stage7 tests/stage8 -q` passed 368 tests; the complete `python -m pytest
+-q` suite passed 731 tests with 3 existing model warnings; the affected mypy
+check over 59 source files passed with no issues; and the four main CLI
+`--help` smoke checks passed. The fixture proves strict exclusion versus
+retrospective acceptance for a late backfilled close, unchanged actual receipt
+time, entry-open rejection, mature-label enforcement, and no live provider or
+production database operations. Commands used the configured PyCharm Python
+3.14.8 executable with `PYTHONPATH=src`.
+
+Stage 5 may now add reproducible subset-training and later-simulation examples;
+those examples must preserve strict defaults and explicitly label/use the Stage
+4 research fields only when intended. Stages 6-10 remain pending.
