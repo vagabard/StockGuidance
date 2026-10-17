@@ -53,6 +53,13 @@ def test_normalized_contract_sorts_storage_order_without_changing_scope():
 	assert normalized["scope"]["start"] == "2024-07-01"
 
 
+def test_normalized_contract_rejects_invalid_session_collections():
+	with pytest.raises(ValueError, match="sessions must be a list"):
+		normalize_validation_report({"sessions": None})
+	with pytest.raises(ValueError, match="sessions must be a list"):
+		normalize_validation_report({"session_results": None})
+
+
 def test_python_and_java_selected_operation_reports_have_equal_normalized_contracts():
 	common = {
 		"complete": True,

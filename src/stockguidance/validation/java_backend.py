@@ -59,6 +59,9 @@ def normalize_validation_report(payload: dict[str, Any]) -> dict[str, Any]:
 	"""Reduce Python or Java output to the shared selected-operation contract."""
 	if not isinstance(payload, dict):
 		raise ValueError("Validation report must be an object")
+	session_values = payload["sessions"] if "sessions" in payload else payload.get("session_results", [])
+	if not isinstance(session_values, list):
+		raise ValueError("Validation sessions must be a list")
 	return {
 		"complete": bool(payload.get("complete")),
 		"failed": bool(payload.get("failed")),
@@ -67,7 +70,7 @@ def normalize_validation_report(payload: dict[str, Any]) -> dict[str, Any]:
 		"calendar": payload.get("calendar", {"version": payload.get("calendar_version")}),
 		"scope": payload.get("scope", {"start": payload.get("start"), "end": payload.get("end"), "as_of": payload.get("as_of")}),
 		"history": payload.get("history", {"history_start": payload.get("history_start"), "history_provenance": payload.get("history_provenance")}),
-		"sessions": [_normalize_session(item) for item in payload.get("sessions", payload.get("session_results", []))],
+		"sessions": [_normalize_session(item) for item in session_values],
 		"findings": sorted((_normalize_finding(item) for item in payload.get("findings", [])), key=lambda item: (item["session_date"] or "", item["check"], item["detail"])),
 		"repair_plan": _normalize_repair_plan(payload.get("repair_plan")),
 	}

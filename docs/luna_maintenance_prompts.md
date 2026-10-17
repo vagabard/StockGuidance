@@ -766,10 +766,9 @@ post-Stage-9 import regression remains covered by the full suite and the Stage
 From `StockGuidance/java`, offline `mvn -o test` passed 17 Java tests and
 `mvn -o -DskipTests package` passed. Maven emitted its existing system-scoped
 MySQL connector warning; no network dependency resolution was used. The full
-`python -m mypy` check remains limited by the pre-existing
-`src/stockguidance/validation/java_backend.py:70` `Any | None` iteration error;
-no Stage 10 production Python source changed, so that unrelated Stage 8 issue
-was not broadened here. `git diff --check` passed.
+`python -m mypy` check passes across all 209 source files after the Stage 8
+Python boundary validates session collections explicitly; no Java source change
+was required. `git diff --check` passed.
 
 No live provider calls, production database writes, schema setup, production
 repairs, or credential-bearing subprocesses were used. Stage 10 has no remaining
