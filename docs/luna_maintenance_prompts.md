@@ -590,6 +590,43 @@ Accepted checks: the configured PyCharm Python 3.14.8 executable ran
 313 passed and 3 existing Torch warnings. The same executable, with
 `PYTHONPATH=src`, parsed all three example JSON files through
 `training.jobs.load_job`/`simulation.jobs.load_configuration`. No live provider,
-MySQL, schema setup or production write was used. Stage 6 remains pending and
-is limited to performance measurement; no Java or performance work was
-introduced here. Stages 7-10 remain pending.
+MySQL, schema setup or production write was used. Stage 6 was limited to
+performance measurement; no Java or production performance work was introduced
+here. Stages 7-10 remain pending.
+
+### Stage 6 handoff (2026-10-16)
+
+Status: complete. Added the deterministic offline benchmark in
+`src/stockguidance/performance/stage6.py`, the thin launcher
+`tools/stage6_benchmark.py`, and the non-secret fixed fixture specification
+`benchmarks/fixtures/stage6.json`. It measures JSON parsing/hashing,
+raw/derived decoding and reconciliation, tensor construction, single-sample
+and candidate batched inference, and typed portfolio event processing at small,
+medium, and large date/ticker sizes. It records cold/warm elapsed time,
+throughput, tracked peak Python allocations, optional resident deltas,
+versions, host details, and a canonical fixture identity. SQL/query and
+transfer measurements are explicitly absent because no disposable SQL service
+was available; the run made no provider, database, schema, or production data
+calls.
+
+The study found raw/derived reconciliation, manifest JSON decode/hash, and
+typed portfolio events as the ranked measured hotspots. The batched inference
+candidate is faster but is not adopted because cross-decision batching would
+violate chronological simulation cutoffs. The Java review is recorded in
+`docs/java_performance.md` and `docs/operations_guide.md`: regex JSON,
+SQL-NULL handling, parent-path discovery, legacy IDs, missing source/receipt
+contracts, and the absent build/parity foundation prevent a valid Java timing
+or port recommendation. No production Python optimization, schema/index
+change, Java implementation, or Java benchmark was introduced.
+
+Accepted checks: the configured PyCharm Python 3.14.8 executable ran
+`PYTHONPATH=src python tools/stage6_benchmark.py --fixture
+benchmarks/fixtures/stage6.json --output output/stage6-performance.json` to
+completion with all semantic guards passing across three fixture sizes. The
+run recorded Python 3.14.8, NumPy 2.5.4, Torch 2.14.1+cu132, one Torch CPU
+thread, Windows 11, and a 24-CPU AMD64 host. No disposable SQL service was
+available, so database query/transfer acceptance is explicitly not claimed.
+Stage 7 prerequisites are a decision on whether the measured Python hotspot
+justifies Java work, followed by a reproducible Java build, typed JSON and
+database contracts, and Python/Java golden parity fixtures. The current Python
+implementation remains the reference.

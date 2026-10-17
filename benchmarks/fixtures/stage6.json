@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "seed": 20261016,
+  "warm_repeats": 3,
+  "sizes": [
+    {"name": "small", "sessions": 16, "tickers": 8},
+    {"name": "medium", "sessions": 48, "tickers": 24},
+    {"name": "large", "sessions": 120, "tickers": 64}
+  ]
+}

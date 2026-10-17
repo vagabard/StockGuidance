@@ -1,11 +1,33 @@
 # Operating StockGuidance
 
 This guide describes the current Python commands and the shared automatic
-history discovery contract. Stages 1-4 of the implementation prompts are
+history discovery contract. Stages 1-6 of the implementation prompts are
 complete; validation and updating now use the shared resolver. Implementation prompts are in
 [luna_maintenance_prompts.md](luna_maintenance_prompts.md). Those prompts have
-not all been implemented by adding this guide. Start with the Python workflow;
-the Java sources are unfinished legacy prototypes.
+not all been implemented by adding this guide. Start with the Python workflow.
+The Java sources remain unfinished legacy prototypes; Stage 6 measured the
+Python paths without treating them as semantically equivalent. See
+[java_performance.md](java_performance.md) for the reproducible offline study.
+
+## Java and performance status+
+
+Stage 6 is complete as a bounded offline performance study. The large fixed
+fixture measured raw/derived reconciliation, JSON response decoding and
+hashing, typed portfolio event processing, tensor construction, and inference
+separately under cold and warm conditions. Raw/derived reconciliation was the
+largest measured CPU/allocation path; no SQL/query or transfer measurement was
+possible because no disposable SQL service was available. No production schema,
+index, provider, or database change was made.
+
+The current Java prototypes are not a correctness baseline. Their JSON parsing
+is regex-based, `DatabaseRowsToTensors` buffers rows and does not distinguish
+SQL `NULL` through `ResultSet.wasNull`, `DbConnect` performs parent-directory
+configuration discovery, and saved-score recommendations use `index + 1`
+rather than the supplied ticker IDs. They also lack the current source,
+adjustment/interval, receipt, availability, calendar, revision, and portfolio
+contracts. No Java timing or port recommendation is therefore claimed. Any
+future Java work must establish typed contracts and parity fixtures first;
+Python remains the semantic and performance reference.
 
 ## Recommended order
 
