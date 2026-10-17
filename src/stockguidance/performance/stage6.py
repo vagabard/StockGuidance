@@ -14,11 +14,11 @@ import statistics
 import sys
 import time
 import tracemalloc
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 from zoneinfo import ZoneInfo
 
-import numpy as np
-import torch
+if TYPE_CHECKING:
+	import torch
 
 from stockguidance.calendar.decisions import DecisionTiming
 from stockguidance.calendar.sessions import TradingSession
@@ -284,6 +284,9 @@ def _derived_values_match(snapshot: SessionSnapshot, prior: tuple[DailyBar, ...]
 
 
 def _tensor_construction(fixture: Fixture) -> int:
+	import numpy as np
+	import torch
+
 	specification = FeatureSpec(fixture.ticker_ids, 1)
 	features = np.asarray(fixture.feature_rows, dtype=np.float64)
 	targets = np.asarray(fixture.target_rows, dtype=np.float64)
@@ -296,6 +299,8 @@ def _tensor_construction(fixture: Fixture) -> int:
 
 
 def _make_model(fixture: Fixture) -> torch.nn.Module:
+	import torch
+
 	torch.manual_seed(20261016)
 	model = mlp_type()(len(fixture.ticker_ids), len(fixture.ticker_ids), [min(64, max(8, len(fixture.ticker_ids) * 2))], num_layers=2, layer_normalization=False)
 	model.eval()
@@ -303,6 +308,8 @@ def _make_model(fixture: Fixture) -> torch.nn.Module:
 
 
 def _single_sample_inference(fixture: Fixture, model: torch.nn.Module) -> int:
+	import torch
+
 	result = 0.0
 	with torch.inference_mode():
 		for row in fixture.feature_rows:
@@ -315,6 +322,9 @@ def _single_sample_inference(fixture: Fixture, model: torch.nn.Module) -> int:
 
 
 def _batched_inference(fixture: Fixture, model: torch.nn.Module) -> int:
+	import numpy as np
+	import torch
+
 	inputs = torch.tensor(np.asarray(fixture.feature_rows, dtype=np.float64), dtype=torch.float32)
 	with torch.inference_mode():
 		outputs = model(inputs)
@@ -402,6 +412,9 @@ def _load_fixture_config(path: Path) -> tuple[int, tuple[SizeSpec, ...], int]:
 
 
 def run(fixture_path: Path, repeats_override: int | None = None) -> dict[str, object]:
+	import numpy as np
+	import torch
+
 	seed, sizes, configured_repeats = _load_fixture_config(fixture_path)
 	repeats = configured_repeats if repeats_override is None else repeats_override
 	if repeats < 2:
