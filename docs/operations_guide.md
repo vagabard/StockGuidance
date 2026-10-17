@@ -1,10 +1,10 @@
 # Operating StockGuidance
 
 This guide describes the current Python commands and the shared automatic
-history discovery contract. Stages 1-8 of the implementation prompts are
+history discovery contract. Stages 1-9 of the implementation prompts are
 complete; validation and updating now use the shared resolver. Implementation prompts are in
-[luna_maintenance_prompts.md](luna_maintenance_prompts.md). Later conditional
-stages 9-10 remain pending. Start with the Python workflow. The historical Java
+[luna_maintenance_prompts.md](luna_maintenance_prompts.md). Stage 10 remains
+pending. Start with the Python workflow. The historical Java
 prototypes remain unfinished and separate from the Stage 7 foundation; Stage 6
 measured the Python paths without treating them as semantically equivalent. See
 [java_performance.md](java_performance.md) for the reproducible offline study.

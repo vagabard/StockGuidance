@@ -2,8 +2,8 @@
 
 These are implementation tasks for the model you select as Luna 5.6. Use one
 numbered prompt per conversation, in order, with the shared preamble below.
-Prompts 4 and 7-9 are conditional as described. Stages 1-8 are marked complete
-in the handoffs below; Stages 9-10 remain pending. Read [operations_guide.md](operations_guide.md) for current commands
+Prompts 4 and 7-9 are conditional as described. Stages 1-9 are marked complete
+in the handoffs below; Stage 10 remains pending. Read [operations_guide.md](operations_guide.md) for current commands
 and [database_validation.md](database_validation.md) for the existing audit contract.
 
 This brief updates the history requirement in `REFACTORING_PROMPTS.md`: retained
@@ -704,6 +704,37 @@ and normalized-parity tests. No disposable MySQL service was available, so
 an end-to-end JVM startup/transport/peak-memory comparison against a live SQL
 fixture is explicitly not claimed; the Python backend remains the default.
 
-Next-stage prerequisites: Stage 9 must use a disposable MySQL parity fixture
-and only proceed if a measured end-to-end benefit remains after JVM startup and
-transport costs. Stages 9-10 remain pending.
+Next-stage prerequisites for a conditional Java hotspot port remain a
+disposable MySQL parity fixture and a measured end-to-end benefit after JVM
+startup and transport costs. The approved source-retirement/frontend migration
+is recorded in the Stage 9 handoff below; no Java hotspot port was selected.
+
+### Stage 9 handoff (2026-10-17)
+
+Status: complete. Applied the approved source retirement and frontend migration
+scope from `docs/stage9_retirement.md`. The 85 listed legacy Python source/test
+paths are absent, all 21 retained root/script/database/verification/viewer
+frontends delegate once to their typed package entrypoints, and
+`polygon_fetch.py` retains only the original `DEFAULT_API_KEY` plus the shared
+updater delegation. The package includes that credential module for installed
+use while imports remain side-effect free. User data, Java sources, datasets,
+models, NPZ/CSV files, databases, caches and configuration were not cleanup
+targets; the recovery archive and Git history remain available.
+
+Files changed by the Stage 9 source cleanup are enumerated in
+`docs/stage9_retirement.md`; the current checkout contains the cleanup from
+commit `103f8f5`. No additional Java 9A/9B hotspot port was introduced because
+Stage 8 did not establish a measured end-to-end benefit after JVM and transport
+costs.
+
+Accepted checks: the configured PyCharm Python 3.14.8 executable ran
+`python -m pytest tests/stage9 -q` with 75 passed in 81.82 seconds. This suite
+verified the exact retired-path count, one-call frontend delegation, wheel
+packaging and import safety outside the checkout, no legacy imports, explicit
+database configuration and credential-safe failures, diagnostics, reports,
+batch/incremental workflows, repair round-trip behavior and chronology. No
+live provider, production database, schema setup, production write or
+credential-bearing subprocess was used.
+
+Stage 10 remains pending: reconcile the user-facing documentation and run its
+cross-stage offline acceptance checks.

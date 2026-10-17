@@ -1,6 +1,6 @@
 # Stage 9 source retirement and frontend migration
 
-Status: approved by the user's renewed Stage 9 completion instruction after committing the source. Git was clean at commit `fae92d5` before this cleanup. The grouped list below is the exact scope: **85 deletions, 21 thin-frontend rewrites, and one retained credential module**. Cleanup changes source/tests only, not user data.
+Status: complete (2026-10-17). The approved scope is **85 deletions, 21 thin-frontend rewrites, and one retained credential module**. Cleanup changes source/tests only, not user data.
 
 ## Recovery and exclusions
 
