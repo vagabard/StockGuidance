@@ -1,10 +1,11 @@
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Protocol
 
 from stockguidance.calendar.sessions import TradingSession
-from stockguidance.config.source import PriceAdjustment, SourceConfig
+from stockguidance.config.source import PriceAdjustment, SourceConfig, SourceIdentity
 from stockguidance.market_data.identity import mapping, text_field
-from stockguidance.market_data.providers.contracts import ProviderResponse, ResponseState
+from stockguidance.market_data.providers.contracts import ProviderResponse, ResponseState, ProviderCapability, unknown_capability
 from stockguidance.market_data.records import count_value, provider_bar
 from stockguidance.workflows.failures import FailureCode, StageExecutionError, StageFailure, WorkflowStage
 
@@ -62,3 +63,8 @@ class PolygonGroupedProvider:
 			return ProviderResponse(state, records, response.status, str(status), counts, bool(continuation), source_timestamps=timestamps)
 		except Exception:
 			raise provider_failure() from None
+
+	def discover_capability(self, source: SourceIdentity, checked_at: datetime) -> ProviderCapability:
+		if (source.provider, source.endpoint, source.market, source.universe) != ("polygon", GROUPED_ENDPOINT, "us-stocks", GROUPED_UNIVERSE):
+			raise ValueError("Polygon grouped adapter requires its exact US-stocks-excluding-OTC request scope")
+		return unknown_capability(source, checked_at, "Polygon grouped history has no authoritative account capability endpoint")

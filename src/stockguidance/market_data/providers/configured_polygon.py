@@ -1,10 +1,13 @@
+from datetime import datetime
+
 from stockguidance.calendar.sessions import TradingSession
 from stockguidance.config.source import SourceConfig
+from stockguidance.config.source import SourceIdentity
 from stockguidance.config.validation import require_positive_int
-from stockguidance.market_data.providers.contracts import ProviderResponse
+from stockguidance.market_data.providers.contracts import ProviderResponse, ProviderCapability, unknown_capability
 from stockguidance.market_data.providers.credentials import polygon_credential
 from stockguidance.market_data.providers.http import PolygonHttpTransport
-from stockguidance.market_data.providers.polygon import PolygonGroupedProvider
+from stockguidance.market_data.providers.polygon import GROUPED_ENDPOINT, GROUPED_UNIVERSE, PolygonGroupedProvider
 
 
 class ConfiguredPolygonProvider:
@@ -17,3 +20,8 @@ class ConfiguredPolygonProvider:
 		if self.provider is None:
 			self.provider = PolygonGroupedProvider(PolygonHttpTransport(polygon_credential(), self.max_retries))
 		return self.provider.fetch(source, session)
+
+	def discover_capability(self, source: SourceIdentity, checked_at: datetime) -> ProviderCapability:
+		if (source.provider, source.endpoint, source.market, source.universe) != ("polygon", GROUPED_ENDPOINT, "us-stocks", GROUPED_UNIVERSE):
+			raise ValueError("Polygon grouped adapter requires its exact US-stocks-excluding-OTC request scope")
+		return unknown_capability(source, checked_at, "Configured Polygon adapter has no authoritative account capability endpoint")

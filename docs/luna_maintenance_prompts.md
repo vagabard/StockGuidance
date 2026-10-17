@@ -2,8 +2,8 @@
 
 These are implementation tasks for the model you select as Luna 5.6. Use one
 numbered prompt per conversation, in order, with the shared preamble below.
-Prompts 4 and 7-9 are conditional as described. None is marked implemented by
-this document. Read [operations_guide.md](operations_guide.md) for current commands
+Prompts 4 and 7-9 are conditional as described. Stage 1 is marked complete in
+the handoff below; later stages remain pending. Read [operations_guide.md](operations_guide.md) for current commands
 and [database_validation.md](database_validation.md) for the existing audit contract.
 
 This brief updates the history requirement in `REFACTORING_PROMPTS.md`: retained
@@ -415,8 +415,30 @@ skipped stages; report any blockers and checks that could not run.
 
 ## Stage handoffs
 
-Initial status (2026-10-16): prompts prepared; stages 1-10 pending. Documentation
-review confirmed the repaired configured Python can run the four main CLI help
-commands. No production database/provider operations, training, Java build or
-performance measurements were performed for this brief. Future stage agents
-should append concrete implementation/test handoffs here.
+Initial status (2026-10-16): prompts prepared; Stage 1 is complete and Stages 2-10
+remain pending. Documentation review confirmed the repaired configured Python can
+run the four main CLI help commands. No production database/provider operations,
+training, Java build or performance measurements were performed for this brief.
+
+### Stage 1 handoff (2026-10-16)
+
+Status: complete. Implemented source-scoped, read-only discovery contracts in
+`src/stockguidance/market_data/history.py` and
+`src/stockguidance/market_data/discovery.py`. The result keeps observed local
+bounds/evidence quality, verified retained sessions and holes, fresh provider
+capability bounds, requested/effective bounds, and the latest finalized/expected
+published sessions separate. It uses real calendar sessions and an injected clock;
+it never treats a maximum ID, filename, successful response, or local minimum as
+continuous completeness.
+
+Source-bound manifest inventory is in
+`src/stockguidance/market_data/manifests.py`. Legacy database date mappings use
+one bounded read-only query in `src/stockguidance/database/repositories/mysql_sessions.py`
+and remain unverified. Provider capability metadata is optional and typed in
+`src/stockguidance/market_data/providers/contracts.py`; the current Polygon
+adapters return an honest unknown result without probing. Existing v1 boundary
+JSON remains loadable; v2 discovery metadata is written only to a separate
+`*.discovery.json` sidecar. Explicit overrides are source-bound, in-memory, and
+report conflicts rather than silently rewriting persisted history.
+
+Accepted checks: `python -m pytest tests/stage1` passed 73 tests; `python -m pytest tests/stage2 tests/stage3/test_provider.py` passed 90 tests; the complete `python -m pytest` suite passed 722 tests; and `python -m mypy src/stockguidance/market_data src/stockguidance/database/repositories/mysql_sessions.py` passed with no issues in 32 source files. The commands used the configured PyCharm Python 3.14.8 executable with `PYTHONPATH=src`; no live HTTP, production database, or metadata writes were used. Stage 2 prerequisites are migrating validation to these contracts, including offline inventory/audit, explicit unresolved provider capability, and zero-write guarantees.

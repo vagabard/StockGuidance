@@ -1,11 +1,12 @@
 # Read-only database validation
 
 For the recommended update/validation/training/simulation order, see the
-[operations guide](operations_guide.md). Proposed automatic date discovery,
-preservation of archives older than current download access, and conditional
-Java work are specified in [Luna implementation prompts](luna_maintenance_prompts.md).
-Those proposals are not yet implemented; the boundary requirements below describe
-the current commands.
+[operations guide](operations_guide.md). Shared Stage 1 source-scoped discovery
+is implemented in `market_data/discovery.py`; preservation of archives older than
+current download access is represented there but validation consumers are not
+migrated yet. Conditional Java work and the later read-only validation integration
+are specified in [Luna implementation prompts](luna_maintenance_prompts.md). The
+boundary requirements below describe the current commands.
 
 Run validation independently of downloading, importing, training, or recommending:
 

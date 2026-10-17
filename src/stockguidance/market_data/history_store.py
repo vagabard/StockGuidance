@@ -1,5 +1,5 @@
 from dataclasses import asdict
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from hashlib import sha256
 import json
 import os
@@ -7,7 +7,8 @@ from pathlib import Path
 import tempfile
 
 from stockguidance.config.source import PriceAdjustment, SourceIdentity
-from stockguidance.market_data.history import HistoryBoundary, HistoryProvenance
+from stockguidance.market_data.atomic import atomic_write
+from stockguidance.market_data.history import DiscoveryMetadata, HistoryBoundary, HistoryProvenance
 from stockguidance.market_data.intervals import ObservationInterval
 
 
@@ -33,6 +34,9 @@ class JsonHistoryStore:
 	def path_for(self, source: SourceIdentity) -> Path:
 		identity = json.dumps(asdict(source), sort_keys=True, separators=(",", ":"))
 		return self.directory / f"{sha256(identity.encode('utf-8')).hexdigest()}.json"
+
+	def discovery_path_for(self, source: SourceIdentity) -> Path:
+		return self.path_for(source).with_name(self.path_for(source).stem + ".discovery.json")
 
 	def save(self, boundary: HistoryBoundary) -> None:
 		payload = {
@@ -80,3 +84,54 @@ class JsonHistoryStore:
 			)
 		except (KeyError, TypeError, ValueError) as error:
 			raise ValueError(f"Invalid history metadata at {path.name}") from error
+
+	def save_discovery_metadata(self, metadata: DiscoveryMetadata) -> None:
+		payload = {
+			"schema_version": metadata.schema_version, "source": asdict(metadata.source), "calendar_id": metadata.calendar_id,
+			"recorded_at": metadata.recorded_at.isoformat(), "observed_sessions": [item.isoformat() for item in metadata.observed_sessions],
+			"verified_sessions": [item.isoformat() for item in metadata.verified_sessions], "holes": [item.isoformat() for item in metadata.holes],
+			"provider": {
+				"state": metadata.provider_state, "checked_at": metadata.provider_checked_at.isoformat(), "provenance": metadata.provider_provenance,
+				"earliest": None if metadata.provider_earliest is None else metadata.provider_earliest.isoformat(),
+				"latest": None if metadata.provider_latest is None else metadata.provider_latest.isoformat(),
+				"freshness_seconds": None if metadata.provider_freshness is None else metadata.provider_freshness.total_seconds(),
+				"earliest_observed_success": None if metadata.provider_earliest_observed_success is None else metadata.provider_earliest_observed_success.isoformat(),
+			},
+		}
+		atomic_write(self.discovery_path_for(metadata.source), json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\n")
+
+	def load_discovery_metadata(self, source: SourceIdentity) -> DiscoveryMetadata | None:
+		path = self.discovery_path_for(source)
+		try:
+			value: object = json.loads(path.read_bytes())
+		except FileNotFoundError:
+			return None
+		try:
+			payload = _mapping(value)
+			if type(payload.get("schema_version")) is not int or payload["schema_version"] != 2:
+				raise ValueError("Unsupported discovery metadata version")
+			stored_source = SourceIdentity(
+				_text(_mapping(payload["source"]), "provider"), _text(_mapping(payload["source"]), "endpoint"), _text(_mapping(payload["source"]), "market"), _text(_mapping(payload["source"]), "universe"),
+				PriceAdjustment(_text(_mapping(payload["source"]), "adjustment")), ObservationInterval(_text(_mapping(payload["source"]), "interval")),
+			)
+			if stored_source != source:
+				raise ValueError("Stored discovery source identity does not match its key")
+			def dates(field: str) -> tuple[date, ...]:
+				values = payload[field]
+				if not isinstance(values, list) or any(not isinstance(item, str) for item in values):
+					raise ValueError("Discovery session list must be an array")
+				return tuple(sorted(date.fromisoformat(item) for item in values))
+			provider = _mapping(payload["provider"])
+			freshness = provider.get("freshness_seconds")
+			if freshness is not None and (isinstance(freshness, bool) or not isinstance(freshness, (int, float))):
+				raise ValueError("Invalid discovery freshness")
+			return DiscoveryMetadata(
+				stored_source, _text(payload, "calendar_id"), datetime.fromisoformat(_text(payload, "recorded_at")), dates("observed_sessions"), dates("verified_sessions"), dates("holes"),
+				_text(provider, "state"), datetime.fromisoformat(_text(provider, "checked_at")), _text(provider, "provenance"),
+				None if provider.get("earliest") is None else date.fromisoformat(_text(provider, "earliest")),
+				None if provider.get("latest") is None else date.fromisoformat(_text(provider, "latest")),
+				None if freshness is None else timedelta(seconds=float(freshness)),
+				None if provider.get("earliest_observed_success") is None else date.fromisoformat(_text(provider, "earliest_observed_success")),
+			)
+		except (KeyError, TypeError, ValueError) as error:
+			raise ValueError(f"Invalid discovery metadata at {path.name}") from error

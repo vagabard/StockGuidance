@@ -1,11 +1,11 @@
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from enum import StrEnum
 from typing import Protocol
 
 from stockguidance.calendar.sessions import TradingSession
-from stockguidance.config.source import SourceConfig
-from stockguidance.config.validation import require_aware_datetime, require_enum
+from stockguidance.config.source import SourceConfig, SourceIdentity
+from stockguidance.config.validation import require_aware_datetime, require_date, require_enum
 from stockguidance.market_data.records import DailyBar
 
 
@@ -14,6 +14,65 @@ class ResponseState(StrEnum):
 	NO_TRADING = "no_trading"
 	UNVERIFIED = "unverified"
 	NOT_YET_PUBLISHED = "not_yet_published"
+
+
+class CapabilityState(StrEnum):
+	VERIFIED = "verified"
+	UNKNOWN = "unknown"
+	STALE = "stale"
+	ENTITLEMENT_LIMIT = "entitlement_limit"
+	AUTH_ERROR = "auth_error"
+	RATE_LIMITED = "rate_limited"
+	TRANSIENT_ERROR = "transient_error"
+	DELAYED = "delayed"
+	EMPTY = "empty"
+	INTERIOR_GAP = "interior_gap"
+
+
+@dataclass(frozen=True)
+class ProviderCapability:
+	"""Source-scoped capability evidence, never inferred from bar responses."""
+
+	source: SourceIdentity
+	state: CapabilityState
+	checked_at: datetime
+	provenance: str
+	detail: str
+	earliest_session: date | None = None
+	latest_session: date | None = None
+	freshness: timedelta | None = None
+	earliest_observed_success: date | None = None
+
+	def __post_init__(self) -> None:
+		if not isinstance(self.source, SourceIdentity):
+			raise ValueError("Provider capability requires a SourceIdentity")
+		require_enum(self.state, CapabilityState, "provider capability state")
+		require_aware_datetime(self.checked_at, "capability check time")
+		if not self.provenance or not isinstance(self.provenance, str):
+			raise ValueError("Capability provenance must be a nonempty string")
+		if not self.detail or not isinstance(self.detail, str):
+			raise ValueError("Capability detail must be a nonempty string")
+		for name, value in (("earliest_session", self.earliest_session), ("latest_session", self.latest_session), ("earliest_observed_success", self.earliest_observed_success)):
+			if value is not None:
+				require_date(value, name)
+		if self.earliest_session is not None and self.latest_session is not None and self.earliest_session > self.latest_session:
+			raise ValueError("Provider capability earliest session must not follow latest session")
+		if self.freshness is not None and (not isinstance(self.freshness, timedelta) or self.freshness < timedelta(0)):
+			raise ValueError("Capability freshness must be a nonnegative timedelta or unknown")
+		if self.state is CapabilityState.VERIFIED and (self.earliest_session is None or self.latest_session is None or self.freshness is None):
+			raise ValueError("Verified provider capability requires bounded dates and freshness")
+
+	def is_fresh_at(self, as_of: datetime) -> bool:
+		require_aware_datetime(as_of, "capability freshness cutoff")
+		return self.state is CapabilityState.VERIFIED and self.checked_at <= as_of and self.freshness is not None and self.checked_at + self.freshness >= as_of
+
+
+class ProviderCapabilityAdapter(Protocol):
+	def discover_capability(self, source: SourceIdentity, checked_at: datetime) -> ProviderCapability: ...
+
+
+def unknown_capability(source: SourceIdentity, checked_at: datetime, detail: str = "Provider capability metadata is unavailable") -> ProviderCapability:
+	return ProviderCapability(source, CapabilityState.UNKNOWN, checked_at, "adapter-capability", detail)
 
 
 @dataclass(frozen=True)

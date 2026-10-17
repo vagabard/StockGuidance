@@ -58,7 +58,7 @@ class DailyBar:
 
 
 def bar_payload(bar: DailyBar) -> dict[str, object]:
-	return {"T": bar.ticker, "o": str(bar.open), "h": str(bar.high), "l": str(bar.low), "c": str(bar.close), "v": bar.volume, "vw": None if bar.vwap is None else str(bar.vwap), "n": bar.transactions}
+	return {"T": bar.ticker, "o": str(decimal_price(bar.open)), "h": str(decimal_price(bar.high)), "l": str(decimal_price(bar.low)), "c": str(decimal_price(bar.close)), "v": bar.volume, "vw": None if bar.vwap is None else str(decimal_price(bar.vwap)), "n": bar.transactions}
 
 
 def decode_bar(value: object) -> DailyBar:

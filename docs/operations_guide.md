@@ -1,9 +1,11 @@
 # Operating StockGuidance
 
-This guide describes the current Python commands and the proposed automatic
-history workflow. Implementation prompts are in
+This guide describes the current Python commands and the shared automatic
+history discovery contract. Stage 1 of the implementation prompts is complete;
+the validation and update CLI consumers remain on their existing explicit-boundary
+workflow until the later stages migrate them. Implementation prompts are in
 [luna_maintenance_prompts.md](luna_maintenance_prompts.md). Those prompts have
-**not been implemented** by adding this guide. Start with the Python workflow;
+not all been implemented by adding this guide. Start with the Python workflow;
 the Java sources are unfinished legacy prototypes.
 
 ## Recommended order
@@ -72,12 +74,26 @@ gap that cannot be fetched must remain an explicit unresolved finding. It must
 not trigger deletion, a fabricated replacement, or a claim of complete history.
 Raw database rows alone do not prove source identity or original availability.
 
-**Current limitation:** `cli/update_setup.py` and `cli/validation_setup.py` still
-require either persisted source history or `--history-start` with
-`--history-evidence`. They share a single lower boundary. They do not yet discover
-the three ranges above. Prompts 1-3 replace this limitation while retaining the
-history arguments as optional overrides. Omitting the arguments works today
-only when matching history metadata already exists.
+**Current limitation:** the shared Stage 1 resolver in
+`market_data/discovery.py` now keeps retained observations, verified source
+coverage, provider capability, and requested/effective session bounds separate.
+`cli/update_setup.py` and `cli/validation_setup.py` still require either
+persisted source history or `--history-start` with `--history-evidence`; Stage 2
+and Stage 3 migrate those consumers while retaining the arguments as optional
+overrides. Omitting the arguments in the current CLIs therefore still works only
+when matching history metadata already exists.
+
+Stage 1 discovery is read-only and takes an injected clock, authoritative session
+calendar, publication policy, optional local inventory, and an optional typed
+provider capability adapter. `ManifestStore.inventory()` scans source-bound
+response manifests by their validated payload dates. `MySQLSessionRepository.inventory()`
+performs one bounded query for legacy date mappings; those rows remain explicitly
+unverified because they have no source-bound response or receipt evidence. A
+provider without a capability adapter returns `unknown`; stale capability evidence
+is retained but never supplies fetch bounds. An explicit history override is
+source-bound and conflicts with a different persisted boundary instead of
+rewriting it. Version 2 discovery metadata is stored in a separate
+`*.discovery.json` sidecar, preserving existing version 1 boundary records.
 
 Provider access may roll forward or change with an account. A first successful
 download, an empty response, a filename or `MIN(date)` cannot establish an

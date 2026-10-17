@@ -1,12 +1,14 @@
 from dataclasses import asdict, dataclass, replace
-from datetime import datetime
+from datetime import date, datetime
 from hashlib import sha256
 import json
 from pathlib import Path
 
+from stockguidance.calendar.protocols import SessionCalendar
 from stockguidance.calendar.sessions import TradingSession
 from stockguidance.config.source import SourceIdentity
 from stockguidance.market_data.atomic import atomic_write
+from stockguidance.market_data.history import EvidenceQuality, InventoryIssue, LocalCoverageInventory, LocalObservation
 from stockguidance.market_data.identity import decode_source, encode_json, mapping, source_key, text_field
 from stockguidance.market_data.providers.contracts import DownloadedSession, ProviderResponse, ResponseState
 from stockguidance.market_data.records import bar_payload, decode_bar, records_id
@@ -48,6 +50,47 @@ def decode_response(value: object) -> ProviderResponse:
 class ManifestStore:
 	def __init__(self, data_root: Path) -> None:
 		self.directory = data_root / "market_data"
+
+	def inventory(self, source: SourceIdentity, calendar: SessionCalendar, *, start: date | None = None, end: date | None = None) -> LocalCoverageInventory:
+		"""Read source-bound manifests once for a bounded calendar scope.
+
+		The manifest payload supplies the session date; filenames are only directory
+		entries and never establish coverage.
+		"""
+		calendar_id = calendar.calendar_id
+		bounded_start = calendar.start if start is None else start
+		bounded_end = calendar.end if end is None else end
+		if bounded_start > bounded_end:
+			return LocalCoverageInventory(source, calendar_id)
+		loaded_start, loaded_end = max(bounded_start, calendar.start), min(bounded_end, calendar.end)
+		if loaded_start > loaded_end:
+			return LocalCoverageInventory(source, calendar_id)
+		allowed = {session.session_date: session for session in calendar.sessions(loaded_start, loaded_end)}
+		root = self.directory / source_key(source)
+		if not root.exists():
+			return LocalCoverageInventory(source, calendar_id)
+		observations: list[LocalObservation] = []
+		issues: list[InventoryIssue] = []
+		seen_dates: set[date] = set()
+		for path in sorted(root.glob("*.manifest.json")):
+			session_date = None
+			try:
+				payload = mapping(json.loads(path.read_bytes()))
+				session_date = date.fromisoformat(text_field(payload, "session_date"))
+				if session_date not in allowed:
+					continue
+				if session_date in seen_dates:
+					raise ValueError("Duplicate source manifest session")
+				seen_dates.add(session_date)
+				manifest = self.load(source, allowed[session_date])
+				if manifest is None:
+					raise ValueError("Source manifest disappeared during inventory")
+				response = manifest.download.response
+				quality = EvidenceQuality.VERIFIED if response.state in {ResponseState.COMPLETE, ResponseState.NO_TRADING} else EvidenceQuality.UNVERIFIED
+				observations.append(LocalObservation(source, calendar_id, session_date, quality, response.evidence or f"Source manifest response state: {response.state.value}", True, manifest.download.available_at, manifest.content_id))
+			except (OSError, TypeError, ValueError, KeyError) as error:
+				issues.append(InventoryIssue(calendar_id, "Source manifest could not establish source-bound evidence", session_date, path.name))
+		return LocalCoverageInventory(source, calendar_id, tuple(observations), tuple(issues))
 
 	def path_for(self, source: SourceIdentity, session: TradingSession) -> Path:
 		return self.directory / source_key(source) / f"{session.session_date.isoformat()}.manifest.json"
