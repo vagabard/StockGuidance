@@ -13,13 +13,22 @@ from stockguidance.market_data.requests import MarketDataRequest
 from stockguidance.validation.coverage import CoverageState
 
 
-def _assessment(session: TradingSession, request: MarketDataRequest, publication: DailyPublicationPolicy, stored: StoredSession | None) -> SessionUpdate:
+def _fetch_authorized(session: TradingSession, fetchable_start: date | None, fetchable_end: date | None, capability_resolved: bool) -> bool:
+	return capability_resolved and (fetchable_start is None or session.session_date >= fetchable_start) and (fetchable_end is None or session.session_date <= fetchable_end)
+
+
+def _assessment(
+	session: TradingSession, request: MarketDataRequest, publication: DailyPublicationPolicy, stored: StoredSession | None,
+	*, fetchable_start: date | None, fetchable_end: date | None, capability_resolved: bool, capability_detail: str,
+) -> SessionUpdate:
 	expected = publication.expected_at(session)
 	if session.closes_at > request.as_of or (expected is not None and expected > request.as_of):
 		return SessionUpdate(session, CoverageState.NOT_YET_AVAILABLE, UpdateAction.NONE, expected, None, "Daily close or expected publication is after the cutoff")
 	if expected is None:
 		return SessionUpdate(session, CoverageState.UNVERIFIED, UpdateAction.NONE, None, None, "Provider publication schedule is unknown; no request authorized")
 	if stored is None:
+		if not _fetch_authorized(session, fetchable_start, fetchable_end, capability_resolved):
+			return SessionUpdate(session, CoverageState.UNVERIFIED, UpdateAction.NONE, expected, None, capability_detail)
 		return SessionUpdate(session, CoverageState.MISSING, UpdateAction.FETCH, expected, None, "Expected published session is absent from storage")
 	if stored.available_at is not None and stored.available_at > request.as_of:
 		return SessionUpdate(session, CoverageState.NOT_YET_AVAILABLE, UpdateAction.NONE, expected, stored.date_id, "Stored observation was not available by the cutoff")
@@ -28,12 +37,17 @@ def _assessment(session: TradingSession, request: MarketDataRequest, publication
 		CoverageState.INCOMPLETE: UpdateAction.REPAIR, CoverageState.INCONSISTENT: UpdateAction.REPAIR,
 		CoverageState.NOT_YET_AVAILABLE: UpdateAction.NONE, CoverageState.UNVERIFIED: UpdateAction.VERIFY,
 	}
-	return SessionUpdate(session, stored.state, actions[stored.state], expected, stored.date_id, stored.detail)
+	action = actions[stored.state]
+	if stored.state in {CoverageState.MISSING, CoverageState.INCOMPLETE, CoverageState.INCONSISTENT} and not _fetch_authorized(session, fetchable_start, fetchable_end, capability_resolved):
+		return SessionUpdate(session, CoverageState.UNVERIFIED, UpdateAction.NONE, expected, stored.date_id, capability_detail)
+	return SessionUpdate(session, stored.state, action, expected, stored.date_id, stored.detail)
 
 
 def plan_coverage(
 	source: SourceConfig, request: MarketDataRequest, boundary: HistoryBoundary | None,
 	calendar: SessionCalendar, publication: DailyPublicationPolicy, repository: SessionRepository, clock: Clock,
+	*, fetchable_start: date | None = None, fetchable_end: date | None = None,
+	capability_resolved: bool = True, capability_state: str | None = None, capability_detail: str | None = None,
 ) -> CoveragePlan:
 	"""Resolve all requested sessions before a bounded, read-only repository call.
 
@@ -71,7 +85,11 @@ def plan_coverage(
 			observation = ObservationTiming(allowed[row.session_date], allowed[row.session_date].closes_at, row.available_at)
 			if row.state is not CoverageState.MISSING and observation.is_available_at(cutoff):
 				observations.append(observation)
-	updates = tuple(_assessment(session, request, publication, by_date.get(session.session_date)) for session in expected)
+	blocked_detail = capability_detail or "Provider fetch capability is unresolved; local evidence may be reconciled but no network request is authorized"
+	updates = tuple(_assessment(
+		session, request, publication, by_date.get(session.session_date), fetchable_start=fetchable_start,
+		fetchable_end=fetchable_end, capability_resolved=capability_resolved, capability_detail=blocked_detail,
+	) for session in expected)
 	observed_dates = sorted(row.session_date for row in rows if row.state is not CoverageState.MISSING)
 	return CoveragePlan(
 		request, boundary, calendar.version, updates, query,
@@ -79,4 +97,5 @@ def plan_coverage(
 		tuple(sorted(observations, key=lambda item: item.session.session_date)),
 		observed_dates[0] if observed_dates else None, observed_dates[-1] if observed_dates else None,
 		request.start < boundary.history_start, request.end > cutoff_day,
+		fetchable_start, fetchable_end, capability_state, capability_detail,
 	)

@@ -12,13 +12,14 @@ supported frontend is `python -m stockguidance.cli.update_market_data`; the root
 
 ## Required evidence and policy
 
-No authoritative first supported date or live publication schedule has been
-established in this checkout. Database minima, old filenames, and the legacy
-two-year default do not establish those facts. Supply an evidenced first trading
-session once with `--history-start YYYY-MM-DD --history-evidence "..."`. It is
-persisted below the selected data root, separately from observed storage minima.
-Later runs load it. A conflicting supplied boundary fails and requires inspecting
-the persisted evidence before deliberately revising that metadata.
+The updater discovers retained local sessions from source-bound manifests and
+legacy database observations, while keeping observed dates separate from
+verified source coverage. A persisted source-bound boundary and
+`--history-start YYYY-MM-DD --history-evidence "..."` remain optional overrides;
+a conflicting override fails and requires inspecting the existing evidence.
+Neither a local minimum nor an override is treated as current provider
+entitlement. Current network requests require fresh, verified provider
+capability bounds.
 
 Publication and correction policy arguments are required. The operator chooses a
 publication delay supported by their provider/account and an explicit correction
@@ -33,20 +34,21 @@ This PowerShell template intentionally requires real, supplied values:
 ```powershell
 & '<configured-python>' -m stockguidance.cli.update_market_data `
   --data-root '<selected-data-root>' --dbinfo-file '<selected-dbinfo-file>' `
-  --history-start '<first-supported-trading-session>' --history-evidence '<boundary-evidence>' `
   --end-date '<inclusive-last-requested-date>' `
   --publication-delay-minutes '<provider-supported-delay>' --publication-evidence '<publication-evidence>' `
   --recent-window-days '<recent-window>' --recent-refresh-hours '<recent-recheck>' `
   --archive-refresh-days '<archive-recheck>' --correction-evidence '<correction-policy-evidence>'
 ```
 
-`--start-date` defaults to the persisted supported-history boundary. Start and
-end bounds are inclusive. End defaults to the current UTC date; calendar planning
-clips it to the current exchange date and publication cutoff. Earlier starts are
-clipped to supported history. The API performs live reconciliation with an
-injected clock; it does not offer historical downloads that pretend today's
-corrected response was available at a historical decision. Use the read-only
-Stage 2 planners for historical cutoffs.
+With omitted bounds, start/end use the discovered retained and currently
+fetchable scope, ending at the latest expected published exchange session.
+Explicit bounds are inclusive. Requests are clipped by the authoritative
+exchange calendar and publication cutoff. If provider capability is unknown or
+stale, local audit/reconciliation can extend into older retained archives, but
+network work is not authorized and the output names the unresolved capability.
+The API performs live reconciliation with an injected clock; it does not offer
+historical downloads that pretend today's corrected response was available at a
+historical decision. Use the read-only planners for historical cutoffs.
 
 The provider adapter supports the Polygon grouped daily US-stocks endpoint with
 explicit `include_otc=false`, recorded as universe `us-stocks-excluding-otc`.
@@ -64,8 +66,11 @@ identity. It never alters existing table definitions. Existing legacy rows do no
 become verified merely because the database is bound: they must be reconciled
 against validated source evidence. Use separate databases for different source
 scopes, including different adjustment policies; the existing raw schema cannot
-represent both simultaneously. No schema setup or live update was run during
-Stage 3 verification.
+represent both simultaneously. Schema setup and live provider operations remain
+outside offline acceptance checks. The configured Polygon adapter currently
+reports unknown account capability; a run with no fresh capability performs
+cached-only local work and records blocked/stale refreshes rather than guessing
+an entitlement range.
 
 The database must provide the six InnoDB tables checked by
 `assert_transactional_tables`: `stockguidance_source`, `transaction_dates`,
@@ -107,8 +112,10 @@ errors fail the required refresh. Later successful sessions do not hide an
 earlier failure; the next run retries its gap. A session becoming due during a
 run prevents premature success and can be fetched on the next run.
 
-JSON output exposes sessions, source-response states/counts, closures, deferred
-availability, failures, and the resulting `data_revision`. Exit codes are:
+JSON output exposes local observed bounds, provider capability/freshness and
+fetchable bounds, unresolved limits, sessions, source-response states/counts,
+closures, deferred availability, stale refreshes, failures, and the resulting
+`data_revision`. Exit codes are:
 
 - `0`: every required available session in scope is reconciled; explicitly
   deferred sessions are listed separately. A calendar-only closed range can

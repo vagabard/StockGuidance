@@ -34,12 +34,29 @@ def main(argv: Sequence[str] | None = None, *, run: Callable[[argparse.Namespace
 	except Exception:
 		print(json.dumps({"successful": False, "error": "Required updater setup or storage operation failed"}))
 		return 1
+	discovery = result.discovery
+	history_boundary = None if discovery is not None and discovery.history_boundary is None else result.plan.boundary
 	payload = {
 		"successful": result.successful, "source": asdict(result.coverage.request.source),
 		"start": result.coverage.request.start.isoformat(), "end": result.coverage.request.end.isoformat(),
-		"as_of": result.coverage.request.as_of.isoformat(), "history_start": result.plan.boundary.history_start.isoformat(),
+		"as_of": result.coverage.request.as_of.isoformat(), "history_start": None if history_boundary is None else history_boundary.history_start.isoformat(),
+		"history_provenance": "unresolved" if history_boundary is None else history_boundary.provenance.value,
 		"excluded_before_history": result.plan.excluded_before_history, "excluded_after_cutoff": result.plan.excluded_after_cutoff,
 		"data_revision": result.data_revision, "downloaded_sessions": result.downloaded_sessions,
+		"stale_refreshes": [item.isoformat() for item in result.stale_refreshes],
+		"provider_capability": None if discovery is None else {
+			"state": discovery.provider.state.value, "checked_at": discovery.provider.checked_at.isoformat(),
+			"provenance": discovery.provider.provenance, "detail": discovery.provider.detail,
+			"fresh": discovery.provider_is_fresh,
+			"fetchable_start": None if discovery.fetchable_start is None else discovery.fetchable_start.isoformat(),
+			"fetchable_end": None if discovery.fetchable_end is None else discovery.fetchable_end.isoformat(),
+		},
+		"local_observed_bounds": None if discovery is None else {
+			"first": None if discovery.local_bounds.first_observed is None else discovery.local_bounds.first_observed.isoformat(),
+			"last": None if discovery.local_bounds.last_observed is None else discovery.local_bounds.last_observed.isoformat(),
+			"observed_sessions": [item.isoformat() for item in discovery.local_bounds.observed_sessions],
+		},
+		"unresolved_limits": [] if discovery is None else [{"code": item.code, "severity": item.severity.value, "detail": item.detail} for item in discovery.diagnostics],
 		"sessions": [{"date": item.session.session_date.isoformat(), "state": item.state.value, "detail": item.detail} for item in result.coverage.sessions],
 		"market_closures": [session_date.isoformat() for session_date in result.closed_dates],
 		"no_trading": [manifest.download.session.session_date.isoformat() for manifest in result.manifests if manifest.download.response.state.value == "no_trading"],

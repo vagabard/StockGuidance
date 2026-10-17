@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from datetime import date
 
 from stockguidance.market_data.coverage import CoveragePlan
+from stockguidance.market_data.discovery import CoverageDiscoveryResult
 from stockguidance.market_data.manifests import SourceManifest
 from stockguidance.validation.coverage import CoverageResult, CoverageState
 from stockguidance.workflows.failures import StageFailure
@@ -16,6 +17,8 @@ class UpdateResult:
 	data_revision: str
 	failures: tuple[StageFailure, ...]
 	downloaded_sessions: int
+	discovery: CoverageDiscoveryResult | None = None
+	stale_refreshes: tuple[date, ...] = ()
 
 	@property
 	def successful(self) -> bool:

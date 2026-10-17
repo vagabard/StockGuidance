@@ -10,6 +10,7 @@ from stockguidance.database.repositories.sessions import SessionQuery
 from stockguidance.market_data.corrections import CorrectionPolicy
 from stockguidance.market_data.coverage_planning import plan_coverage
 from stockguidance.market_data.dependencies import dependency_scope
+from stockguidance.market_data.discovery import CoverageDiscoveryResult
 from stockguidance.market_data.history import HistoryBoundary
 from stockguidance.market_data.identity import content_id, source_key
 from stockguidance.market_data.ingestion import derived_repairs, import_if_needed
@@ -35,6 +36,7 @@ class UpdateSettings:
 	publication: DailyPublicationPolicy
 	corrections: CorrectionPolicy
 	repair_plan: RepairPlan | None = None
+	discovery: CoverageDiscoveryResult | None = None
 
 	def __post_init__(self) -> None:
 		require_date(self.start, "update start")
@@ -43,6 +45,8 @@ class UpdateSettings:
 			raise ValueError("Invalid update bounds or policies")
 		if self.repair_plan is not None and not isinstance(self.repair_plan, RepairPlan):
 			raise ValueError("Update repair plan must be a typed validation plan")
+		if self.discovery is not None and not isinstance(self.discovery, CoverageDiscoveryResult):
+			raise ValueError("Update discovery must be a typed coverage result")
 
 
 def _failure(code: FailureCode, session_date: date | None = None) -> StageFailure:
@@ -53,12 +57,26 @@ def _failure(code: FailureCode, session_date: date | None = None) -> StageFailur
 def update_market_data(source: SourceConfig, settings: UpdateSettings, boundary: HistoryBoundary | None, calendar: SessionCalendar, provider: MarketDataProvider, repository: MarketDataRepository, clock: Clock) -> UpdateResult:
 	"""Reconcile a live snapshot; historical cutoffs belong to read-only planners."""
 	started = decision_cutoff(clock)
+	capability = settings.discovery
+	capability_resolved = capability is None or capability.provider_is_fresh
 	if settings.repair_plan is not None:
-		settings.repair_plan.validate_for_update(source.identity, settings.start, settings.end, started)
+		settings.repair_plan.validate_for_update(
+			source.identity, settings.start, settings.end, started,
+			fetchable_start=None if capability is None else capability.fetchable_start,
+			fetchable_end=None if capability is None else capability.fetchable_end,
+			capability_resolved=capability_resolved,
+		)
 	request = MarketDataRequest(source.identity, settings.start, settings.end, started)
 	reader = SnapshotCoverageReader(repository)
 	try:
-		plan = plan_coverage(source, request, boundary, calendar, settings.publication, reader, clock)
+		plan = plan_coverage(
+			source, request, boundary, calendar, settings.publication, reader, clock,
+			fetchable_start=None if capability is None else capability.fetchable_start,
+			fetchable_end=None if capability is None else capability.fetchable_end,
+			capability_resolved=capability_resolved,
+			capability_state=None if capability is None else capability.provider.state.value,
+			capability_detail=None if capability is None else capability.provider.detail,
+		)
 	except ValueError:
 		raise StageExecutionError(_failure(FailureCode.INVALID_REQUEST)) from None
 	except Exception:
@@ -66,6 +84,7 @@ def update_market_data(source: SourceConfig, settings: UpdateSettings, boundary:
 	store = ManifestStore(source.data_root)
 	failures: list[StageFailure] = []
 	failed_dates: set[date] = set()
+	stale_refreshes: set[date] = set()
 	downloaded = 0
 	try:
 		work = plan_updates(plan, reader.snapshots, store, settings.corrections, started)
@@ -74,6 +93,12 @@ def update_market_data(source: SourceConfig, settings: UpdateSettings, boundary:
 	by_date = {snapshot.session.session_date: snapshot for snapshot in reader.snapshots}
 	for item in work:
 		try:
+			if item.refresh_blocked:
+				failures.append(_failure(FailureCode.PROVIDER, item.session.session_date))
+				failed_dates.add(item.session.session_date)
+				stale_refreshes.add(item.session.session_date)
+				if item.manifest is None or item.manifest.download.response.state not in {ResponseState.COMPLETE, ResponseState.NO_TRADING}:
+					continue
 			manifest = item.manifest
 			force_refresh = settings.repair_plan is not None and any(repair.action is RepairAction.REFRESH_SOURCE and repair.session_date == item.session.session_date for repair in settings.repair_plan.items)
 			if item.needs_download or force_refresh:
@@ -111,7 +136,14 @@ def update_market_data(source: SourceConfig, settings: UpdateSettings, boundary:
 	final_request = MarketDataRequest(source.identity, request.start, request.end, completed)
 	try:
 		final_reader = SnapshotCoverageReader(repository)
-		final_plan = plan_coverage(source, final_request, boundary, calendar, settings.publication, final_reader, clock)
+		final_plan = plan_coverage(
+			source, final_request, boundary, calendar, settings.publication, final_reader, clock,
+			fetchable_start=None if capability is None else capability.fetchable_start,
+			fetchable_end=None if capability is None else capability.fetchable_end,
+			capability_resolved=capability_resolved,
+			capability_state=None if capability is None else capability.provider.state.value,
+			capability_detail=None if capability is None else capability.provider.detail,
+		)
 	except Exception:
 		raise StageExecutionError(_failure(FailureCode.STORAGE)) from None
 	combined = {snapshot.session.session_date: snapshot for snapshot in snapshots}
@@ -153,7 +185,10 @@ def update_market_data(source: SourceConfig, settings: UpdateSettings, boundary:
 		assessments.append(SessionCoverage(assessment.session, state, detail))
 	closed = _closed_dates(request.start, min(request.end, completed.astimezone(calendar.timezone).date()), plan.boundary.history_start, {item.session.session_date for item in final_plan.sessions})
 	revision = content_id([source_key(source.identity), LEGACY_DERIVED_SPEC, [(snapshot.session.session_date.isoformat(), records_id(snapshot.records), derived_id(snapshot.derived), None if snapshot.receipt is None else snapshot.receipt.derived_dependency_id) for snapshot in snapshots]])
-	result = UpdateResult(plan, CoverageResult(final_request, tuple(assessments)), tuple(manifests), closed, revision, tuple(failures), downloaded)
+	result = UpdateResult(
+		plan, CoverageResult(final_request, tuple(assessments)), tuple(manifests), closed, revision, tuple(failures), downloaded,
+		capability, tuple(sorted(stale_refreshes)),
+	)
 	try:
 		persist_update_result(source, settings.publication, settings.corrections, result)
 	except Exception:

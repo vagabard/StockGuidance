@@ -415,8 +415,8 @@ skipped stages; report any blockers and checks that could not run.
 
 ## Stage handoffs
 
-Initial status (2026-10-16): prompts prepared; Stages 1-2 are complete and Stages
-3-10 remain pending. Documentation review confirmed the repaired configured
+Initial status (2026-10-16): prompts prepared; Stages 1-3 are complete and Stages
+4-10 remain pending. Documentation review confirmed the repaired configured
 Python can run the four main CLI help commands. No production database/provider
 operations, training, Java build or performance measurements were performed for
 this brief.
@@ -463,4 +463,53 @@ plans retain version 1 decoding and use version 2 only when a
 `blocked_out_of_access` item with a reason prevents an impossible automatic
 refresh.
 
-Accepted checks: `python -m pytest tests/stage2 tests/stage4 tests/stage5/test_repository_and_validation.py` passed 142 tests; the complete `python -m pytest` suite passed 725 tests with 3 existing model warnings; and the affected mypy check over 17 source files passed with no issues. The new Stage 2 tests cover omitted history bounds, local/provider separation, interior gaps, zero provider calls, zero validation writes, rollback-preserving inspection, cached capability and blocked old-gap repair. Commands used the configured PyCharm Python 3.14.8 executable with `PYTHONPATH=src`; no live HTTP or production writes were used. Stage 3 prerequisites are migrating updater setup and planning to the shared resolver without changing this validator's offline contract.
+Accepted checks: `python -m pytest tests/stage2 tests/stage4 tests/stage5/test_repository_and_validation.py` passed 142 tests; the complete `python -m pytest` suite passed 725 tests with 3 existing model warnings; and the affected mypy check over 17 source files passed with no issues. The new Stage 2 tests cover omitted history bounds, local/provider separation, interior gaps, zero provider calls, zero validation writes, rollback-preserving inspection, cached capability and blocked old-gap repair. Commands used the configured PyCharm Python 3.14.8 executable with `PYTHONPATH=src`; no live HTTP or production writes were used. Stage 3 migrates updater setup and planning to the shared resolver without changing this validator's offline contract.
+
+### Stage 3 handoff (2026-10-16)
+
+Status: complete. Updating now resolves omitted bounds through the shared
+source-scoped discovery result. `cli/update_setup.py` inventories source-bound
+manifests once, optionally inventories legacy database observations with one
+bounded query, loads only valid cached capability evidence, preserves the
+existing v1 history boundary, and uses an explicit non-persisted local query
+floor when retained data predates that boundary. Explicit start/end and
+source-bound history overrides remain supported; a conflicting override is
+rejected without rewriting metadata.
+
+`coverage_planning.py` and `update_planning.py` separate local reconciliation
+from fetch authorization. Missing or inaccessible sessions cannot trigger a
+network request without fresh verified capability bounds. Intact matching
+manifests can reimport and rebuild older local data without provider access.
+Due refreshes outside access preserve prior content and are reported as
+`stale_refreshes`; corrupt source content remains unresolved and is never
+marked complete. Repair plans reject blocked or stale out-of-access refreshes
+before schema/provider/database writes. Update JSON and run metadata expose
+local bounds, provider state/freshness, fetchable bounds, unresolved limits,
+history provenance, stale refreshes, and data revision.
+
+Files changed: `src/stockguidance/cli/update_setup.py`,
+`src/stockguidance/cli/update_market_data.py`,
+`src/stockguidance/market_data/coverage.py`,
+`src/stockguidance/market_data/coverage_planning.py`,
+`src/stockguidance/market_data/manifests.py`,
+`src/stockguidance/market_data/update_planning.py`,
+`src/stockguidance/validation/repair.py`,
+`src/stockguidance/workflows/update_market_data.py`,
+`src/stockguidance/workflows/update_metadata.py`,
+`src/stockguidance/workflows/update_result.py`, and updater documentation in
+`docs/operations_guide.md`, `docs/database_validation.md`,
+`docs/market_data_updating.md`, and `docs/frontends.md`.
+
+Accepted checks: `python -m pytest tests/stage3 -q` passed 90 tests;
+`python -m pytest tests/stage3 tests/stage4 tests/stage7 -q` passed 204 tests;
+and `python -m pytest -q` passed 728 tests with 3 existing model warnings. The
+focused updater test includes provider-scope fetch blocking, cached-only
+reimport, stale refresh/archive preservation, atomic recovery, correction
+invalidation, and repair-plan handling. The affected mypy command over the 10
+changed Python modules passed with no issues; the command was
+`python -m mypy src/stockguidance/cli/update_setup.py src/stockguidance/cli/update_market_data.py src/stockguidance/market_data/coverage.py src/stockguidance/market_data/coverage_planning.py src/stockguidance/market_data/manifests.py src/stockguidance/market_data/update_planning.py src/stockguidance/validation/repair.py src/stockguidance/workflows/update_market_data.py src/stockguidance/workflows/update_metadata.py src/stockguidance/workflows/update_result.py`.
+The four main CLI `--help` smoke checks also passed. Commands used the
+configured PyCharm Python 3.14.8 executable with `PYTHONPATH=src`. No live
+provider calls, production database writes, schema setup, or destructive cleanup were used.
+Stage 4 prerequisites are unchanged: retrospective research availability is
+not implemented and strict point-in-time behavior remains the default.

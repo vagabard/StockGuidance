@@ -49,6 +49,10 @@ class CoveragePlan:
 	observed_last_in_scope: date | None
 	excluded_before_history: bool
 	excluded_after_cutoff: bool
+	fetchable_start: date | None = None
+	fetchable_end: date | None = None
+	provider_capability_state: str | None = None
+	provider_capability_detail: str | None = None
 
 	@property
 	def fetch_sessions(self) -> tuple[TradingSession, ...]:

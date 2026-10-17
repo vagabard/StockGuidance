@@ -32,6 +32,15 @@ class UpdateWork:
 	manifest: SourceManifest | None
 	needs_download: bool
 	detail: str
+	refresh_blocked: bool = False
+
+
+def _fetch_authorized(plan: CoveragePlan, session: TradingSession) -> bool:
+	if plan.provider_capability_state is None:
+		return True
+	if plan.provider_capability_state != "verified":
+		return False
+	return (plan.fetchable_start is None or session.session_date >= plan.fetchable_start) and (plan.fetchable_end is None or session.session_date <= plan.fetchable_end)
 
 
 def plan_updates(plan: CoveragePlan, snapshots: tuple[SessionSnapshot, ...], store: ManifestStore, correction: CorrectionPolicy, now: datetime) -> tuple[UpdateWork, ...]:
@@ -45,18 +54,26 @@ def plan_updates(plan: CoveragePlan, snapshots: tuple[SessionSnapshot, ...], sto
 		except InvalidManifest:
 			manifest = None
 		snapshot = by_date.get(item.session.session_date)
-		needs_download = manifest is None
+		needs_download = manifest is None and _fetch_authorized(plan, item.session)
 		detail = "No validated request-scoped source evidence"
+		refresh_blocked = False
 		if manifest is not None:
 			response = manifest.download.response
-			needs_download = response.state not in {ResponseState.COMPLETE, ResponseState.NO_TRADING} or correction.refresh_due(item.session, manifest.download.available_at, now)
+			refresh_due = response.state not in {ResponseState.COMPLETE, ResponseState.NO_TRADING} or correction.refresh_due(item.session, manifest.download.available_at, now)
+			needs_download = refresh_due and _fetch_authorized(plan, item.session)
+			refresh_blocked = refresh_due and not needs_download
 			detail = "Provider verification or scheduled correction refresh" if needs_download else "Reconcile persisted evidence with database keys and content"
+			if refresh_blocked:
+				detail = plan.provider_capability_detail or "Scheduled provider refresh is outside current evidenced provider access"
 			if manifest.download.available_at > now:
 				needs_download = False
+				refresh_blocked = False
 				detail = "Source evidence is unavailable at the current clock"
+		elif not _fetch_authorized(plan, item.session):
+			detail = plan.provider_capability_detail or "Provider fetch capability is unresolved; retained local evidence is audit-only"
 		if snapshot is not None and snapshot.receipt is not None and snapshot.receipt.available_at > now:
 			continue
-		work.append(UpdateWork(item.session, manifest, needs_download, detail))
+		work.append(UpdateWork(item.session, manifest, needs_download, detail, refresh_blocked))
 	return tuple(work)
 
 

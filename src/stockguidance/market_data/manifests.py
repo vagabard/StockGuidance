@@ -89,6 +89,8 @@ class ManifestStore:
 				quality = EvidenceQuality.VERIFIED if response.state in {ResponseState.COMPLETE, ResponseState.NO_TRADING} else EvidenceQuality.UNVERIFIED
 				observations.append(LocalObservation(source, calendar_id, session_date, quality, response.evidence or f"Source manifest response state: {response.state.value}", True, manifest.download.available_at, manifest.content_id))
 			except (OSError, TypeError, ValueError, KeyError) as error:
+				if session_date is not None and session_date in allowed and not any(item.session_date == session_date for item in observations):
+					observations.append(LocalObservation(source, calendar_id, session_date, EvidenceQuality.CORRUPT, "Source manifest or response content is corrupt", False))
 				issues.append(InventoryIssue(calendar_id, "Source manifest could not establish source-bound evidence", session_date, path.name))
 		return LocalCoverageInventory(source, calendar_id, tuple(observations), tuple(issues))
 

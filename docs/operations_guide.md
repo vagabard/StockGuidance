@@ -1,9 +1,8 @@
 # Operating StockGuidance
 
 This guide describes the current Python commands and the shared automatic
-history discovery contract. Stage 1 of the implementation prompts is complete;
-the validation and update CLI consumers remain on their existing explicit-boundary
-workflow until the later stages migrate them. Implementation prompts are in
+history discovery contract. Stages 1-3 of the implementation prompts are
+complete; validation and updating now use the shared resolver. Implementation prompts are in
 [luna_maintenance_prompts.md](luna_maintenance_prompts.md). Those prompts have
 not all been implemented by adding this guide. Start with the Python workflow;
 the Java sources are unfinished legacy prototypes.
@@ -74,15 +73,19 @@ gap that cannot be fetched must remain an explicit unresolved finding. It must
 not trigger deletion, a fabricated replacement, or a claim of complete history.
 Raw database rows alone do not prove source identity or original availability.
 
-**Current validation behavior:** the validator uses the Stage 1 resolver to
+**Current validation behavior:** the validator uses the shared resolver to
 inventory source-bound manifests and legacy database observations without
 writing discovery metadata. With date and history arguments omitted, it audits
 the observed retained scope through the latest expected published session. It
 reports local observed bounds, verified retained sessions and holes, cached
 provider capability/freshness, the effective audit scope, and unresolved
 earliest/provider limits separately. The history arguments remain optional,
-source-bound overrides; validation never persists them. The updater remains on
-its explicit-boundary workflow until Stage 3.
+source-bound overrides; validation never persists them. The updater uses the
+same resolver, inventories manifests and eligible legacy date mappings once,
+and keeps retained observations separate from current provider entitlement.
+Network fetches require fresh verified provider capability evidence. Unknown or
+stale capability leaves local audit/reconciliation visible and reports the
+unresolved provider limit without fetching.
 
 Stage 1 discovery is read-only and takes an injected clock, authoritative session
 calendar, publication policy, optional local inventory, and an optional typed
@@ -128,10 +131,10 @@ $historyArgs = @()
 New-Item -ItemType Directory -Force -Path 'output' | Out-Null
 ```
 
-For a current checkout with a known source boundary, `$historyArgs` may be
-provided as an in-memory validation override and as the updater's persisted
-boundary input. It is not required for validation when retained local evidence
-can establish an auditable scope. A conflicting override remains an error.
+For a current checkout, `$historyArgs` is an optional source-bound override. It
+is not required when retained local evidence or fresh provider capability
+establishes an auditable scope. A conflicting override remains an error; it
+never expands current provider fetch access by itself.
 
 ```powershell
 $historyArgs = @('--history-start', '<evidenced-first-supported-session>',
@@ -140,7 +143,8 @@ $historyArgs = @('--history-start', '<evidenced-first-supported-session>',
 
 Replace the bracketed strings before use. If history is already persisted or
 local retained evidence is discoverable, leave `$historyArgs` empty. Validation
-uses an explicit boundary only in memory; the updater persists it.
+uses an explicit boundary only in memory. The updater persists a new explicit
+boundary only when no matching source-bound boundary already exists.
 
 ```powershell
 & $pythonExe -m stockguidance.cli.validate_database @commonArgs @historyArgs @publicationArgs --format json > output/validation-before.json
@@ -157,9 +161,12 @@ These are separate steps: inspect the report and exit code between commands.
 An existing database with integrity/schema findings needs review before writes.
 For a new empty database only, add `--initialize-schema` to its first update.
 Add `--start-date YYYY-MM-DD --end-date YYYY-MM-DD` to narrow the operation;
-bounds are inclusive. Omitted end dates use the current clock and calendar/
-publication planning. A validator without a publication policy reports unverified
-availability and is not a readiness pass.
+bounds are inclusive. Omitted dates use the discovered retained/fetchable scope;
+the default end is the latest expected published exchange session. If current
+provider capability is unknown or stale, the update still audits and reconciles
+intact local evidence, but it does not guess a fetch range. Missing or due
+refreshes outside access remain explicit unresolved/stale results. Corrupt
+source content outside access is preserved and cannot be marked complete.
 
 Validation exits: `0` verified required coverage, `2` missing/invalid/incomplete/
 unverified coverage or no available session, `1` setup/inspection failure.

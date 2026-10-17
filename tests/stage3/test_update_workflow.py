@@ -6,11 +6,24 @@ import pytest
 
 from stockguidance.config.source import PriceAdjustment
 from stockguidance.database.repositories.sessions import SessionQuery
+from stockguidance.market_data.discovery import DiscoveryRequest, discover_coverage
 from stockguidance.market_data.manifests import ManifestStore
-from stockguidance.market_data.providers.contracts import ProviderResponse, ResponseState
+from stockguidance.market_data.providers.contracts import CapabilityState, ProviderCapability, ProviderResponse, ResponseState
 from stockguidance.market_data.publication import DailyPublicationPolicy
 from stockguidance.validation.coverage import CoverageState
 from stockguidance.workflows.failures import StageExecutionError
+
+
+def _capability_scoped_discovery(harness, calendar, inventory=None):
+	capability = ProviderCapability(
+		harness.source.identity, CapabilityState.VERIFIED, harness.clock.now(), "Fixture account metadata",
+		"Fixture provider access starts on 2024-07-05", date(2024, 7, 5), date(2024, 7, 8), timedelta(days=1), date(2024, 7, 5),
+	)
+	return discover_coverage(
+		harness.source.identity, calendar, harness.clock, harness.settings.publication,
+		request=DiscoveryRequest(harness.source.identity, date(2024, 7, 1), date(2024, 7, 8)),
+		local_inventory=inventory, provider_capability=capability, history_boundary=harness.boundary,
+	)
 
 def test_empty_database_and_custom_configuration_are_reconciled(harness):
 	result = harness.run()
@@ -24,6 +37,40 @@ def test_empty_database_and_custom_configuration_are_reconciled(harness):
 	assert all(item.state is CoverageState.COMPLETE for item in result.coverage.sessions)
 	assert result.data_revision
 	assert list((harness.source.data_root / "market_data").rglob("*.manifest.json"))
+
+
+def test_discovered_provider_scope_never_fetches_before_current_access(harness, calendar):
+	settings = replace(harness.settings, discovery=_capability_scoped_discovery(harness, calendar))
+	result = harness.run(settings)
+	assert not result.successful
+	assert [session.session_date for source, session in harness.provider.calls] == [date(2024, 7, 5), date(2024, 7, 8)]
+	assert all(item.session.session_date >= date(2024, 7, 5) for item in result.coverage.sessions if item.state is CoverageState.COMPLETE)
+
+
+def test_intact_manifest_reimports_outside_provider_scope_without_fetching(harness, calendar):
+	harness.run()
+	date_id = harness.database.sql("SELECT id FROM transaction_dates WHERE transaction_date = ?", ("2024-07-01",))[0][0]
+	harness.database.sql("DELETE FROM raw_stock_data WHERE date_id=?", (date_id,))
+	inventory = ManifestStore(harness.source.data_root).inventory(harness.source.identity, calendar)
+	settings = replace(harness.settings, discovery=_capability_scoped_discovery(harness, calendar, inventory))
+	harness.provider.calls.clear()
+	result = harness.run(settings)
+	assert result.successful
+	assert harness.provider.calls == []
+	assert harness.database.sql("SELECT COUNT(*) FROM raw_stock_data") == [(5,)]
+
+
+def test_due_refresh_outside_provider_scope_is_stale_without_archive_loss(harness, calendar):
+	harness.run()
+	harness.clock.value += timedelta(hours=2)
+	inventory = ManifestStore(harness.source.data_root).inventory(harness.source.identity, calendar)
+	settings = replace(harness.settings, discovery=_capability_scoped_discovery(harness, calendar, inventory))
+	harness.provider.calls.clear()
+	result = harness.run(settings)
+	assert not result.successful
+	assert result.stale_refreshes
+	assert all(session.session_date >= date(2024, 7, 5) for source, session in harness.provider.calls)
+	assert harness.database.sql("SELECT COUNT(*) FROM raw_stock_data") == [(5,)]
 
 
 def test_repeated_run_does_not_download_duplicate_or_rewrite_verified_rows(harness):

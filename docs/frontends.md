@@ -41,23 +41,26 @@ configuration eventually. No credential migration is required to use the new
 workflows. The retained module is packaged for installed use outside the checkout;
 its command delegates to the same updater and imports perform no downloads.
 
-## Establish history and update
+## Discover history and update
 
-Inspect actual provider entitlements/source history or supply an explicit,
-evidenced supported boundary. The earliest database row is not the supported
-history start. The live boundary and publication schedule remain unknown until
-configured by an operator. These placeholders must be replaced with evidenced
-values; example dates from fixture documentation are not production assertions.
+The updater inventories source-bound manifests and local observations before
+planning. The earliest database row is not proof of continuous coverage, and a
+local archive may predate current provider access. An explicit, evidenced
+source-bound history override remains available, but current network requests
+also require fresh verified provider capability evidence.
 
 ```powershell
-& $stockguidancePython -m stockguidance.cli.update_market_data --data-root data --dbinfo-file dbinfo.id --history-start '<first-supported-session>' --history-evidence '<boundary evidence>' --end-date '<last-requested-date>' --publication-delay-minutes '<evidenced delay>' --publication-evidence '<publication evidence>' --recent-window-days '<correction window>' --recent-refresh-hours '<recent recheck interval>' --archive-refresh-days '<archive recheck interval>' --correction-evidence '<correction evidence>'
+& $stockguidancePython -m stockguidance.cli.update_market_data --data-root data --dbinfo-file dbinfo.id --end-date '<last-requested-date>' --publication-delay-minutes '<evidenced delay>' --publication-evidence '<publication evidence>' --recent-window-days '<correction window>' --recent-refresh-hours '<recent recheck interval>' --archive-refresh-days '<archive recheck interval>' --correction-evidence '<correction evidence>'
 ```
 
-Supported history persists in `data/history`, keyed by the complete non-secret
-source/request identity. Later updates can omit the boundary flags. Only an
-explicit `--initialize-schema` creates missing compatible updater tables; it
-never converts existing tables. Full-coverage reconciliation detects leading and
-interior gaps, interrupted imports and due corrections.
+Source-bound history metadata persists in `data/history`, keyed by the complete
+non-secret source/request identity, only when an explicit new boundary is
+provided. Later updates can omit the boundary flags. Unknown or stale provider
+capability blocks network refreshes while preserving local archives and exposing
+the unresolved scope. Only an explicit `--initialize-schema` creates missing
+compatible updater tables; it never converts existing tables. Full-coverage
+reconciliation detects leading and interior gaps, interrupted imports and due
+corrections.
 
 ## Read-only validation and explicit repair
 

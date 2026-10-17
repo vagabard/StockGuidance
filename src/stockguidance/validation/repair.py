@@ -60,11 +60,21 @@ class RepairPlan:
 			if not isinstance(item.reason, str):
 				raise ValueError("Invalid repair reason")
 
-	def validate_for_update(self, source: SourceIdentity, start: date, end: date, cutoff: datetime) -> None:
+	def validate_for_update(
+		self, source: SourceIdentity, start: date, end: date, cutoff: datetime,
+		*, fetchable_start: date | None = None, fetchable_end: date | None = None, capability_resolved: bool = True,
+	) -> None:
 		if self.source != source or self.start != start or self.end != end or self.as_of > cutoff:
 			raise ValueError("Repair plan does not match the update source, bounds, or clock")
 		if any(item.action not in AUTOMATIC_ACTIONS for item in self.items):
 			raise ValueError("Repair plan requires manual schema, integrity, or policy review before updating")
+		for item in self.items:
+			if item.action is RepairAction.REFRESH_SOURCE and (
+				not capability_resolved or
+				(fetchable_start is not None and (item.session_date is None or item.session_date < fetchable_start)) or
+				(fetchable_end is not None and (item.session_date is None or item.session_date > fetchable_end))
+			):
+				raise ValueError("Repair plan requests a source refresh outside current evidenced provider access")
 
 	def payload(self) -> dict[str, object]:
 		version = 2 if any(item.reason or item.action is RepairAction.BLOCKED_OUT_OF_ACCESS for item in self.items) else 1

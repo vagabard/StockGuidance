@@ -103,7 +103,17 @@ provided:
   --archive-refresh-days '<archive interval>' --correction-evidence '<correction provenance>'
 ```
 
-The updater still needs persisted history or explicit boundary/evidence arguments. Plan bounds become the update bounds unless supplied explicitly; supplied bounds must match. Source/adjustment/interval and cutoff are validated before provider/database side effects. Plans containing manual schema, orphan/duplicate integrity, outside-scope context, or policy-review items are rejected until reviewed. Automatic actions are `refresh_source`, `reimport`, `rebuild_legacy_derived`, and `complete_manifest`. Refresh proposals force provider verification even before the ordinary correction interval expires. Recovery remains idempotent and reconciles the entire declared scope; plans contain no arbitrary SQL.
+The updater discovers a retained scope from source manifests and eligible local
+database observations when history bounds are omitted. Plan bounds become the
+update bounds unless supplied explicitly; supplied bounds must match. Source,
+adjustment, interval, capability and cutoff are validated before provider or
+database side effects. Plans containing manual schema, orphan/duplicate
+integrity, outside-scope context, policy-review items, or refreshes outside
+fresh provider capability are rejected until reviewed. Automatic actions are
+`refresh_source`, `reimport`, `rebuild_legacy_derived`, and
+`complete_manifest`. Refresh proposals force provider verification even before
+the ordinary correction interval expires. Recovery remains idempotent and
+reconciles the entire declared scope; plans contain no arbitrary SQL.
 
 Updater and validator share source/raw/derived assessment and database integrity reading. Forged derived-content receipts cannot hide incorrect mature values, and unassigned orphans cannot produce a successful update. Re-run validation after explicit repairs.
 
