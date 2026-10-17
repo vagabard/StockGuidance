@@ -7,6 +7,10 @@ for sale proceeds. Both `alternate_sessions` and independent `staggered_halves`
 allocations use the same feature, target, eligibility and order-planning code.
 
 Start with [frontend commands and migration notes](docs/frontends.md).
+For day-to-day operation, date-subset training and simulation, read the
+[operations guide](docs/operations_guide.md). The
+[Luna maintenance prompts](docs/luna_maintenance_prompts.md) cover proposed
+automatic history discovery, archive preservation and measured Java work.
 Stage 9 cleanup is documented in the [deletion list grouped by reason](docs/stage9_retirement.md);
 retained thin frontends are listed separately from deletions.
 Detailed specifications cover [updating](docs/market_data_updating.md),

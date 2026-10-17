@@ -1,5 +1,12 @@
 # Read-only database validation
 
+For the recommended update/validation/training/simulation order, see the
+[operations guide](operations_guide.md). Proposed automatic date discovery,
+preservation of archives older than current download access, and conditional
+Java work are specified in [Luna implementation prompts](luna_maintenance_prompts.md).
+Those proposals are not yet implemented; the boundary requirements below describe
+the current commands.
+
 Run validation independently of downloading, importing, training, or recommending:
 
 ```powershell
@@ -7,7 +14,7 @@ Run validation independently of downloading, importing, training, or recommendin
 & '.venv\Scripts\python.exe' validate_database.py --help
 ```
 
-The `validate_database` console entry point is declared in `pyproject.toml` and becomes available after refreshing the editable installation. Use PyCharm's configured interpreter. The temporary workaround for this checkout's missing Python base installation is recorded in `REFACTORING_PROMPTS.md`.
+The `validate_database` console entry point is declared in `pyproject.toml` and becomes available after refreshing the editable installation. Use PyCharm's configured interpreter. Python has been repaired; historical base-installation workarounds in `REFACTORING_PROMPTS.md` are no longer current setup guidance. See the operations guide for the verified interpreter and checkout invocation.
 
 Use the same data root, database configuration, adjustment, history evidence, and publication policy as the updater. The live provider's first supported session and publication delay remain unknown. Replace the bracketed values with inspected evidence:
 
