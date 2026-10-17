@@ -2,8 +2,8 @@
 
 These are implementation tasks for the model you select as Luna 5.6. Use one
 numbered prompt per conversation, in order, with the shared preamble below.
-Prompts 4 and 7-9 are conditional as described. Stages 1-7 are marked complete
-in the handoffs below; Stages 8-10 remain pending. Read [operations_guide.md](operations_guide.md) for current commands
+Prompts 4 and 7-9 are conditional as described. Stages 1-8 are marked complete
+in the handoffs below; Stages 9-10 remain pending. Read [operations_guide.md](operations_guide.md) for current commands
 and [database_validation.md](database_validation.md) for the existing audit contract.
 
 This brief updates the history requirement in `REFACTORING_PROMPTS.md`: retained
@@ -669,6 +669,41 @@ reports the expected system-path warning; no network dependency download, live
 provider call, database connection, schema setup, production write, or model
 port was used.
 
-Stages 8-10 remain pending. Stage 8 must select a bounded measured validator
-operation and compare complete Python/Java report parity before any opt-in
-backend is considered.
+### Stage 8 handoff (2026-10-17)
+
+Status: complete. Selected the Stage 6 `raw_derived_reconciliation` hotspot and
+added the opt-in `stockguidance.validation.ValidatorMain` backend under
+`StockGuidance/java/src/main/java/stockguidance/validation/`. The typed request
+contract carries source identity, an authoritative exported calendar, bounded
+scope/cutoff, source evidence, and history diagnostics. The validator uses one
+read-only repeatable-read transaction, bounded prepared date queries, streaming
+result sets, explicit `wasNull()` handling, independent duplicate/orphan
+detection, source/content and receipt revisions, chronological legacy-derived
+reconciliation, Python-compatible tolerances, deterministic findings, and
+repair proposals. It never initializes schema, writes SQL, repairs rows,
+updates manifests, or contacts a provider.
+
+The Python boundary in
+`src/stockguidance/validation/java_backend.py` passes only explicit config and
+request paths, normalizes the selected report shape, and keeps Python as the
+default. Java fixture-backed JDBC tests cover clean, old-archive context,
+nullable values, corrupt derived data, late receipts, gaps, duplicates,
+orphans, randomized row/ID order, rollback, zero commits, and bounded SQL.
+
+Files changed: the Stage 8 Java validation/request/content/finding classes and
+tests, `src/stockguidance/validation/java_backend.py`,
+`tests/stage8/test_java_backend.py`, `StockGuidance/java/README.md`,
+`docs/java_performance.md`, and the Java/performance sections of
+`docs/operations_guide.md`. No existing Python
+validator default or production integration was changed.
+
+Accepted checks: offline `mvn -o test` passed 17 Java tests, including 5 Stage 8
+validator tests. The configured PyCharm Python 3.14.8 executable ran
+`python -m pytest tests/stage8 -q` with 85 passed, including 4 Python boundary
+and normalized-parity tests. No disposable MySQL service was available, so
+an end-to-end JVM startup/transport/peak-memory comparison against a live SQL
+fixture is explicitly not claimed; the Python backend remains the default.
+
+Next-stage prerequisites: Stage 9 must use a disposable MySQL parity fixture
+and only proceed if a measured end-to-end benefit remains after JVM startup and
+transport costs. Stages 9-10 remain pending.

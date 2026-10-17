@@ -116,13 +116,32 @@ performance baseline:
   ordered ticker IDs. `SimulationEngine` also uses legacy date IDs and CSV
   output rather than the current source, revision, receipt, availability,
   calendar, and portfolio-event contracts.
-- No Java build, pinned dependency set, real JSON parser, interchange contract,
-  parity fixture set, or read-only transaction test is present. Therefore this
-  study intentionally records no Java timings and does not recommend a Java
-  port yet.
+- Those historical prototypes had no Java build, pinned dependency set, real
+  JSON parser, interchange contract, parity fixture set, or read-only
+  transaction test. Stage 7 supplied the foundation and Stage 8 supplied the
+  bounded validator; neither is a measured production performance result.
 
 If a later review establishes a real bottleneck, the candidate order remains
 streaming read-only reconciliation, bulk imports, then frozen-score simulation.
 Python keeps Torch fitting, feature contracts, provider/calendar policy, and
 the semantic reference until a future stage proves parity and a measured
 end-to-end benefit including process and transport costs.
+
+## Stage 8 validator result
+
+Stage 8 selected the measured `raw_derived_reconciliation` hotspot and added an
+opt-in Java validator for the bounded database inspection contract. The request
+exports the authoritative calendar and carries source-manifest evidence,
+history diagnostics, the as-of cutoff, and the exact date scope. The Java path
+uses one read-only repeatable-read transaction, prepared bounded date queries,
+streaming result sets, `wasNull()` for nullable SQL values, independent
+duplicate/orphan checks, source/content and receipt revisions, chronological
+legacy-derived formulas, and deterministic findings/repair proposals.
+
+The Python boundary normalizes the selected report fields and compares Python
+and Java-shaped reports without changing the Python default. Offline fixture
+tests cover clean, old-archive context, late receipt, null, gap, duplicate,
+orphan, corrupt-derived, randomized row/ID order, rollback, and zero commits.
+No disposable MySQL service was available for a real startup/transport/peak-
+memory comparison, so no Java performance improvement or opt-in production
+selection is claimed.

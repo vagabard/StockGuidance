@@ -23,6 +23,7 @@ public final class MySqlConnectionFactory implements ConnectionFactory {
             properties.setProperty("password", configuration.password());
             properties.setProperty("useUnicode", "true");
             properties.setProperty("characterEncoding", "utf8mb4");
+            properties.setProperty("useCursorFetch", "true");
             return DriverManager.getConnection(url, properties);
         } catch (SQLException | RuntimeException error) {
             throw new DatabaseAccessException("Configured MySQL connection failed");

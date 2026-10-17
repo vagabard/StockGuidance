@@ -65,5 +65,30 @@ use SHA-256. The Python reference encoder is
 `5e1fa46e012effbb02606d065b410e61a045f7bfddb3b7489f59205e6854ca05`.
 
 Money uses `BigDecimal` with scale four and `HALF_UP` rounding, matching the
-Python daily-price precision. No provider downloader, live writer, model
-training port, or Java validator is included in Stage 7.
+Python daily-price precision. No provider downloader, live writer, or model
+training port is included in Stage 7.
+
+## Stage 8 bounded validator
+
+Stage 8 adds the opt-in `stockguidance.validation.ValidatorMain` backend for
+`raw_derived_reconciliation`. It consumes a versioned request containing the
+non-secret source identity, an authoritative exported calendar, the requested
+date scope and cutoff, source-manifest evidence, and history diagnostics. The
+database configuration remains an explicit JSON path; credentials are never
+placed in subprocess arguments or report output.
+
+The validator performs one read-only repeatable-read transaction with bounded
+date predicates and streaming JDBC result sets. It checks source keys/content,
+SQL NULL values, duplicate and orphan mappings, import receipt revisions,
+chronological legacy-derived values, numerical tolerances, and deterministic
+repair proposals. It does not fetch providers, initialize schema, write SQL,
+repair rows, or update manifests. Provider capability, feature, target, and
+opening checks are outside this selected operation and are not implied by its
+report.
+
+The Python integration boundary is
+`stockguidance.validation.java_backend.run_java_validator`. It passes only
+`--config` and `--request` paths and accepts exit `0` for complete, `2` for an
+incomplete validation, and `1` for a backend failure or failed validation. Keep
+the Python validator as the default until a real database benchmark proves an
+end-to-end benefit including JVM startup, transport, and memory.

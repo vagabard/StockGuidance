@@ -1,10 +1,10 @@
 # Operating StockGuidance
 
 This guide describes the current Python commands and the shared automatic
-history discovery contract. Stages 1-7 of the implementation prompts are
+history discovery contract. Stages 1-8 of the implementation prompts are
 complete; validation and updating now use the shared resolver. Implementation prompts are in
 [luna_maintenance_prompts.md](luna_maintenance_prompts.md). Later conditional
-stages remain pending. Start with the Python workflow. The historical Java
+stages 9-10 remain pending. Start with the Python workflow. The historical Java
 prototypes remain unfinished and separate from the Stage 7 foundation; Stage 6
 measured the Python paths without treating them as semantically equivalent. See
 [java_performance.md](java_performance.md) for the reproducible offline study.
@@ -368,8 +368,9 @@ independent balances; missed decisions never shift the anchored schedule.
 
 ## What belongs in Java?
 
-No function has yet been shown to require a Java port. Database latency,
-round trips, parsing, materialization and Python loops need separate measurement.
+Stage 8 now provides an opt-in Java bounded validator for the measured
+raw/derived reconciliation hotspot. Database latency, round trips, parsing,
+materialization and Python loops still need separate measurement.
 NumPy and Torch already execute substantial work in native code. Compare a
 correct batched/vectorized Python implementation with Java before choosing.
 
@@ -382,7 +383,9 @@ correct batched/vectorized Python implementation with Java before choosing.
 | Torch models, fitting and feature specifications | Keep in Python initially; do not rebuild the ML stack to optimize database work |
 | Provider/history policy and exchange chronology | Keep one authoritative contract; export explicit session/policy data rather than maintaining divergent rules |
 
-The current Java files need correctness work before any speed comparison:
+The Stage 8 validator is a separate current implementation; historical Java
+files still need correctness work before they can be used for a speed
+comparison:
 
 - `database/DatabaseRowsToTensors.java` reads legacy derived targets, orders by
   numeric IDs, builds the full dataset in memory, uses a global `missing_dates`
@@ -397,13 +400,14 @@ The current Java files need correctness work before any speed comparison:
 - `database/DbInfo.java` and `util/JsonUtils.java` parse JSON with regular
   expressions. `DbConnect.java` searches parent directories for configuration,
   whereas current Python uses an explicit selected JSON file.
-- The inspected Java tree has a JDBC jar and a small load test, but no discovered
-  Maven/Gradle build or equivalent current updater/validator CLI.
+- `stockguidance.validation.ValidatorMain` is the current explicit-path,
+  read-only CLI. It is opt-in and does not replace the Python validator.
 
-These observations are source review findings, not Java runtime test results.
-Prompts 6-9 establish measurements, a build, parity fixtures and conditional
-ports. A Java read-only validator is the first sensible implementation candidate;
-keep it opt-in until it matches the Python reports and improves measured results.
+These historical observations are source review findings, not Java runtime test
+results. Stage 8's fixture-backed JDBC tests prove selected-operation parity
+behavior, null/duplicate/orphan handling and zero writes. A disposable MySQL
+benchmark including JVM startup and transport was not available, so the Python
+implementation remains the default and no production speedup is claimed.
 
 ## Completion checklist
 
