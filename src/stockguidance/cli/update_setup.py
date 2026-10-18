@@ -4,6 +4,7 @@ from pathlib import Path
 
 from stockguidance.calendar.clock import Clock, SystemClock
 from stockguidance.calendar.exchange import ExchangeCalendar
+from stockguidance.cli.paths import resolve_cli_path
 from stockguidance.config.source import PriceAdjustment, SourceConfig, SourceIdentity
 from stockguidance.database.connections import MySQLConnectionFactory
 from stockguidance.database.repositories.mysql_market_data import MySQLMarketDataRepository
@@ -77,7 +78,12 @@ def _query_boundary(source: SourceConfig, calendar: ExchangeCalendar, discovery:
 def assemble_and_update(arguments: argparse.Namespace) -> UpdateResult:
 	clock = SystemClock()
 	identity = SourceIdentity("polygon", GROUPED_ENDPOINT, "us-stocks", GROUPED_UNIVERSE, PriceAdjustment(arguments.adjustment))
-	source = SourceConfig(identity, Path(arguments.data_root), Path(arguments.dbinfo_file), "polygon_fetch.DEFAULT_API_KEY or POLYGON_API_KEY")
+	source = SourceConfig(
+		identity,
+		resolve_cli_path(arguments.data_root, "data"),
+		resolve_cli_path(arguments.dbinfo_file, "dbinfo.id"),
+		"polygon_fetch.DEFAULT_API_KEY or POLYGON_API_KEY",
+	)
 	repair_path = getattr(arguments, "repair_plan", None)
 	repair_plan = None if repair_path is None else load_repair_plan(Path(repair_path))
 	history_store = JsonHistoryStore(source.data_root / "history")

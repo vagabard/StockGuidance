@@ -63,6 +63,16 @@ def _query_boundary(source: SourceConfig, calendar: SessionCalendar, discovery: 
 	boundary = discovery.history_boundary
 	if boundary is not None and (scope_start is None or scope_start >= boundary.history_start):
 		return boundary
+	local_floor = discovery.local_bounds.first_observed or scope_start
+	if local_floor is not None:
+		return HistoryBoundary(
+			source.identity,
+			calendar.calendar_id,
+			calendar.session(local_floor).session_date,
+			HistoryProvenance.SOURCE_HISTORY,
+			"Earliest retained local observation; audit floor only, not a provider coverage claim",
+			cutoff,
+		)
 	sessions = calendar.sessions(calendar.start, calendar.end)
 	if not sessions:
 		raise ValueError("Validation calendar has no exchange sessions")

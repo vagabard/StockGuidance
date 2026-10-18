@@ -78,6 +78,12 @@ date scope and cutoff, source-manifest evidence, and history diagnostics. The
 database configuration remains an explicit JSON path; credentials are never
 placed in subprocess arguments or report output.
 
+`stockguidance.validation.DownloadComparisonMain` is a separate read-only
+legacy archive comparator. It accepts an explicit database JSON path and data
+root, streams `market_summary` NDJSON alongside ordered raw MySQL rows, reports
+exact raw differences, and has no provider-history, derived, or model-readiness
+policy.
+
 The validator performs one read-only repeatable-read transaction with bounded
 date predicates and streaming JDBC result sets. It checks source keys/content,
 SQL NULL values, duplicate and orphan mappings, import receipt revisions,

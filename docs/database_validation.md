@@ -16,6 +16,21 @@ Run validation independently of downloading, importing, training, or recommendin
 
 The `validate_database` console entry point is declared in `pyproject.toml` and becomes available after refreshing the editable installation. Use PyCharm's configured interpreter. Python has been repaired; historical base-installation workarounds in `REFACTORING_PROMPTS.md` are no longer current setup guidance. See the operations guide for the verified interpreter and checkout invocation.
 
+The command resolves default `data` and `dbinfo.id` paths from the checkout when
+launched from the IDE or another working directory. Explicit paths remain
+unchanged. With no history override, the earliest observed database or local
+manifest date is used as a validation audit floor. The report keeps that floor
+separate from the provider's supported-history boundary; a local minimum does
+not prove that the provider has no earlier data.
+
+`--history-evidence` is provenance for an explicit `--history-start`, such as an
+account entitlement statement or a documented source-history boundary. It is
+not a description of the rows being checked. `--publication-evidence` describes
+the evidence for the expected delay between an exchange close and a provider
+daily response. It is optional for a local audit; when omitted, database and
+source rows are still inspected, but publication/completeness remains
+unverified.
+
 Use the same data root, database configuration and adjustment as the updater.
 Publication evidence is required when a delay is supplied; otherwise validation
 reports an unresolved publication limit while still inspecting local rows and
@@ -116,6 +131,33 @@ the ordinary correction interval expires. Recovery remains idempotent and
 reconciles the entire declared scope; plans contain no arbitrary SQL.
 
 Updater and validator share source/raw/derived assessment and database integrity reading. Forged derived-content receipts cannot hide incorrect mature values, and unassigned orphans cannot produce a successful update. Re-run validation after explicit repairs.
+
+## Legacy download comparison
+
+The slower `compare_database_downloads` command compares raw database rows with
+the retained legacy archive under `data/market_summary/YYYY/*.ndjson`. It is
+implemented by the Java streaming backend so file parsing and one ordered JDBC
+result stream run with bounded memory inside a repeatable-read transaction. It
+does not fetch, repair, initialize schema, or write metadata. It checks dates,
+ticker keys, timestamps, OHLCV/VWAP/transaction values, duplicate records, and
+malformed files. Derived columns and model readiness remain Python validation
+checks.
+
+Build the Java module first, then provide the compiled classes and dependencies
+on the classpath:
+
+```powershell
+Set-Location StockGuidance\java
+mvn -o package
+Set-Location ..\..
+& $pythonExe -m stockguidance.cli.compare_database_downloads `
+  --data-root data --dbinfo-file dbinfo.id --adjustment adjusted `
+  --java-classpath 'StockGuidance\java\target\classes;StockGuidance\java\target\dependency\*;StockGuidance\java\lib\mysql-connector-j-9.6.0.jar' `
+  --format json > output/download-comparison.json
+```
+
+Exit `0` means exact raw equality, `2` means differences or invalid/incomplete
+download evidence, and `1` means setup or database inspection failure.
 
 The retained hardcoded key is `DEFAULT_API_KEY` in `polygon_fetch.py`; it should eventually become external configuration. Validation does not load it or contact the provider. Reports and repair plans contain no credentials.
 

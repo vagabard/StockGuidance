@@ -21,6 +21,7 @@ incremental_training = "stockguidance.cli.incremental:main"
 inspect_features = "stockguidance.cli.inspect_features:main"
 inspect_reports = "stockguidance.cli.reports:main"
 compare_signals = "stockguidance.cli.compare_signals:main"
+compare_database_downloads = "stockguidance.cli.compare_database_downloads:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8.3", "mypy>=1.15"]

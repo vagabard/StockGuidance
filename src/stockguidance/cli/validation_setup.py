@@ -1,9 +1,9 @@
 import argparse
 from datetime import date, datetime, timedelta
-from pathlib import Path
 
 from stockguidance.calendar.clock import SystemClock
 from stockguidance.calendar.exchange import ExchangeCalendar
+from stockguidance.cli.paths import resolve_cli_path
 from stockguidance.config.source import PriceAdjustment, SourceConfig, SourceIdentity
 from stockguidance.database.repositories.mysql_sessions import MySQLSessionRepository
 from stockguidance.database.repositories.mysql_validation import MySQLValidationRepository
@@ -41,7 +41,12 @@ def _capability_from_cache(store: JsonHistoryStore, identity: SourceIdentity) ->
 def assemble_and_validate(arguments: argparse.Namespace) -> ValidationResult:
 	clock = SystemClock()
 	identity = SourceIdentity("polygon", GROUPED_ENDPOINT, "us-stocks", GROUPED_UNIVERSE, PriceAdjustment(arguments.adjustment))
-	source = SourceConfig(identity, Path(arguments.data_root), Path(arguments.dbinfo_file), "unused-by-read-only-validation")
+	source = SourceConfig(
+		identity,
+		resolve_cli_path(arguments.data_root, "data"),
+		resolve_cli_path(arguments.dbinfo_file, "dbinfo.id"),
+		"unused-by-read-only-validation",
+	)
 	if (arguments.ticker_ids is None) != (arguments.lookback_sessions is None):
 		raise ValueError("Feature validation requires both ticker IDs and lookback")
 	mode = SignalMode(arguments.signal_mode)

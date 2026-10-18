@@ -91,6 +91,10 @@ live-provider acceptance test. The IDE reported an unknown package manager, so
 no package installation was attempted. Old Python-base workarounds in historical
 refactoring handoffs should not be copied into the repaired environment.
 
+The validation and download-comparison frontends also locate the checkout root
+when launched by opening a Python file in the IDE, so their default `data` and
+`dbinfo.id` paths do not depend on the IDE working directory.
+
 ## Three different date ranges
 
 | Range | Meaning | How it should be used |
@@ -126,6 +130,15 @@ and keeps retained observations separate from current provider entitlement.
 Network fetches require fresh verified provider capability evidence. Unknown or
 stale capability leaves local audit/reconciliation visible and reports the
 unresolved provider limit without fetching.
+
+For a local consistency audit, `--history-evidence` is provenance for an
+explicit earliest-history claim, while `--publication-evidence` is provenance
+for the expected post-close provider publication delay. Both are optional for
+the read-only local audit. The audit uses the earliest observed retained date as
+its local floor and reports provider-history and publication uncertainty
+separately. For exact comparison with the older downloaded archive, use the
+slower `compare_database_downloads` command documented in
+`database_validation.md`.
 
 Stage 1 discovery is read-only and takes an injected clock, authoritative session
 calendar, publication policy, optional local inventory, and an optional typed

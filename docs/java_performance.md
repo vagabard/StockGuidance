@@ -110,6 +110,13 @@ queries, preserves nullable values and chronology, and reports unsupported
 checks explicitly. The Python validator remains the default; the Java backend
 does not download, write, repair, initialize schema, or update manifests.
 
+The legacy archive comparator is also Java-backed. `DownloadComparisonMain`
+streams one ordered raw-row result set and parses one NDJSON session at a time,
+so memory is bounded by the largest daily file and the date index. It does not
+replace Python discovery, publication, feature, opening, derived, or
+model-readiness semantics. Measure JVM startup, JDBC/file I/O, and peak memory
+for any end-to-end performance claim.
+
 No disposable MySQL benchmark including JVM startup, transport, and peak memory
 was available, so no Java production speedup or hotspot port is claimed. Stage
 9 did not add a Java import or simulation port.
