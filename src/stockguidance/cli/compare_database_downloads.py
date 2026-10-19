@@ -6,6 +6,7 @@ import subprocess
 from typing import Any
 
 from stockguidance.cli.paths import project_root, resolve_cli_path
+from stockguidance.validation.java_backend import JavaValidationBackendError, selected_table_names_file
 
 
 def parser() -> argparse.ArgumentParser:
@@ -50,22 +51,24 @@ def main(argv: list[str] | None = None) -> int:
 	arguments = parser().parse_args(argv)
 	data_root = resolve_cli_path(arguments.data_root, "data")
 	dbinfo_file = resolve_cli_path(arguments.dbinfo_file, "dbinfo.id")
-	command = [
-		arguments.java_executable,
-		"-cp",
-		_classpath(arguments.java_classpath),
-		"stockguidance.validation.DownloadComparisonMain",
-		"--config", str(dbinfo_file),
-		"--data-root", str(data_root),
-		"--adjustment", arguments.adjustment,
-	]
-	for name, value in (("--start-date", arguments.start_date), ("--end-date", arguments.end_date)):
-		if value is not None:
-			command.extend((name, value))
 	try:
-		completed = subprocess.run(command, capture_output=True, text=True, check=False)
+		with selected_table_names_file(dbinfo_file) as table_names_file:
+			command = [
+				arguments.java_executable,
+				"-cp",
+				_classpath(arguments.java_classpath),
+				"stockguidance.validation.DownloadComparisonMain",
+				"--table-names-file", str(table_names_file),
+				"--config", str(dbinfo_file),
+				"--data-root", str(data_root),
+				"--adjustment", arguments.adjustment,
+			]
+			for name, value in (("--start-date", arguments.start_date), ("--end-date", arguments.end_date)):
+				if value is not None:
+					command.extend((name, value))
+			completed = subprocess.run(command, capture_output=True, text=True, check=False)
 		payload = json.loads(completed.stdout)
-	except (OSError, ValueError, json.JSONDecodeError):
+	except (OSError, ValueError, json.JSONDecodeError, JavaValidationBackendError):
 		payload = {"complete": False, "failed": True, "exit_code": 1, "error": "Download comparison backend failed"}
 	if arguments.format == "json":
 		print(json.dumps(payload, sort_keys=True))

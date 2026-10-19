@@ -1,14 +1,49 @@
 """Opt-in process boundary for the bounded Java validation operation."""
 
+from contextlib import contextmanager
 from collections.abc import Callable
+from importlib import resources
 import json
 from pathlib import Path
 import subprocess
-from typing import Any
+import tempfile
+from typing import Any, Iterator
+
+from stockguidance.database.configuration import load_database_configuration
 
 
 class JavaValidationBackendError(RuntimeError):
 	"""The Java process did not return a validation report."""
+
+
+@contextmanager
+def selected_table_names_file(database_config: Path) -> Iterator[Path]:
+	"""Expose the Python-selected registry to a Java subprocess."""
+	if not isinstance(database_config, Path):
+		raise ValueError("Java validation database configuration must be a pathlib.Path")
+	if database_config.is_file():
+		try:
+			configuration = load_database_configuration(database_config)
+			configuration.load_table_names()
+		except ValueError as error:
+			raise JavaValidationBackendError("Selected table-names configuration is invalid") from error
+		if configuration.table_names_file is not None:
+			yield configuration.table_names_file
+			return
+	try:
+		payload = resources.files("stockguidance.database").joinpath("table_names.json").read_bytes()
+	except (OSError, UnicodeError) as error:
+		raise JavaValidationBackendError("Packaged table-names resource is unavailable") from error
+	temporary_path: Path | None = None
+	try:
+		with tempfile.NamedTemporaryFile(prefix="stockguidance-table-names-", suffix=".json", delete=False) as handle:
+			handle.write(payload)
+			temporary_path = Path(handle.name)
+		assert temporary_path is not None
+		yield temporary_path
+	finally:
+		if temporary_path is not None:
+			temporary_path.unlink(missing_ok=True)
 
 
 def run_java_validator(
@@ -24,24 +59,27 @@ def run_java_validator(
 	"""Run the Java validator with paths only; credentials stay in the config file."""
 	if not isinstance(database_config, Path) or not isinstance(request_path, Path) or not isinstance(classpath, (Path, str)):
 		raise ValueError("Java validation paths must be pathlib.Path values")
-	command = (
-		java_executable,
-		"-cp",
-		str(classpath),
-		"stockguidance.validation.ValidatorMain",
-		"--config",
-		str(database_config),
-		"--request",
-		str(request_path),
-	)
-	completed = run(
-		command,
-		cwd=None if working_directory is None else str(working_directory),
-		capture_output=True,
-		text=True,
-		check=False,
-		timeout=timeout_seconds,
-	)
+	with selected_table_names_file(database_config) as table_names_file:
+		command = (
+			java_executable,
+			"-cp",
+			str(classpath),
+			"stockguidance.validation.ValidatorMain",
+			"--table-names-file",
+			str(table_names_file),
+			"--config",
+			str(database_config),
+			"--request",
+			str(request_path),
+		)
+		completed = run(
+			command,
+			cwd=None if working_directory is None else str(working_directory),
+			capture_output=True,
+			text=True,
+			check=False,
+			timeout=timeout_seconds,
+		)
 	try:
 		payload = json.loads(completed.stdout)
 	except (TypeError, ValueError, json.JSONDecodeError) as error:

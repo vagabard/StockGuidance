@@ -10,7 +10,7 @@ import java.util.Iterator;
 import java.util.Set;
 
 public final class DatabaseConfiguration {
-    private static final Set<String> ALLOWED_FIELDS = Set.of("host", "database", "schema", "user", "password", "port", "driver");
+    private static final Set<String> ALLOWED_FIELDS = Set.of("host", "database", "schema", "user", "password", "port", "driver", "table_names_file");
 
     private final String host;
     private final String database;
@@ -18,8 +18,13 @@ public final class DatabaseConfiguration {
     private final String password;
     private final int port;
     private final DatabaseDriver driver;
+    private final Path tableNamesFile;
 
     public DatabaseConfiguration(String host, String database, String user, String password, int port, DatabaseDriver driver) {
+        this(host, database, user, password, port, driver, null);
+    }
+
+    public DatabaseConfiguration(String host, String database, String user, String password, int port, DatabaseDriver driver, Path tableNamesFile) {
         this.host = requireText(host, "host");
         this.database = requireText(database, "database");
         this.user = requireText(user, "user");
@@ -29,17 +34,22 @@ public final class DatabaseConfiguration {
         }
         this.port = port;
         this.driver = driver == null ? DatabaseDriver.AUTO : driver;
+        this.tableNamesFile = tableNamesFile == null ? null : tableNamesFile.toAbsolutePath().normalize();
     }
 
     public static DatabaseConfiguration load(Path path) {
         try {
-            return decode(JsonSupport.read(path));
+            return decode(JsonSupport.read(path), path);
         } catch (ContractException | IllegalArgumentException error) {
             throw new IllegalArgumentException("Cannot read the explicit database JSON configuration");
         }
     }
 
     public static DatabaseConfiguration decode(JsonNode root) {
+        return decode(root, null);
+    }
+
+    private static DatabaseConfiguration decode(JsonNode root, Path configurationPath) {
         if (root == null || !root.isObject()) {
             throw new ContractException("Database configuration must be a JSON object");
         }
@@ -62,11 +72,12 @@ public final class DatabaseConfiguration {
         String password = root.has("password") ? requiredText(root, "password") : "";
         int port = root.has("port") ? requiredInt(root, "port") : 3306;
         String driverText = root.has("driver") ? requiredText(root, "driver") : DatabaseDriver.AUTO.value();
+        Path tableNamesFile = configurationPath == null ? null : resolveTableNamesFile(configurationPath, root);
         if (effectiveDatabase == null) {
             throw new ContractException("Database name is required");
         }
         try {
-            return new DatabaseConfiguration(host, effectiveDatabase, user, password, port, DatabaseDriver.parse(driverText));
+            return new DatabaseConfiguration(host, effectiveDatabase, user, password, port, DatabaseDriver.parse(driverText), tableNamesFile);
         } catch (IllegalArgumentException error) {
             throw new ContractException("Invalid database configuration");
         }
@@ -98,6 +109,18 @@ public final class DatabaseConfiguration {
 
     public DatabaseDriver driver() {
         return driver;
+    }
+
+    public Path tableNamesFile() {
+        return tableNamesFile;
+    }
+
+    public TableNames loadTableNames() {
+        return TableNames.load(tableNamesFile);
+    }
+
+    public TableNames loadTableNames(Path override) {
+        return TableNames.load(override == null ? tableNamesFile : override);
     }
 
     @Override
@@ -132,6 +155,25 @@ public final class DatabaseConfiguration {
             throw new ContractException("Expected integer for database configuration field");
         }
         return value.intValue();
+    }
+
+    private static Path resolveTableNamesFile(Path configurationPath, JsonNode root) {
+        if (!root.has("table_names_file") || root.get("table_names_file").isNull()) {
+            return null;
+        }
+        String selected = requiredText(root, "table_names_file");
+        if (selected.isBlank()) {
+            throw new ContractException("Table-names file path must not be empty");
+        }
+        Path selectedPath = Path.of(selected);
+        if (configurationPath == null) {
+            return selectedPath.normalize();
+        }
+        if (selectedPath.isAbsolute()) {
+            return selectedPath.normalize();
+        }
+        Path absoluteConfiguration = configurationPath.toAbsolutePath().normalize();
+        return absoluteConfiguration.getParent().resolve(selectedPath).normalize();
     }
 
     private static String requireText(String value, String name) {

@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import stockguidance.database.DatabaseConfiguration;
 import stockguidance.database.MySqlConnectionFactory;
+import stockguidance.database.TableNames;
 import stockguidance.json.CanonicalJson;
 
 import java.io.IOException;
@@ -21,8 +22,9 @@ public final class ValidatorMain {
         try {
             Map<String, Path> options = options(arguments);
             DatabaseConfiguration configuration = DatabaseConfiguration.load(options.get("config"));
+            TableNames tableNames = configuration.loadTableNames(options.get("table-names-file"));
             ValidationRequest request = ValidationRequest.read(options.get("request"));
-            ObjectNode report = new StreamingValidator(new MySqlConnectionFactory()).validate(configuration, request);
+            ObjectNode report = new StreamingValidator(new MySqlConnectionFactory(), tableNames).validate(configuration, request);
             String output = new String(CanonicalJson.bytes(report), StandardCharsets.UTF_8);
             if (options.containsKey("output")) {
                 Files.writeString(options.get("output"), output, StandardCharsets.UTF_8);
@@ -48,7 +50,7 @@ public final class ValidatorMain {
         }
         Map<String, Path> result = new HashMap<>();
         for (int index = 0; index < arguments.length; index += 2) {
-            if (index + 1 >= arguments.length || !(arguments[index].equals("--config") || arguments[index].equals("--request") || arguments[index].equals("--output"))) {
+            if (index + 1 >= arguments.length || !(arguments[index].equals("--config") || arguments[index].equals("--request") || arguments[index].equals("--output") || arguments[index].equals("--table-names-file"))) {
                 throw new IllegalArgumentException("Validator requires explicit config and request paths");
             }
             String name = arguments[index].substring(2);

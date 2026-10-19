@@ -23,4 +23,12 @@ public final class SqlIdentifiers {
         }
         return validated;
     }
+
+    public static String quote(String identifier, String name) {
+        return "`" + require(identifier, name) + "`";
+    }
+
+    public static String quote(String identifier) {
+        return quote(identifier, "identifier");
+    }
 }

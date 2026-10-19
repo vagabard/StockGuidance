@@ -2,6 +2,7 @@ package stockguidance.validation;
 
 import stockguidance.database.DatabaseConfiguration;
 import stockguidance.database.MySqlConnectionFactory;
+import stockguidance.database.TableNames;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
@@ -18,6 +19,7 @@ public final class DownloadComparisonMain {
         try {
             Map<String, String> options = options(arguments);
             DatabaseConfiguration configuration = DatabaseConfiguration.load(Path.of(required(options, "config")));
+            TableNames tableNames = configuration.loadTableNames(options.containsKey("table-names-file") ? Path.of(options.get("table-names-file")) : null);
             Path dataRoot = Path.of(required(options, "data-root"));
             String adjustment = options.getOrDefault("adjustment", "adjusted");
             LocalDate start = optionalDate(options.get("start-date"));
@@ -25,7 +27,7 @@ public final class DownloadComparisonMain {
             if (start != null && end != null && start.isAfter(end)) {
                 throw new IllegalArgumentException("Comparison start follows end");
             }
-            var result = new LegacyDownloadComparator(new MySqlConnectionFactory()).compare(configuration, dataRoot, start, end, adjustment);
+            var result = new LegacyDownloadComparator(new MySqlConnectionFactory(), tableNames).compare(configuration, dataRoot, start, end, adjustment);
             String output = new String(stockguidance.json.CanonicalJson.bytes(result.report()), StandardCharsets.UTF_8);
             System.out.print(output);
             System.exit(result.report().get("exit_code").intValue());
@@ -53,7 +55,7 @@ public final class DownloadComparisonMain {
                 throw new IllegalArgumentException("Comparison options require values");
             }
             String option = arguments[index];
-            if (!(option.equals("--config") || option.equals("--data-root") || option.equals("--start-date") || option.equals("--end-date") || option.equals("--adjustment"))) {
+            if (!(option.equals("--config") || option.equals("--data-root") || option.equals("--start-date") || option.equals("--end-date") || option.equals("--adjustment") || option.equals("--table-names-file"))) {
                 throw new IllegalArgumentException("Unsupported comparison option");
             }
             if (result.put(option.substring(2), arguments[index + 1]) != null) {

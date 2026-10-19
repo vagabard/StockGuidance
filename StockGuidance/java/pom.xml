@@ -47,6 +47,13 @@
             <resource>
                 <directory>fixtures</directory>
             </resource>
+            <resource>
+                <directory>${project.basedir}/../../src/stockguidance/database</directory>
+                <includes>
+                    <include>table_names.json</include>
+                </includes>
+                <targetPath>stockguidance/database</targetPath>
+            </resource>
         </resources>
         <plugins>
             <plugin>

@@ -3,6 +3,8 @@ package stockguidance.validation;
 import com.fasterxml.jackson.databind.JsonNode;
 import stockguidance.database.DatabaseConfiguration;
 import stockguidance.database.ReadOnlyTransaction;
+import stockguidance.database.SqlIdentifiers;
+import stockguidance.database.TableNames;
 import stockguidance.json.JsonSupport;
 
 import java.io.BufferedReader;
@@ -40,9 +42,15 @@ public final class LegacyDownloadComparator {
     private static final int MAX_FINDINGS = 10_000;
 
     private final stockguidance.database.ConnectionFactory connectionFactory;
+    private final TableNames configuredTableNames;
 
     public LegacyDownloadComparator(stockguidance.database.ConnectionFactory connectionFactory) {
+        this(connectionFactory, null);
+    }
+
+    public LegacyDownloadComparator(stockguidance.database.ConnectionFactory connectionFactory, TableNames tableNames) {
         this.connectionFactory = connectionFactory;
+        this.configuredTableNames = tableNames;
     }
 
     public ObjectNodeResult compare(DatabaseConfiguration configuration, Path dataRoot, LocalDate requestedStart, LocalDate requestedEnd) {
@@ -56,8 +64,9 @@ public final class LegacyDownloadComparator {
         if (!"adjusted".equals(adjustment) && !"unadjusted".equals(adjustment)) {
             throw new IllegalArgumentException("Archive adjustment must be adjusted or unadjusted");
         }
+        TableNames tableNames = configuredTableNames == null ? configuration.loadTableNames() : configuredTableNames;
         Inventory inventory = inventory(dataRoot, requestedStart, requestedEnd);
-        return new ReadOnlyTransaction(connectionFactory, configuration).execute(connection -> inspect(connection, inventory, requestedStart, requestedEnd, adjustment));
+        return new ReadOnlyTransaction(connectionFactory, configuration).execute(connection -> inspect(connection, inventory, requestedStart, requestedEnd, adjustment, tableNames));
     }
 
     private Inventory inventory(Path dataRoot, LocalDate requestedStart, LocalDate requestedEnd) {
@@ -96,7 +105,7 @@ public final class LegacyDownloadComparator {
         return new Inventory(files);
     }
 
-    private ObjectNodeResult inspect(Connection connection, Inventory inventory, LocalDate requestedStart, LocalDate requestedEnd, String adjustment) throws SQLException {
+    private ObjectNodeResult inspect(Connection connection, Inventory inventory, LocalDate requestedStart, LocalDate requestedEnd, String adjustment, TableNames tableNames) throws SQLException {
         FindingCollector findings = new FindingCollector();
         if (inventory.files().isEmpty()) {
             findings.add("invalid", "archive", "No legacy NDJSON download files were found in the requested scope", null, null);
@@ -105,10 +114,10 @@ public final class LegacyDownloadComparator {
         for (FileEntry file : inventory.files()) {
             filesByDate.computeIfAbsent(file.date(), ignored -> new ArrayList<>()).add(file);
         }
-        Set<LocalDate> databaseDates = readDatabaseDates(connection, requestedStart, requestedEnd);
+        Set<LocalDate> databaseDates = readDatabaseDates(connection, tableNames, requestedStart, requestedEnd);
         for (LocalDate date : filesByDate.keySet()) {
             if (!databaseDates.contains(date)) {
-                findings.add("missing", "date", "Downloaded file has no transaction_dates mapping", date, null);
+                findings.add("missing", "date", "Downloaded file has no resolved session-table mapping", date, null);
             }
         }
         for (LocalDate date : databaseDates) {
@@ -118,8 +127,8 @@ public final class LegacyDownloadComparator {
         }
 
         String sql = "SELECT t.transaction_date, s.label, r.open, r.high, r.low, r.close, r.volume, r.vwap, r.transactions " +
-                "FROM raw_stock_data r JOIN ticker_symbol s ON s.id = r.ticker_id JOIN transaction_dates t ON t.id = r.date_id " +
-                rangePredicate("t.transaction_date", requestedStart, requestedEnd) +
+                "FROM " + SqlIdentifiers.quote(tableNames.prices(), "prices table") + " r JOIN " + SqlIdentifiers.quote(tableNames.tickers(), "tickers table") + " s ON s.id = r.ticker_id JOIN " + SqlIdentifiers.quote(tableNames.sessions(), "sessions table") + " t ON t.id = r.date_id " +
+                rangePredicate("t." + SqlIdentifiers.quote("transaction_date", "date column"), requestedStart, requestedEnd) +
                 "ORDER BY t.transaction_date, s.label";
         try (PreparedStatement statement = connection.prepareStatement(sql, ResultSet.TYPE_FORWARD_ONLY, ResultSet.CONCUR_READ_ONLY)) {
             bindRange(statement, requestedStart, requestedEnd);
@@ -149,8 +158,8 @@ public final class LegacyDownloadComparator {
         return result;
     }
 
-    private Set<LocalDate> readDatabaseDates(Connection connection, LocalDate requestedStart, LocalDate requestedEnd) throws SQLException {
-        String sql = "SELECT transaction_date FROM transaction_dates" + rangePredicate("transaction_date", requestedStart, requestedEnd) + "ORDER BY transaction_date";
+    private Set<LocalDate> readDatabaseDates(Connection connection, TableNames tableNames, LocalDate requestedStart, LocalDate requestedEnd) throws SQLException {
+        String sql = "SELECT `transaction_date` FROM " + SqlIdentifiers.quote(tableNames.sessions(), "sessions table") + rangePredicate(SqlIdentifiers.quote("transaction_date", "date column"), requestedStart, requestedEnd) + "ORDER BY `transaction_date`";
         Set<LocalDate> result = new HashSet<>();
         try (PreparedStatement statement = connection.prepareStatement(sql)) {
             bindRange(statement, requestedStart, requestedEnd);
@@ -220,13 +229,13 @@ public final class LegacyDownloadComparator {
         }
         for (String ticker : snapshot.bars().keySet()) {
             if (!databaseBars.containsKey(ticker)) {
-                findings.add("missing", "ticker", "Downloaded record is absent from raw_stock_data", snapshot.date(), ticker);
+                findings.add("missing", "ticker", "Downloaded record is absent from the resolved prices table", snapshot.date(), ticker);
             }
         }
         for (Map.Entry<String, Bar> entry : databaseBars.entrySet()) {
             Bar downloaded = snapshot.bars().get(entry.getKey());
             if (downloaded == null) {
-                findings.add("extra", "ticker", "Raw database record is absent from downloaded file", snapshot.date(), entry.getKey());
+                findings.add("extra", "ticker", "Resolved prices table record is absent from downloaded file", snapshot.date(), entry.getKey());
             } else if (!downloaded.equals(entry.getValue())) {
                 findings.add("invalid", "value", "Raw database values differ from downloaded file", snapshot.date(), entry.getKey());
             }

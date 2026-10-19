@@ -1,6 +1,7 @@
 package stockguidance.database;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -53,6 +54,34 @@ class DatabaseConfigurationTest {
         Path nested = Files.createTempDirectory("stage7-db-parent").resolve("missing.json");
         IllegalArgumentException missingError = assertThrows(IllegalArgumentException.class, () -> DatabaseConfiguration.load(nested));
         assertEquals("Cannot read the explicit database JSON configuration", missingError.getMessage());
+    }
+
+    @Test
+    void resolvesExternalTableNamesRelativeToConfiguration(@TempDir Path directory) throws Exception {
+        Path names = directory.resolve("names.json");
+        Files.writeString(names, "{\"schema_version\":1,\"tables\":{" +
+                "\"source\":\"custom_source\",\"sessions\":\"custom_sessions\",\"tickers\":\"custom_tickers\"," +
+                "\"prices\":\"custom_prices\",\"deltas\":\"custom_deltas\",\"imports\":\"custom_imports\"," +
+                "\"zscore_series\":\"custom_series\",\"zscore_sessions\":\"custom_session_meta\"}," +
+                "\"zscore_templates\":{\"price\":\"custom_price_{window}\",\"price_delta\":\"custom_delta_{window}\"}}");
+        Path configurationPath = directory.resolve("nested").resolve("db.json");
+        Files.createDirectories(configurationPath.getParent());
+        Files.writeString(configurationPath, "{\"database\":\"fixture_data\",\"user\":\"fixture-user\",\"table_names_file\":\"../names.json\"}");
+
+        DatabaseConfiguration configuration = DatabaseConfiguration.load(configurationPath);
+
+        assertEquals(names.toAbsolutePath().normalize(), configuration.tableNamesFile());
+        assertEquals("custom_prices", configuration.loadTableNames().prices());
+    }
+
+    @Test
+    void explicitMissingTableNamesFileFailsBeforeConnection(@TempDir Path directory) throws Exception {
+        Path configurationPath = directory.resolve("db.json");
+        Files.writeString(configurationPath, "{\"database\":\"fixture_data\",\"user\":\"fixture-user\",\"table_names_file\":\"missing.json\"}");
+
+        DatabaseConfiguration configuration = DatabaseConfiguration.load(configurationPath);
+
+        assertThrows(RuntimeException.class, configuration::loadTableNames);
     }
 
     @Test

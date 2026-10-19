@@ -16,6 +16,8 @@ def test_java_boundary_passes_only_explicit_paths_and_accepts_incomplete_reports
 	def runner(command, **keywords):
 		seen["command"] = command
 		seen["keywords"] = keywords
+		name_index = command.index("--table-names-file") + 1
+		seen["table_names_exists_during_run"] = Path(command[name_index]).is_file()
 		return java_report(2)
 
 	payload = run_java_validator(tmp_path / "db.json", tmp_path / "request.json", classpath=Path("target/classes"), run=runner)
@@ -23,7 +25,41 @@ def test_java_boundary_passes_only_explicit_paths_and_accepts_incomplete_reports
 	assert payload["backend"] == "java"
 	assert "secret" not in " ".join(seen["command"])
 	assert seen["command"][-4:] == ("--config", str(tmp_path / "db.json"), "--request", str(tmp_path / "request.json"))
+	assert seen["table_names_exists_during_run"] is True
+	assert not Path(seen["command"][seen["command"].index("--table-names-file") + 1]).exists()
 	assert seen["keywords"]["check"] is False
+
+
+def test_java_boundary_passes_configuration_relative_external_registry(tmp_path):
+	registry = tmp_path / "table_names.json"
+	registry.write_text(
+		'{"schema_version":1,"tables":{"source":"custom_source","sessions":"custom_sessions",'
+		'"tickers":"custom_tickers","prices":"custom_prices","deltas":"custom_deltas",'
+		'"imports":"custom_imports","zscore_series":"custom_series",'
+		'"zscore_sessions":"custom_session_meta"},"zscore_templates":'
+		'{"price":"custom_price_{window}","price_delta":"custom_delta_{window}"}}',
+		encoding="utf-8",
+	)
+	database_config = tmp_path / "db.json"
+	database_config.write_text('{"database":"fixture","user":"fixture-user","table_names_file":"table_names.json"}', encoding="utf-8")
+	seen = {}
+
+	def runner(command, **keywords):
+		seen["command"] = command
+		return java_report(0)
+
+	run_java_validator(database_config, tmp_path / "request.json", classpath=Path("target/classes"), run=runner)
+
+	name_index = seen["command"].index("--table-names-file") + 1
+	assert Path(seen["command"][name_index]) == registry
+
+
+def test_java_boundary_rejects_missing_selected_registry_before_subprocess(tmp_path):
+	database_config = tmp_path / "db.json"
+	database_config.write_text('{"database":"fixture","user":"fixture-user","table_names_file":"missing.json"}', encoding="utf-8")
+
+	with pytest.raises(JavaValidationBackendError, match="table-names"):
+		run_java_validator(database_config, tmp_path / "request.json", classpath=Path("target/classes"), run=lambda *args, **kwargs: pytest.fail("Java must not start"))
 
 
 def test_java_backend_failure_is_not_mistaken_for_a_validation_result(tmp_path):

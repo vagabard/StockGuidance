@@ -47,6 +47,14 @@ public final class JsonSupport {
         }
     }
 
+    public static JsonNode readTree(InputStream input) throws IOException {
+        if (input == null) {
+            throw new ContractException("JSON input is required");
+        }
+        JsonNode result = parseTree(input);
+        return result;
+    }
+
     public static byte[] utf8(String json) {
         return json.getBytes(StandardCharsets.UTF_8);
     }

@@ -6,6 +6,8 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import stockguidance.database.ConnectionFactory;
 import stockguidance.database.DatabaseConfiguration;
 import stockguidance.database.ReadOnlyTransaction;
+import stockguidance.database.SqlIdentifiers;
+import stockguidance.database.TableNames;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
@@ -34,44 +36,53 @@ public final class StreamingValidator {
             "next_day_change_in_price", "zero_centered_next_day_price_change", "next_day_price_change_to_extremes_0_1",
             "next_day_raise1_lower0", "next_day_top100_raise1_lower0", "zero_center_extremes_neg1_pos1",
             "zero_center_top100_1_other_neg1", "zero_center_raise1_lower_neg1");
-    private static final List<String> TABLES = List.of("stockguidance_source", "transaction_dates", "ticker_symbol", "raw_stock_data", "daily_delta_stock_data", "stockguidance_imports");
     private static final BigDecimal PRICE_LIMIT = new BigDecimal("1000000000000000");
     private static final BigDecimal PRICE_SCALE = new BigDecimal("0.0001");
 
     private final ConnectionFactory connectionFactory;
+    private final TableNames configuredTableNames;
 
     public StreamingValidator(ConnectionFactory connectionFactory) {
+        this(connectionFactory, null);
+    }
+
+    public StreamingValidator(ConnectionFactory connectionFactory, TableNames tableNames) {
         this.connectionFactory = connectionFactory;
+        this.configuredTableNames = tableNames;
     }
 
     public ObjectNode validate(DatabaseConfiguration configuration, ValidationRequest request) {
         if (configuration == null || request == null) {
             throw new IllegalArgumentException("Validator requires explicit configuration and request");
         }
-        return new ReadOnlyTransaction(connectionFactory, configuration).execute(connection -> inspect(connection, request));
+        TableNames tableNames = configuredTableNames == null ? configuration.loadTableNames() : configuredTableNames;
+        return new ReadOnlyTransaction(connectionFactory, configuration).execute(connection -> inspect(connection, request, tableNames));
     }
 
-    private ObjectNode inspect(Connection connection, ValidationRequest request) throws SQLException {
+    private ObjectNode inspect(Connection connection, ValidationRequest request, TableNames tableNames) throws SQLException {
         Inspection inspection = new Inspection(request);
-        inspectSchema(connection, request, inspection);
+        inspectSchema(connection, request, inspection, tableNames);
         if (!inspection.schemaUsable) {
             return report(request, inspection);
         }
-        readDateMappings(connection, request, inspection);
-        readRaw(connection, request, inspection);
-        readDerived(connection, request, inspection);
-        readReceipts(connection, request, inspection);
+        readDateMappings(connection, request, inspection, tableNames);
+        readRaw(connection, request, inspection, tableNames);
+        readDerived(connection, request, inspection, tableNames);
+        readReceipts(connection, request, inspection, tableNames);
         reconcile(request, inspection);
         return report(request, inspection);
     }
 
-    private static void inspectSchema(Connection connection, ValidationRequest request, Inspection inspection) throws SQLException {
-        String placeholders = placeholders(TABLES.size());
+    private static void inspectSchema(Connection connection, ValidationRequest request, Inspection inspection, TableNames tableNames) throws SQLException {
+        List<String> tables = List.of(
+                tableNames.source(), tableNames.sessions(), tableNames.tickers(), tableNames.prices(),
+                tableNames.deltas(), tableNames.imports());
+        String placeholders = placeholders(tables.size());
         try (PreparedStatement statement = connection.prepareStatement(
                 "SELECT TABLE_NAME, ENGINE FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME IN (" + placeholders + ") ORDER BY TABLE_NAME")) {
             inspection.sqlQueries++;
             int index = 1;
-            for (String table : TABLES) {
+            for (String table : tables) {
                 statement.setString(index++, table);
             }
             Set<String> found = new HashSet<>();
@@ -84,11 +95,12 @@ public final class StreamingValidator {
                     }
                 }
             }
-            if (!found.equals(new HashSet<>(TABLES))) {
+            if (!found.equals(new HashSet<>(tables))) {
                 add(inspection, "unverified", "schema", "Updater tables, InnoDB engines, or source binding are missing or incompatible", null, List.of(), List.of());
             }
         }
-        try (PreparedStatement statement = connection.prepareStatement("SELECT source_key FROM stockguidance_source WHERE id = 1")) {
+        try (PreparedStatement statement = connection.prepareStatement(
+                "SELECT `source_key` FROM " + SqlIdentifiers.quote(tableNames.source(), "source table") + " WHERE `id` = 1")) {
             inspection.sqlQueries++;
             try (ResultSet rows = statement.executeQuery()) {
                 if (!rows.next() || !request.sourceKey().equals(rows.getString(1)) || rows.next()) {
@@ -99,11 +111,12 @@ public final class StreamingValidator {
         inspection.schemaUsable = inspection.findings.stream().noneMatch(item -> item.check().equals("schema"));
     }
 
-    private static void readDateMappings(Connection connection, ValidationRequest request, Inspection inspection) throws SQLException {
+    private static void readDateMappings(Connection connection, ValidationRequest request, Inspection inspection, TableNames tableNames) throws SQLException {
         List<LocalDate> dates = request.sessions().stream().map(ValidationRequest.SessionSpec::exchangeDate).toList();
         String placeholders = placeholders(dates.size());
         try (PreparedStatement statement = connection.prepareStatement(
-                "SELECT id, transaction_date FROM transaction_dates WHERE transaction_date IN (" + placeholders + ") ORDER BY transaction_date, id")) {
+                "SELECT `id`, `transaction_date` FROM " + SqlIdentifiers.quote(tableNames.sessions(), "sessions table") +
+                        " WHERE `transaction_date` IN (" + placeholders + ") ORDER BY `transaction_date`, `id`")) {
             inspection.sqlQueries++;
             bindDates(statement, dates);
             try (ResultSet rows = statement.executeQuery()) {
@@ -126,26 +139,26 @@ public final class StreamingValidator {
         }
     }
 
-    private static void readRaw(Connection connection, ValidationRequest request, Inspection inspection) throws SQLException {
+    private static void readRaw(Connection connection, ValidationRequest request, Inspection inspection, TableNames tableNames) throws SQLException {
         String placeholders = placeholders(request.sessions().size());
         String sql = "SELECT r.date_id, r.ticker_id, t.transaction_date, s.label, r.open, r.high, r.low, r.close, r.volume, r.vwap, r.transactions " +
-                "FROM raw_stock_data r LEFT JOIN ticker_symbol s ON s.id = r.ticker_id LEFT JOIN transaction_dates t ON t.id = r.date_id " +
+                "FROM " + SqlIdentifiers.quote(tableNames.prices(), "prices table") + " r LEFT JOIN " + SqlIdentifiers.quote(tableNames.tickers(), "tickers table") + " s ON s.id = r.ticker_id LEFT JOIN " + SqlIdentifiers.quote(tableNames.sessions(), "sessions table") + " t ON t.id = r.date_id " +
                 "WHERE t.transaction_date IN (" + placeholders + ") OR t.id IS NULL OR s.id IS NULL " +
                 "ORDER BY t.transaction_date, r.date_id, r.ticker_id LIMIT ?";
-        readRows(connection, request, inspection, sql, false);
+        readRows(connection, request, inspection, sql, false, tableNames.prices());
     }
 
-    private static void readDerived(Connection connection, ValidationRequest request, Inspection inspection) throws SQLException {
+    private static void readDerived(Connection connection, ValidationRequest request, Inspection inspection, TableNames tableNames) throws SQLException {
         String placeholders = placeholders(request.sessions().size());
         String columns = String.join(", ", DERIVED_COLUMNS.stream().map(item -> "r." + item).toList());
         String sql = "SELECT r.date_id, r.ticker_id, t.transaction_date, s.label, " + columns + " " +
-                "FROM daily_delta_stock_data r LEFT JOIN ticker_symbol s ON s.id = r.ticker_id LEFT JOIN transaction_dates t ON t.id = r.date_id " +
+                "FROM " + SqlIdentifiers.quote(tableNames.deltas(), "deltas table") + " r LEFT JOIN " + SqlIdentifiers.quote(tableNames.tickers(), "tickers table") + " s ON s.id = r.ticker_id LEFT JOIN " + SqlIdentifiers.quote(tableNames.sessions(), "sessions table") + " t ON t.id = r.date_id " +
                 "WHERE t.transaction_date IN (" + placeholders + ") OR t.id IS NULL OR s.id IS NULL " +
                 "ORDER BY t.transaction_date, r.date_id, r.ticker_id LIMIT ?";
-        readRows(connection, request, inspection, sql, true);
+        readRows(connection, request, inspection, sql, true, tableNames.deltas());
     }
 
-    private static void readRows(Connection connection, ValidationRequest request, Inspection inspection, String sql, boolean derived) throws SQLException {
+    private static void readRows(Connection connection, ValidationRequest request, Inspection inspection, String sql, boolean derived, String tableName) throws SQLException {
         List<LocalDate> dates = request.sessions().stream().map(ValidationRequest.SessionSpec::exchangeDate).toList();
         try (PreparedStatement statement = connection.prepareStatement(sql)) {
             inspection.sqlQueries++;
@@ -164,7 +177,7 @@ public final class StreamingValidator {
                     }
                     String ticker = nullableText(rows, 4);
                     if (dateId == null || tickerId == null || date == null || ticker == null || !inspection.dateIds.containsKey(date) || !dateId.equals(inspection.dateIds.get(date))) {
-                        add(inspection, "invalid", "orphan", (derived ? "daily_delta_stock_data" : "raw_stock_data") + " record lacks a valid date or ticker mapping", date, ticker == null ? List.of() : List.of(ticker), ids(dateId, tickerId));
+                        add(inspection, "invalid", "orphan", tableName + " record lacks a valid date or ticker mapping", date, ticker == null ? List.of() : List.of(ticker), ids(dateId, tickerId));
                         continue;
                     }
                     SessionData session = inspection.sessions.get(date);
@@ -172,7 +185,7 @@ public final class StreamingValidator {
                     if (derived) {
                         DerivedRowResult result = decodeDerived(rows, ticker);
                         if (!result.valid) {
-                            add(inspection, "invalid", "legacy_derived", "Invalid daily_delta_stock_data numerical values", date, List.of(ticker), ids(dateId, tickerId));
+                            add(inspection, "invalid", "legacy_derived", "Invalid " + tableName + " numerical values", date, List.of(ticker), ids(dateId, tickerId));
                             continue;
                         }
                         if (session.derived.putIfAbsent(ticker, result.row) != null) {
@@ -181,7 +194,7 @@ public final class StreamingValidator {
                     } else {
                         RawBarResult result = decodeRaw(rows, ticker);
                         if (!result.valid) {
-                            add(inspection, "invalid", "raw_values", "Invalid raw_stock_data prices, counts, or numerical values", date, List.of(ticker), ids(dateId, tickerId));
+                            add(inspection, "invalid", "raw_values", "Invalid " + tableName + " prices, counts, or numerical values", date, List.of(ticker), ids(dateId, tickerId));
                             continue;
                         }
                         if (session.raw.putIfAbsent(ticker, result.bar) != null) {
@@ -193,9 +206,10 @@ public final class StreamingValidator {
         }
     }
 
-    private static void readReceipts(Connection connection, ValidationRequest request, Inspection inspection) throws SQLException {
+    private static void readReceipts(Connection connection, ValidationRequest request, Inspection inspection, TableNames tableNames) throws SQLException {
         String placeholders = placeholders(request.sessions().size());
-        String sql = "SELECT session_date, raw_id, available_at, derived_dependency_id, derived_content_id FROM stockguidance_imports WHERE session_date IN (" + placeholders + ") ORDER BY session_date";
+        String sql = "SELECT `session_date`, `raw_id`, `available_at`, `derived_dependency_id`, `derived_content_id` FROM " +
+                SqlIdentifiers.quote(tableNames.imports(), "imports table") + " WHERE `session_date` IN (" + placeholders + ") ORDER BY `session_date`";
         List<LocalDate> dates = request.sessions().stream().map(ValidationRequest.SessionSpec::exchangeDate).toList();
         try (PreparedStatement statement = connection.prepareStatement(sql)) {
             inspection.sqlQueries++;

@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import org.junit.jupiter.api.Test;
 import stockguidance.database.ConnectionFactory;
 import stockguidance.database.DatabaseConfiguration;
+import stockguidance.database.TableNames;
 
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
@@ -52,6 +53,26 @@ class LegacyDownloadComparatorTest {
         assertEquals("invalid", report.get("findings").get(0).get("category").textValue());
     }
 
+    @Test
+    void renamedTablesAreUsedForLegacyComparison() throws Exception {
+        Path root = Files.createTempDirectory("legacy-download-custom");
+        writeDownload(root, "2024-07-01", "10.0000");
+        TableNames names = TableNames.decode(stockguidance.json.JsonSupport.parse("{" +
+                "\"schema_version\":1,\"tables\":{" +
+                "\"source\":\"custom_source\",\"sessions\":\"custom_sessions\",\"tickers\":\"custom_tickers\"," +
+                "\"prices\":\"custom_prices\",\"deltas\":\"custom_deltas\",\"imports\":\"custom_imports\"," +
+                "\"zscore_series\":\"custom_series\",\"zscore_sessions\":\"custom_session_meta\"}," +
+                "\"zscore_templates\":{\"price\":\"custom_price_{window}\",\"price_delta\":\"custom_delta_{window}\"}}"));
+        FixtureDatabase database = new FixtureDatabase(names, false);
+
+        JsonNode report = new LegacyDownloadComparator(database, names).compare(configuration(), root, null, null).report();
+
+        assertEquals(0, report.get("exit_code").intValue());
+        assertEquals(0, report.get("finding_count").intValue());
+        assertEquals(true, database.statements.stream().anyMatch(item -> item.contains("custom_prices")));
+        assertEquals(true, database.statements.stream().anyMatch(item -> item.contains("custom_sessions")));
+    }
+
     private static DatabaseConfiguration configuration() {
         return new DatabaseConfiguration("localhost", "fixture", "user", "secret", 3306, stockguidance.database.DatabaseDriver.AUTO);
     }
@@ -64,9 +85,16 @@ class LegacyDownloadComparatorTest {
     }
 
     private static final class FixtureDatabase implements ConnectionFactory {
+        private final TableNames tableNames;
         private final boolean emptyRaw;
+        private final List<String> statements = new java.util.ArrayList<>();
 
         private FixtureDatabase(boolean emptyRaw) {
+            this(TableNames.loadPackaged(), emptyRaw);
+        }
+
+        private FixtureDatabase(TableNames tableNames, boolean emptyRaw) {
+            this.tableNames = tableNames;
             this.emptyRaw = emptyRaw;
         }
 
@@ -81,12 +109,13 @@ class LegacyDownloadComparatorTest {
         }
 
         private PreparedStatement prepared(String sql) {
+            statements.add(sql);
             InvocationHandler handler = (proxy, method, arguments) -> {
                 if (method.getName().equals("executeQuery")) {
-                    if (sql.toLowerCase().contains("raw_stock_data")) {
+                    if (sql.toLowerCase().contains(tableNames.prices().toLowerCase())) {
                         return resultSet(emptyRaw ? List.of() : List.<Object[]>of(new Object[]{Date.valueOf("2024-07-01"), "AAA", new BigDecimal("10.0000"), new BigDecimal("12.0000"), new BigDecimal("9.0000"), new BigDecimal("10.0000"), 100L, new BigDecimal("10.0000"), 5L}));
                     }
-                    return resultSet(sql.toLowerCase().contains("transaction_dates") ? List.<Object[]>of(new Object[]{Date.valueOf("2024-07-01")}) : List.of());
+                    return resultSet(sql.toLowerCase().contains(tableNames.sessions().toLowerCase()) ? List.<Object[]>of(new Object[]{Date.valueOf("2024-07-01")}) : List.of());
                 }
                 return defaultValue(method.getReturnType());
             };

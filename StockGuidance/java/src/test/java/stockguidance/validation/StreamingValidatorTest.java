@@ -3,6 +3,7 @@ package stockguidance.validation;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.junit.jupiter.api.Test;
 import stockguidance.database.DatabaseConfiguration;
+import stockguidance.database.TableNames;
 import stockguidance.json.JsonSupport;
 
 import java.lang.reflect.InvocationHandler;
@@ -86,6 +87,26 @@ class StreamingValidatorTest {
         assertEquals("rebuild_legacy_derived", report.get("repair_plan").get("items").get(0).get("action").textValue());
     }
 
+    @Test
+    void customRegistryIsUsedForEveryValidatorTable() {
+        TableNames names = TableNames.decode(JsonSupport.parse("{" +
+                "\"schema_version\":1,\"tables\":{" +
+                "\"source\":\"sg_source\",\"sessions\":\"sg_sessions\",\"tickers\":\"sg_tickers\"," +
+                "\"prices\":\"sg_prices\",\"deltas\":\"sg_deltas\",\"imports\":\"sg_imports\"," +
+                "\"zscore_series\":\"sg_zscore_series\",\"zscore_sessions\":\"sg_zscore_sessions\"}," +
+                "\"zscore_templates\":{\"price\":\"sg_price_{window}\",\"price_delta\":\"sg_delta_{window}\"}}"));
+        Fixture fixture = new Fixture(names);
+
+        JsonNode report = fixture.validator().validate(fixture.configuration(), fixture.request);
+
+        assertTrue(report.get("complete").booleanValue());
+        assertTrue(fixture.database.statements.stream().anyMatch(item -> item.contains("sg_source")));
+        assertTrue(fixture.database.statements.stream().anyMatch(item -> item.contains("sg_sessions")));
+        assertTrue(fixture.database.statements.stream().anyMatch(item -> item.contains("sg_prices")));
+        assertTrue(fixture.database.statements.stream().anyMatch(item -> item.contains("sg_deltas")));
+        assertTrue(fixture.database.statements.stream().anyMatch(item -> item.contains("sg_imports")));
+    }
+
     private static boolean hasCheck(JsonNode report, String check) {
         for (JsonNode finding : report.get("findings")) {
             if (finding.get("check").textValue().equals(check)) return true;
@@ -107,6 +128,7 @@ class StreamingValidatorTest {
     }
 
     private static final class Fixture {
+        private final TableNames tableNames;
         private final LocalDate prior = LocalDate.of(2024, 7, 1);
         private final LocalDate current = LocalDate.of(2024, 7, 2);
         private final LocalDate following = LocalDate.of(2024, 7, 3);
@@ -121,6 +143,11 @@ class StreamingValidatorTest {
         private final String derivedId;
 
         private Fixture() {
+            this(TableNames.loadPackaged());
+        }
+
+        private Fixture(TableNames tableNames) {
+            this.tableNames = tableNames;
             ValidationContent.RawBar bar = bar();
             for (LocalDate date : List.of(prior, current, following)) {
                 Map<String, ValidationContent.RawBar> bars = Map.of("AAA", bar);
@@ -178,7 +205,7 @@ class StreamingValidatorTest {
         }
 
         private StreamingValidator validator() {
-            return new StreamingValidator(database);
+            return new StreamingValidator(database, tableNames);
         }
 
         private DatabaseConfiguration configuration() {
@@ -228,13 +255,13 @@ class StreamingValidatorTest {
         private List<Object[]> rowsFor(String sql) {
             String lower = sql.toLowerCase();
             if (lower.contains("information_schema")) return List.<Object[]>of(
-                    new Object[]{"daily_delta_stock_data", "InnoDB"}, new Object[]{"raw_stock_data", "InnoDB"}, new Object[]{"stockguidance_imports", "InnoDB"},
-                    new Object[]{"stockguidance_source", "InnoDB"}, new Object[]{"ticker_symbol", "InnoDB"}, new Object[]{"transaction_dates", "InnoDB"});
-            if (lower.contains("select source_key")) return List.<Object[]>of(new Object[]{fixture.request.sourceKey()});
-            if (lower.contains("from transaction_dates")) return fixture.dateRows;
-            if (lower.contains("from raw_stock_data")) return fixture.rawRows;
-            if (lower.contains("from daily_delta_stock_data")) return fixture.derivedRows;
-            if (lower.contains("from stockguidance_imports")) return fixture.receiptRows;
+                    new Object[]{fixture.tableNames.deltas(), "InnoDB"}, new Object[]{fixture.tableNames.prices(), "InnoDB"}, new Object[]{fixture.tableNames.imports(), "InnoDB"},
+                    new Object[]{fixture.tableNames.source(), "InnoDB"}, new Object[]{fixture.tableNames.tickers(), "InnoDB"}, new Object[]{fixture.tableNames.sessions(), "InnoDB"});
+            if (lower.contains("source_key")) return List.<Object[]>of(new Object[]{fixture.request.sourceKey()});
+            if (lower.contains(fixture.tableNames.prices().toLowerCase())) return fixture.rawRows;
+            if (lower.contains(fixture.tableNames.deltas().toLowerCase())) return fixture.derivedRows;
+            if (lower.contains(fixture.tableNames.imports().toLowerCase())) return fixture.receiptRows;
+            if (lower.contains(fixture.tableNames.sessions().toLowerCase())) return fixture.dateRows;
             throw new IllegalArgumentException("Unexpected fixture SQL");
         }
 
