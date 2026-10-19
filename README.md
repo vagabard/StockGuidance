@@ -12,6 +12,9 @@ For day-to-day operation, date-subset training and simulation, read the
 [Luna maintenance prompts](docs/luna_maintenance_prompts.md) record the
 completed automatic history discovery, archive preservation and measured Java
 work.
+The [schema and z-score implementation prompts](docs/schema_zscore_implementation_prompts.md)
+plan the required table-names file and configurable rolling z-score storage;
+run their stages before using those new capabilities.
 Stage 9 cleanup is documented in the [deletion list grouped by reason](docs/stage9_retirement.md);
 retained thin frontends are listed separately from deletions.
 Detailed specifications cover [updating](docs/market_data_updating.md),
