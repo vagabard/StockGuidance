@@ -1,12 +1,13 @@
 # Operating StockGuidance
 
 This guide describes the current Python commands and the shared automatic
-history discovery contract. Stages 1-10 of the implementation prompts are
-complete; validation and updating use the shared resolver. Implementation prompts are in
-[luna_maintenance_prompts.md](luna_maintenance_prompts.md). Start with the
-Python workflow. The historical Java prototypes remain unfinished and separate
-from the Stage 7 foundation; Stage 6 measured the Python paths without treating
-them as semantically equivalent. See
+history discovery contract. Stages 1-8 of the schema and z-score implementation
+brief are complete; this guide documents their operator rollout.
+Validation and updating use the shared resolver. The broader maintenance prompts
+are in [luna_maintenance_prompts.md](luna_maintenance_prompts.md). Start with
+the Python workflow. The historical Java prototypes remain unfinished and
+separate from the current Java foundation; measured Java paths are not treated
+as semantically equivalent to Python. See
 [java_performance.md](java_performance.md) for the reproducible offline study.
 
 
@@ -68,6 +69,127 @@ shared reconciliation checks. Training and simulation do not update data.
 Before either an initial update or a repair, back up the database and retained
 source files using your normal backup procedure. Keep one writer per selected
 database/data root; run audits against a consistent snapshot or while it is idle.
+
+## Schema and z-score rollout order
+
+Use this order for a new database or for adding the independent z-score
+materializations to an existing compatible database. These examples are an
+operator runbook; do not run them against a real database until the selected
+names and generated DDL have been reviewed.
+
+1. Select the authoritative registry. Keep the packaged
+   `src/stockguidance/database/table_names.json` unchanged to use the standard
+   names, customize that file before rebuilding an installation, or select an
+   external copy from the database configuration. For example, if
+   `config/dbinfo.id` contains `"table_names_file": "table_names.custom.json"`,
+   that path is resolved relative to `config/dbinfo.id`, not the working
+   directory. A missing, unreadable or invalid selected file fails; it never
+   falls back to the packaged resource. The configuration file still owns the
+   host, database, user, password, port and driver settings.
+
+   ```json
+   {
+     "host": "<database-host>",
+     "database": "<database-name>",
+     "user": "<database-user>",
+     "table_names_file": "table_names.custom.json"
+   }
+   ```
+
+2. Preview the selected names and the existing updater DDL without opening a
+   database connection. Use an absolute path when the preview is run from a
+   different directory; `preview_schema --table-names-file` reads the path
+   supplied to that command, while `table_names_file` in `dbinfo.id` remains
+   configuration-relative.
+
+   ```powershell
+   $namesFile = (Resolve-Path 'config/table_names.custom.json').Path
+   & $pythonExe -m stockguidance.cli.preview_schema --table-names-file $namesFile
+   ```
+
+   Omit `--table-names-file` when using the mandatory packaged resource. The
+   preview must show the expected six updater tables before initialization.
+
+3. Explicitly initialize the compatible updater tables, then ingest raw and
+   derived data with the existing market-data command. The updater's
+   `--initialize-schema` is the only step in this sequence that creates the
+   six-table base schema; it does not rename, migrate or convert existing
+   tables.
+
+   ```powershell
+   $updateArgs = @('--data-root', 'data', '--dbinfo-file', 'config/dbinfo.id', '--adjustment', 'adjusted')
+   $historyArgs = @('--history-start', '<first-supported-session>', '--history-evidence', '<boundary provenance>')
+   $publicationArgs = @('--publication-delay-minutes', '<documented delay>', '--publication-evidence', '<publication provenance>')
+   $correctionArgs = @('--recent-window-days', '<correction window>', '--recent-refresh-hours', '<recent interval>', '--archive-refresh-days', '<archive interval>', '--correction-evidence', '<correction provenance>')
+   & $pythonExe -m stockguidance.cli.update_market_data @updateArgs @historyArgs @publicationArgs @correctionArgs --initialize-schema
+   ```
+
+   Replace every placeholder with operator evidence. Existing compatible
+   tables may be used without initialization; incompatible tables require a
+   separate migration decision. `CREATE TABLE IF NOT EXISTS` does not convert
+   an incompatible schema.
+
+4. Preview the requested z-score windows and generated metadata/materialization
+   DDL. The example uses two independent normalization windows:
+
+   With an external registry selected in `dbinfo.id`, run:
+
+   ```powershell
+   & $pythonExe -m stockguidance.cli.preview_schema --table-names-file $namesFile --windows 20,60
+   ```
+
+   With the packaged registry, omit `table_names_file` and the option:
+
+   ```powershell
+   & $pythonExe -m stockguidance.cli.preview_schema --windows 20,60
+   ```
+
+5. Explicitly initialize and populate the selected z-score tables from local
+   verified data. This is a separate write step; it does not call a provider or
+   repair raw, date-mapping, delta, history, manifest or legacy-derived data.
+
+   ```powershell
+   $zscoreArgs = @('--data-root', 'data', '--dbinfo-file', 'config/dbinfo.id', '--adjustment', 'adjusted',
+       '--windows', '20,60', '--start-date', '<first-session>', '--end-date', '<last-session>',
+       '--publication-delay-minutes', '<documented delay>', '--publication-evidence', '<publication provenance>')
+   & $pythonExe -m stockguidance.cli.update_zscores @zscoreArgs @historyArgs --initialize-schema
+   ```
+
+   The updater reads exchange-session warm-up context but publishes only the
+   requested range. Repeat the command without `--initialize-schema` for later
+   rebuilds after reviewing the reported stale or unavailable results.
+
+6. Run the read-only Python validator with the same window selection:
+
+   ```powershell
+   & $pythonExe -m stockguidance.cli.validate_database @updateArgs @historyArgs @publicationArgs `
+       --start-date '<first-session>' --end-date '<last-session>' `
+       --zscore-windows 20,60 --format json > output/validation-zscores.json
+   ```
+
+   Validation does not initialize or repair z-score tables. It rejects stale
+   results before a rebuild, reports NULL/status outcomes explicitly, and keeps
+   z-score findings out of raw/delta repair authorization.
+
+The Python package loads the canonical JSON through package resources when no
+external file is selected, so an installed distribution does not depend on its
+working directory. The Java build copies that same source JSON into Java
+resources; rebuild Java after changing the canonical file. Separately installed
+Python and Java distributions must use the same explicit external registry when
+their packaged snapshots may differ. Python-launched Java validation receives
+the effective selected registry for the subprocess lifetime. Java retains its
+read-only raw/derived validation scope; Python owns the optional z-score audit.
+
+Names-file edits address different physical tables; they do not rename or adopt
+old tables. The generated rows are current rebuildable materializations, not a
+revision archive. Each score uses a window of exchange sessions, not calendar
+days. Price-delta inputs use the stored `close_ratio_to_prior` value minus one;
+the updater does not silently recompute a missing or inconsistent stored delta.
+MySQL `FLOAT` persistence has float32 precision. Only finite ready rows have a
+non-NULL score; NULL scores and status codes preserve insufficient history,
+missing, unverified, invalid and zero-variance outcomes. A historical cutoff
+controls availability decisions but cannot recover overwritten source revisions
+or original receipt evidence.
 
 ## Environment
 

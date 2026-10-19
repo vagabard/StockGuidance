@@ -75,6 +75,34 @@ expected boundary absence and unavailable outcomes. Validation never writes,
 downloads, deletes or initializes a schema. Manual schema/integrity proposals
 require review and cannot be executed automatically by the updater.
 
+## Configure and populate rolling z-scores
+
+The schema/z-score rollout is explicit and ordered: select the mandatory
+registry or an external `table_names_file`, preview the names and DDL, initialize
+compatible updater tables and ingest data, preview the requested windows,
+initialize/populate the optional z-score tables, then validate with the same
+`--zscore-windows` selection. The complete operator sequence, including the
+required evidence arguments, is in [the operations guide](operations_guide.md).
+
+For two windows, the supported frontends are:
+
+```powershell
+& $stockguidancePython -m stockguidance.cli.preview_schema --windows 20,60
+& $stockguidancePython -m stockguidance.cli.update_zscores --data-root data --dbinfo-file dbinfo.id --adjustment adjusted --windows 20,60 --start-date '<first-session>' --end-date '<last-session>' --publication-delay-minutes '<documented delay>' --publication-evidence '<publication provenance>' --initialize-schema
+& $stockguidancePython -m stockguidance.cli.validate_database --data-root data --dbinfo-file dbinfo.id --adjustment adjusted --start-date '<first-session>' --end-date '<last-session>' --publication-delay-minutes '<documented delay>' --publication-evidence '<publication provenance>' --zscore-windows 20,60 --format json > output/validation-zscores.json
+```
+
+Use `--table-names-file '<absolute-selected-registry>'` with
+`preview_schema` when an external registry is selected. A relative
+`table_names_file` in `dbinfo.id` is resolved relative to that file; omitting it
+uses the packaged resource. Missing or invalid selected files fail without a
+fallback. The updater requires an already compatible six-table schema and does
+not call providers. Re-run it explicitly after a dependency correction; stale
+materializations remain rejected until rebuilt. Java's packaged registry is a
+build-time copy of the canonical Python JSON, while Python-launched Java gets
+the effective registry explicitly. Use one external registry for separately
+installed distributions whose packaged files may differ.
+
 ## Train and rebuild
 
 The full [training JSON example](model_training.md) records source, exact ordered

@@ -23,6 +23,14 @@ manifest date is used as a validation audit floor. The report keeps that floor
 separate from the provider's supported-history boundary; a local minimum does
 not prove that the provider has no earlier data.
 
+Database validation resolves the same authoritative table-names registry as the
+updater before opening a database connection. In `dbinfo.id`, a relative
+`table_names_file` is relative to that configuration file; omission loads the
+mandatory packaged `table_names.json` resource. An explicit missing, unreadable
+or invalid file is a setup failure and never falls back to the packaged names.
+Changing the registry selects different physical tables; validation does not
+rename, migrate or convert existing tables.
+
 `--history-evidence` is provenance for an explicit `--history-start`, such as an
 account entitlement statement or a documented source-history boundary. It is
 not a description of the rows being checked. `--publication-evidence` describes
@@ -74,6 +82,14 @@ and manual-review guidance to rerun the explicit z-score updater. A z-score
 finding is never an authorization for an automatic raw/delta repair. The Java
 validator retains its existing raw/derived comparison scope and does not claim
 to perform this z-score audit.
+
+The stable row statuses are `0` ready, `1` insufficient history, `2` missing
+input, `3` unverified input, `4` invalid input and `5` zero variance. Only
+status `0` permits a finite non-NULL score. A complete constant window is
+undefined and remains NULL with status `5`; a NULL/status result is not silently
+converted to zero. Windows count exchange sessions, and the delta family uses
+the stored prior-close ratio minus one. A current cutoff cannot reconstruct an
+overwritten source revision or its original receipt evidence.
 
 Add `--as-of '<timezone-aware ISO timestamp>'` for a historical cutoff no later than the current/injected clock. Queries never cross supported history or include unfinished/unpublished sessions. Importing old bars today does not prove availability at a historical decision. Validation does not reconstruct earlier revisions of corrected data.
 
