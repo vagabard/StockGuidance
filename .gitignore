@@ -1,6 +1,7 @@
 data/
 __pycache__/
 cache/
+/output/
 *.pyc
 *.egg-info/
 *.pt

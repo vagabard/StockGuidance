@@ -10,6 +10,15 @@ separate from the current Java foundation; measured Java paths are not treated
 as semantically equivalent to Python. See
 [java_performance.md](java_performance.md) for the reproducible offline study.
 
+For adoption of the retained Massive NDJSON archive, use the staged
+[legacy migration prompts](legacy_migration_prompts.md). They begin with a
+bounded Java-thread/Python-process comparison and include numeric-precision
+and case-sensitive ticker prerequisites before population. Schema initialization
+alone does not make legacy rows verified, preserve fractional volume in a BIGINT
+column, or distinguish ticker keys under a case-insensitive unique index.
+The [initial migration results](legacy_migration_results.md) record the measured
+reader comparison, passing source sample and stock-table discrepancies.
+
 
 ## Java and performance status
 
@@ -108,12 +117,12 @@ names and generated DDL have been reviewed.
    ```
 
    Omit `--table-names-file` when using the mandatory packaged resource. The
-   preview must show the expected six updater tables before initialization.
+   preview must show the expected eight updater/support tables before initialization.
 
 3. Explicitly initialize the compatible updater tables, then ingest raw and
    derived data with the existing market-data command. The updater's
    `--initialize-schema` is the only step in this sequence that creates the
-   six-table base schema; it does not rename, migrate or convert existing
+   eight-table base schema; it does not rename, migrate or convert existing
    tables.
 
    ```powershell
