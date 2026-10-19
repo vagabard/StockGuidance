@@ -679,13 +679,15 @@ the independent semantic reference, not only the selected backend's own formulas
   parity and reports remain workload-specific evidence. The expanded comparison
   objective is pending until Stages 9a–9c pass; old `complete` flags are not proof
   of writer, SQL or z-score evaluation.
-- Stage 3 now carries forward evidence; Stages 5–8 establish contracts, a Python
-  baseline and actual Java/SQL candidates before measurement/selection in 9–10.
-  The same at-least-10% improvement over Python applies to Java and SQL selection.
+- Revised Stage 3 is complete. `output/legacy-migration/evaluation-plan.json`
+  preserves the historical evidence and defines all nine required comparisons.
+  Stages 5–8 establish contracts, a Python baseline and actual Java/SQL candidates
+  before measurement/selection in 9–10. The same at-least-10% improvement over
+  Python applies to Java and SQL selection.
 - Production integration/recovery is Stage 11; backup/schema/pilot gates are 12;
   full raw/derived population, z-scores and final audit are 13–15. No candidate
-  benchmarks, implementation changes or database mutations were performed by
-  this documentation revision. Next prompt: execute Stage 3 only, Luna medium.
+  benchmarks, implementation changes or database mutations occurred in Stage 3.
+  Next prompt: execute Stage 4 only, Luna medium.
 
 ## Handoff log
 
@@ -762,3 +764,24 @@ the independent semantic reference, not only the selected backend's own formulas
   database writes, schema changes, receipts or source changes occurred.
 - Stage 2c is intentionally recorded as skipped pending a future Java writer
   proposal; do not treat the reader selection or these tests as write evidence.
+
+### Revised Stage 3 evidence plan completed — 2026-10-19
+
+- Verified the committed Stage 2c review and the Stage 2a/2b report SHA-256
+  values. The exact selected 25 paths agree across both studies and the saved
+  request; all 25 targets and all 75 recorded target/dependency inputs matched
+  their original hashes. No inputs were missing or drifted, and no benchmark was
+  rerun or sample substituted.
+- Carried forward Stage 2a reader results and Stage 2b's 16-column computation
+  parity, plus its 412 missing stored rows and zero of 25 sessions matching all
+  columns. The provisional decision remains reader-only; production processor
+  and writer are unset.
+- Flagged a historical count mismatch for review: the hashed Stage 2a study
+  reports 217,734 rows per repeat, while its older handoff and Stage 3 prompt
+  state 217,465, a difference of 269. Both values and the original reports remain
+  unchanged; this stage did not rerun the study.
+- `output/legacy-migration/evaluation-plan.json` freezes the nine mandatory
+  Python/Java/SQL workload cells and Stage 6 protocol; SHA-256:
+  `9ef501a41f3f5348ff27f4e456326674a4979375b8be563d02f970bb82d30911`. All
+  comparisons remain pending until Stages 6–9; the expanded objective is
+  incomplete. No database access or mutations occurred. Next: Stage 4 only.
