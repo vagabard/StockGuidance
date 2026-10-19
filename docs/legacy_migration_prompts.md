@@ -785,3 +785,26 @@ the independent semantic reference, not only the selected backend's own formulas
   `9ef501a41f3f5348ff27f4e456326674a4979375b8be563d02f970bb82d30911`. All
   comparisons remain pending until Stages 6–9; the expanded objective is
   incomplete. No database access or mutations occurred. Next: Stage 4 only.
+
+### Revised Stage 4 source acceptance recheck completed — 2026-10-19
+
+- Rechecked the exact recorded nine-file sample under seed `20261019`; no
+  files were resampled or substituted. All records were parsed again with the
+  exchange-calendar and `America/New_York` timestamp checks. The sample passed
+  with 77,783 records, original file hashes, normalized record IDs and counts
+  unchanged.
+- Inventory identity remains `06048bc49a326b585376b2d3a5a401664bfb28895e2ffa9f0f2e48bab7b60ebd`
+  across 5,130 retained files. The explicit source identity remains adjusted
+  Polygon/Massive grouped US stocks excluding OTC. Operator attestation remains
+  the only provenance claim; original network receipt times remain unknown.
+- Python recheck evidence is persisted in
+  `output/legacy-migration/source-acceptance.json` under `stage4_recheck`.
+  Java's three-worker evidence matches all nine file hashes, record IDs and
+  counts; `cross_language.passed` is true. The read-only database comparison
+  was rerun against the same paths and still reports the known differences
+  (`matches: false`, `import_receipts_created: false`); this does not fail the
+  source gate and created no writes or receipts.
+- Added the deterministic `--recheck` path to
+  `src/stockguidance/cli/verify_archive_sample.py`. Focused validation passed:
+  `python -m pytest tests/stage6/test_archive_sample.py` (5 tests). Stage 4
+  source acceptance is complete; next prompt: Stage 5a0 only.

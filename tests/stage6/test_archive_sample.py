@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from stockguidance.cli.compare_archive_sample import compare_sample
-from stockguidance.cli.verify_archive_sample import verify_sample
+from stockguidance.cli.verify_archive_sample import recheck_sample, verify_sample
 from stockguidance.market_data.identity import encode_json
 from stockguidance.performance.archive_read import read_archive
 
@@ -67,3 +67,16 @@ def test_failed_gate_never_connects(tmp_path: Path, monkeypatch: pytest.MonkeyPa
 	monkeypatch.setattr("stockguidance.cli.compare_archive_sample.streaming_connection", lambda config: pytest.fail("Unexpected database access"))
 	with pytest.raises(ValueError, match="accepted"):
 		compare_sample(acceptance_file, tmp_path / "unused")
+
+
+def test_recheck_reuses_accepted_paths_and_cross_language_evidence(tmp_path: Path) -> None:
+	acceptance = verify_sample(archive(tmp_path), "Operator attestation")
+	acceptance_file = tmp_path / "acceptance.json"
+	acceptance_file.write_bytes(encode_json(acceptance))
+	java_file = tmp_path / "java.json"
+	java_file.write_bytes(encode_json({"backend": "java", "workers": 3, "measurements": [{"sessions": [{"session": sample["session"], "file_sha256": sample["file_sha256"], "archive_id": sample["records_id"], "archive_count": sample["record_count"]} for sample in acceptance["samples"]]}]}))
+	recheck = recheck_sample(acceptance_file, tmp_path, java_file)
+	assert recheck["source_accepted"]
+	assert recheck["sample_count"] == 9
+	assert recheck["record_count"] == 9
+	assert recheck["cross_language"]["passed"]
