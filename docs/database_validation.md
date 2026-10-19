@@ -54,6 +54,27 @@ minimum dates are reported as observations, never as proof that no earlier
 history is expected. Cached discovery capability metadata may be used, but
 validation never contacts a live provider.
 
+### Audit optional z-score materializations
+
+Add `--zscore-windows 20,60` to the read-only validation command to audit both
+the `price` and `price_delta` families for those windows. The option uses the
+same distinct integer, minimum-2 parsing rules as `update_zscores`. The audit
+loads bounded exchange-session warm-up context, verifies selected series
+definitions, schema, row keys, statuses, completion metadata, dependency and
+receipt cutoff, then independently recomputes available scores from verified
+local inputs. Stored ready scores use float32-aware comparison (`rtol=1e-5`,
+`atol=1e-6`).
+
+This option is opt-in: ordinary validation does not require z-score tables. The
+audit is Python-only and read-only; it never initializes tables, downloads data,
+repairs raw or delta rows, or persists metadata. Missing, stale, invalid, or
+unverified materializations produce `zscore_materialization` findings with
+family, window, session, ticker, expected status/score, stored status/score,
+and manual-review guidance to rerun the explicit z-score updater. A z-score
+finding is never an authorization for an automatic raw/delta repair. The Java
+validator retains its existing raw/derived comparison scope and does not claim
+to perform this z-score audit.
+
 Add `--as-of '<timezone-aware ISO timestamp>'` for a historical cutoff no later than the current/injected clock. Queries never cross supported history or include unfinished/unpublished sessions. Importing old bars today does not prove availability at a historical decision. Validation does not reconstruct earlier revisions of corrected data.
 
 Add `--format json` for machine-readable output. Redirect stdout to save a report; validation itself does not persist one:

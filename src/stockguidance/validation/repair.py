@@ -98,7 +98,9 @@ def plan_repairs(
 			continue
 		if finding.check in {ValidationCheck.FEATURE, ValidationCheck.TARGET} and any(other.blocking and other.check not in {ValidationCheck.FEATURE, ValidationCheck.TARGET} and other.session_date in {None, finding.dependency_session_date or finding.session_date} for other in findings):
 			continue
-		if finding.check is ValidationCheck.OPENING:
+		if finding.check is ValidationCheck.ZSCORE:
+			action = RepairAction.REVIEW_RECORDS
+		elif finding.check is ValidationCheck.OPENING:
 			action = RepairAction.CAPTURE_OPENING
 		elif finding.session_date is not None and not start <= finding.session_date <= end:
 			action = RepairAction.REVIEW_RECORDS
@@ -122,7 +124,10 @@ def plan_repairs(
 			action = RepairAction.REVIEW_RECORDS
 		else:
 			action = RepairAction.REBUILD_DERIVED
-		reason = ""
+		if finding.check is ValidationCheck.ZSCORE:
+			reason = "Review the z-score materialization and rerun the explicit z-score updater; validation never repairs z-score tables"
+		else:
+			reason = ""
 		if action is RepairAction.BLOCKED_OUT_OF_ACCESS:
 			reason = "No fresh verified provider capability bounds authorize an automatic refresh for this session"
 		item = RepairItem(action, finding.session_date, finding.check, finding.tickers, reason)

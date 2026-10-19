@@ -7,6 +7,7 @@ from stockguidance.cli.paths import resolve_cli_path
 from stockguidance.config.source import PriceAdjustment, SourceConfig, SourceIdentity
 from stockguidance.database.repositories.mysql_sessions import MySQLSessionRepository
 from stockguidance.database.repositories.mysql_validation import MySQLValidationRepository
+from stockguidance.database.repositories.mysql_zscores import MySQLZScoreRepository
 from stockguidance.database.connections import MySQLConnectionFactory
 from stockguidance.database.configuration import load_database_configuration
 from stockguidance.features.specification import CloseFeature, FeatureSpec, SignalMode
@@ -94,5 +95,6 @@ def assemble_and_validate(arguments: argparse.Namespace) -> ValidationResult:
 	)
 	if discovery.effective_start is None or discovery.effective_end is None:
 		raise UnknownHistoryBoundary("Supported history is unknown")
-	settings = ValidationSettings(requested_start, requested_end, publication, cutoff, features)
-	return validate_database(source, settings, boundary, calendar, MySQLValidationRepository(source, MySQLConnectionFactory(), table_names), clock, discovery=discovery)
+	settings = ValidationSettings(requested_start, requested_end, publication, cutoff, features, zscore_windows=getattr(arguments, "zscore_windows", None))
+	zscore_repository = None if settings.zscore_windows is None else MySQLZScoreRepository(source, MySQLConnectionFactory(), table_names, ManifestStore(source.data_root))
+	return validate_database(source, settings, boundary, calendar, MySQLValidationRepository(source, MySQLConnectionFactory(), table_names), clock, discovery=discovery, zscore_repository=zscore_repository)

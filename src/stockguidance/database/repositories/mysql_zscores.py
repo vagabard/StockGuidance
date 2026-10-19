@@ -2,6 +2,7 @@ from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
 from datetime import date, datetime
 from decimal import Decimal
+from dataclasses import replace
 import math
 from types import SimpleNamespace
 from typing import Iterator, cast
@@ -20,6 +21,7 @@ from stockguidance.market_data.providers.contracts import ResponseState
 from stockguidance.market_data.records import records_id
 from stockguidance.zscores.inputs import InputState, ZScoreInput, ZScoreObservation
 from stockguidance.zscores.results import ZScoreResult, ZScoreRow, ZScoreStatus
+from stockguidance.zscores.specification import ZScoreFamily
 from stockguidance.zscores.storage import (
 	ZScoreDependencySnapshot,
 	ZScoreSeriesDefinition,
@@ -148,6 +150,11 @@ class MySQLZScoreRepository(ZScoreRepository):
 		if len(values) != len(set(values)) or not values:
 			raise ValueError("Invalid or empty z-score ticker mapping")
 		return values
+
+	def inspect_schema(self, windows: tuple[int, ...]) -> None:
+		self.table_names.resolve_zscore_tables(windows)
+		with self._transaction() as cursor:
+			assert_zscore_tables(cursor, self.table_names, windows)
 
 	def _load_inputs(self, cursor: Cursor, query: ZScoreInputQuery, *, lock: bool) -> LoadedZScoreInputs:
 		evidence, labels = self._read_evidence(cursor, query, lock=lock)
@@ -440,18 +447,85 @@ class MySQLZScoreRepository(ZScoreRepository):
 		return tuple(bind_dependency(candidate, definition) for candidate in current)
 
 	def read_verified(self, definition: ZScoreSeriesDefinition, dependency: ZScoreDependencySnapshot) -> VerifiedZScoreRead:
-		self.table_names.resolve_zscore_tables((definition.window,))
-		bound = bind_dependency(dependency, definition)
+		return self.read_verified_many(((definition, dependency),))[0]
+
+	def read_verified_many(
+		self,
+		requests: tuple[tuple[ZScoreSeriesDefinition, ZScoreDependencySnapshot], ...],
+	) -> tuple[VerifiedZScoreRead, ...]:
+		return self._read_many_verified(requests, strict=True)
+
+	def read_for_audit_many(
+		self,
+		requests: tuple[tuple[ZScoreSeriesDefinition, ZScoreDependencySnapshot], ...],
+	) -> tuple[VerifiedZScoreRead, ...]:
+		return self._read_many_verified(requests, strict=False)
+
+	def _read_many_verified(
+		self,
+		requests: tuple[tuple[ZScoreSeriesDefinition, ZScoreDependencySnapshot], ...],
+		*,
+		strict: bool,
+	) -> tuple[VerifiedZScoreRead, ...]:
+		if not requests:
+			return ()
+		definitions = tuple(definition for definition, _ in requests)
+		if len({(definition.series_key, dependency.date_id) for definition, dependency in requests}) != len(requests):
+			raise ValueError("Duplicate z-score validation request")
+		windows = tuple(sorted({definition.window for definition in definitions}))
+		self.table_names.resolve_zscore_tables(windows)
+		bound_requests = tuple((definition, bind_dependency(dependency, definition)) for definition, dependency in requests)
 		with self._transaction() as cursor:
-			assert_zscore_tables(cursor, self.table_names, (definition.window,))
-			metadata = self._read_metadata(cursor, definition, bound)
-			rows = self._read_rows(cursor, definition, bound)
-			current = self._load_inputs_for_dependency(cursor, definition, bound, lock=False)
-			if current != bound:
-				raise ZScoreDependencyChanged("Stored z-score result is stale")
-			if metadata.dependency_digest != bound.dependency_digest or metadata.availability_digest != bound.availability_digest or metadata.content_digest != rows_content_id(rows):
-				raise ZScoreDependencyChanged("Stored z-score metadata is stale")
-			return VerifiedZScoreRead(definition, metadata, rows)
+			assert_zscore_tables(cursor, self.table_names, windows)
+			self._read_series(cursor, definitions)
+			current_dependencies: dict[tuple[ZScoreFamily, tuple[TradingSession, ...], tuple[int, ...], datetime], dict[TradingSession, ZScoreDependencySnapshot]] = {}
+			for definition, dependency in bound_requests:
+				group_key = (definition.family, dependency.input_sessions or (dependency.session,), dependency.ticker_ids, dependency.as_of)
+				if group_key not in current_dependencies:
+					current_snapshots = self._load_dependencies(cursor, definition, dependency, lock=False)
+					current_dependencies[group_key] = {item.session: item for item in current_snapshots}
+				current_snapshot = current_dependencies[group_key].get(dependency.session)
+				if current_snapshot is None or bind_dependency(current_snapshot, definition) != dependency:
+					raise ZScoreDependencyChanged("Stored z-score result is stale")
+			metadata_by_key = self._read_metadata_many(cursor, bound_requests)
+			rows_by_key = self._read_rows_many(cursor, bound_requests)
+			reads: list[VerifiedZScoreRead] = []
+			for definition, dependency in bound_requests:
+				key = (definition.series_key, dependency.date_id)
+				metadata = metadata_by_key.get(key)
+				if metadata is None:
+					raise ZScoreSchemaError("Z-score completion metadata is missing or duplicated")
+				rows = rows_by_key.get(key, ())
+				if metadata.dependency_digest != dependency.dependency_digest or metadata.availability_digest != dependency.availability_digest:
+					raise ZScoreDependencyChanged("Stored z-score metadata is stale")
+				if strict and len(rows) < metadata.row_count:
+					raise ZScoreSchemaError("Z-score stored rows are missing")
+				if strict and len(rows) > metadata.row_count:
+					raise ZScoreSchemaError("Z-score stored rows are duplicated or out of scope")
+				if strict and metadata.content_digest != rows_content_id(rows):
+					raise ZScoreSchemaError("Z-score completion metadata does not match stored rows")
+				if not strict and len(rows) != metadata.row_count:
+					metadata = replace(metadata, row_count=len(rows), ready_count=sum(row.status is ZScoreStatus.READY for row in rows), status_counts=status_counts(rows), content_digest=rows_content_id(rows))
+				reads.append(VerifiedZScoreRead(definition, metadata, rows))
+			return tuple(reads)
+
+	def _read_series(self, cursor: Cursor, definitions: tuple[ZScoreSeriesDefinition, ...]) -> None:
+		keys = tuple(definition.series_key for definition in definitions)
+		placeholders = _placeholders(keys)
+		table = quote_identifier(self.table_names.table(TableRole.ZSCORE_SERIES))
+		cursor.execute(
+			f"SELECT series_key, schema_version, source_scope, calendar_id, family, window, calculation_version, delta_definition, precision, missing_value_policy FROM {table} WHERE series_key IN ({placeholders})",
+			keys,
+		)
+		rows = cursor.fetchall()
+		by_key = {row[0]: row for row in rows if len(row) == 10}
+		if len(rows) != len(by_key) or set(by_key) != set(keys):
+			raise ZScoreSchemaError("Z-score series definition is missing or duplicated")
+		for definition in definitions:
+			row = by_key[definition.series_key]
+			expected = (definition.series_key, definition.schema_version, definition.source_scope, definition.calendar_id, definition.family.value, definition.window, definition.calculation_version, definition.delta_definition, definition.precision, definition.missing_value_policy)
+			if tuple(row) != expected:
+				raise ZScoreMetadataConflict("Conflicting z-score series definition")
 
 	def _read_metadata(self, cursor: Cursor, definition: ZScoreSeriesDefinition, dependency: ZScoreDependencySnapshot) -> ZScoreSessionMetadata:
 		table = quote_identifier(self.table_names.table(TableRole.ZSCORE_SESSIONS))
@@ -459,7 +533,12 @@ class MySQLZScoreRepository(ZScoreRepository):
 		rows = cursor.fetchall()
 		if len(rows) != 1 or len(rows[0]) != 10:
 			raise ZScoreSchemaError("Z-score completion metadata is missing or duplicated")
-		row = rows[0]
+		return self._parse_metadata(rows[0])
+
+	@staticmethod
+	def _parse_metadata(row: Sequence[object]) -> ZScoreSessionMetadata:
+		if len(row) != 10:
+			raise ZScoreSchemaError("Malformed z-score completion metadata")
 		try:
 			counts = tuple((ZScoreStatus(int(item.split(":", 1)[0])), int(item.split(":", 1)[1])) for item in str(row[8]).split(",") if item)
 			if row[4] not in (0, 1, False, True):
@@ -467,6 +546,29 @@ class MySQLZScoreRepository(ZScoreRepository):
 			return ZScoreSessionMetadata(str(row[0]), normalize_date_id(row[1]), str(row[2]), str(row[3]), bool(row[4]), datetime.fromisoformat(str(row[5])), int(str(row[6])), int(str(row[7])), counts, str(row[9]))
 		except (TypeError, ValueError, OverflowError) as error:
 			raise ZScoreSchemaError("Malformed z-score completion metadata") from error
+
+	def _read_metadata_many(
+		self,
+		cursor: Cursor,
+		requests: tuple[tuple[ZScoreSeriesDefinition, ZScoreDependencySnapshot], ...],
+	) -> dict[tuple[str, int], ZScoreSessionMetadata]:
+		keys = tuple((definition.series_key, dependency.date_id) for definition, dependency in requests)
+		series_keys = tuple(key[0] for key in keys)
+		date_ids = tuple(key[1] for key in keys)
+		table = quote_identifier(self.table_names.table(TableRole.ZSCORE_SESSIONS))
+		cursor.execute(
+			f"SELECT series_key, date_id, dependency_digest, availability_digest, actual_input_available, completed_at, row_count, ready_count, status_counts, content_digest FROM {table} WHERE series_key IN ({_placeholders(series_keys)}) AND date_id IN ({_placeholders(date_ids)})",
+			series_keys + date_ids,
+		)
+		result: dict[tuple[str, int], ZScoreSessionMetadata] = {}
+		for row in cursor.fetchall():
+			if len(row) != 10:
+				raise ZScoreSchemaError("Malformed z-score completion metadata")
+			key = (str(row[0]), normalize_date_id(row[1]))
+			if key not in keys or key in result:
+				raise ZScoreSchemaError("Z-score completion metadata is missing or duplicated")
+			result[key] = self._parse_metadata(row)
+		return result
 
 	def _read_rows(self, cursor: Cursor, definition: ZScoreSeriesDefinition, dependency: ZScoreDependencySnapshot) -> tuple[ZScoreRow, ...]:
 		resolved = self.table_names.resolve_zscore_tables((definition.window,))[definition.window]
@@ -495,3 +597,49 @@ class MySQLZScoreRepository(ZScoreRepository):
 		if len({row.ticker_id for row in rows}) != len(rows):
 			raise ZScoreSchemaError("Duplicate z-score row key")
 		return tuple(rows)
+
+	def _read_rows_many(
+		self,
+		cursor: Cursor,
+		requests: tuple[tuple[ZScoreSeriesDefinition, ZScoreDependencySnapshot], ...],
+	) -> dict[tuple[str, int], tuple[ZScoreRow, ...]]:
+		result: dict[tuple[str, int], list[ZScoreRow]] = {}
+		resolved = self.table_names.resolve_zscore_tables(tuple(sorted({definition.window for definition, _ in requests})))
+		for definition in {definition for definition, _ in requests}:
+			matching = tuple((item_definition, dependency) for item_definition, dependency in requests if item_definition == definition)
+			date_ids = tuple(dependency.date_id for _, dependency in matching)
+			physical = resolved[definition.window].price if definition.family.value == "price" else resolved[definition.window].price_delta
+			cursor.execute(
+				f"SELECT date_id, ticker_id, zscore, status FROM {quote_identifier(physical)} WHERE date_id IN ({_placeholders(date_ids)}) ORDER BY date_id, ticker_id",
+				date_ids,
+			)
+			request_by_date = {(dependency.date_id, definition.series_key): dependency for _, dependency in matching}
+			for row in cursor.fetchall():
+				if len(row) != 4:
+					raise ZScoreSchemaError("Invalid z-score row layout")
+				date_id = normalize_date_id(row[0])
+				dependency = request_by_date.get((date_id, definition.series_key))
+				if dependency is None:
+					continue
+				try:
+					status = ZScoreStatus(int(str(row[3])))
+					if status is ZScoreStatus.READY:
+						score = _as_float(row[2])
+						if score is None:
+							raise ValueError("Non-finite ready z-score")
+					else:
+						if row[2] is not None:
+							raise ValueError("Unavailable z-score rows must store NULL scores")
+						score = None
+					ticker_id = normalize_date_id(row[1])
+					if ticker_id not in dependency.ticker_ids:
+						raise ValueError("Out-of-scope z-score row key")
+					key = (definition.series_key, date_id)
+					result.setdefault(key, []).append(ZScoreRow(definition.window, dependency.session, ticker_id, score, status, "stored"))
+				except (TypeError, ValueError, OverflowError) as error:
+					raise ZScoreSchemaError("Invalid z-score status or score") from error
+		parsed = {key: tuple(rows) for key, rows in result.items()}
+		for key, rows in parsed.items():
+			if len({row.ticker_id for row in rows}) != len(rows):
+				raise ZScoreSchemaError("Duplicate z-score row key")
+		return parsed

@@ -11,6 +11,7 @@ from stockguidance.market_data.manifests import SourceManifest
 from stockguidance.validation.coverage import CoverageResult, CoverageState
 from stockguidance.validation.findings import FindingCategory, ValidationFinding
 from stockguidance.validation.repair import RepairPlan
+from stockguidance.validation.zscores import ZScoreAuditRecord
 
 
 @dataclass(frozen=True)
@@ -26,6 +27,8 @@ class ValidationResult:
 	samples: tuple[Sample, ...] = ()
 	feature_specification: FeatureSpec | None = None
 	discovery: CoverageDiscoveryResult | None = None
+	zscore_windows: tuple[int, ...] | None = None
+	zscore_audit: tuple[ZScoreAuditRecord, ...] = ()
 
 	@property
 	def failed(self) -> bool:

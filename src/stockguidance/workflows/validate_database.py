@@ -7,6 +7,7 @@ from stockguidance.config.source import SourceConfig
 from stockguidance.config.validation import require_aware_datetime, require_date
 from stockguidance.database.repositories.sessions import SessionQuery, StoredSession
 from stockguidance.database.repositories.validation import DatabaseInspection, ValidationRepository
+from stockguidance.database.repositories.zscores import ZScoreRepository
 from stockguidance.features.specification import FeatureSpec, SignalMode
 from stockguidance.market_data.opening_store import OpeningStore
 from stockguidance.market_data.openings import OpeningRepository
@@ -29,6 +30,7 @@ from stockguidance.validation.findings import FindingCategory, ValidationCheck, 
 from stockguidance.validation.repair import plan_repairs
 from stockguidance.validation.result import ValidationResult
 from stockguidance.validation.openings import validate_opening_coverage
+from stockguidance.validation.zscores import ZScoreAuditRecord, audit_zscores
 from stockguidance.targets.specification import TargetSpec
 
 
@@ -40,6 +42,7 @@ class ValidationSettings:
 	as_of: datetime | None = None
 	features: FeatureSpec | None = None
 	target: TargetSpec = TargetSpec()
+	zscore_windows: tuple[int, ...] | None = None
 
 	def __post_init__(self) -> None:
 		if self.start is not None:
@@ -52,6 +55,8 @@ class ValidationSettings:
 			require_aware_datetime(self.as_of, "validation cutoff")
 		if (self.features is not None and not isinstance(self.features, FeatureSpec)) or not isinstance(self.target, TargetSpec):
 			raise ValueError("Validation requires explicit feature/target contracts")
+		if self.zscore_windows is not None and (not isinstance(self.zscore_windows, tuple) or not self.zscore_windows or len(set(self.zscore_windows)) != len(self.zscore_windows) or any(type(window) is not int or window < 2 for window in self.zscore_windows)):
+			raise ValueError("Z-score windows must be distinct integers of at least 2")
 
 
 class _NoStoredSessions:
@@ -109,7 +114,7 @@ def _plan_from_discovery(source: SourceConfig, settings: ValidationSettings, dis
 	)
 
 
-def validate_database(source: SourceConfig, settings: ValidationSettings, boundary: HistoryBoundary | None, calendar: SessionCalendar, repository: ValidationRepository, clock: Clock, *, openings: OpeningRepository | None = None, discovery: CoverageDiscoveryResult | None = None) -> ValidationResult:
+def validate_database(source: SourceConfig, settings: ValidationSettings, boundary: HistoryBoundary | None, calendar: SessionCalendar, repository: ValidationRepository, clock: Clock, *, openings: OpeningRepository | None = None, discovery: CoverageDiscoveryResult | None = None, zscore_repository: ZScoreRepository | None = None) -> ValidationResult:
 	if settings.features is not None and (settings.features.adjustment is not source.identity.adjustment or settings.features.interval is not source.identity.interval):
 		raise ValueError("Validation feature specification and source differ")
 	cutoff = decision_cutoff(clock, settings.as_of)
@@ -167,6 +172,13 @@ def validate_database(source: SourceConfig, settings: ValidationSettings, bounda
 	for manifest in manifests:
 		if manifest.download.available_at <= cutoff and (not manifest.import_complete or not manifest.derived_complete):
 			findings.append(ValidationFinding(FindingCategory.INCOMPLETE, ValidationCheck.SOURCE, "Manifest import/derived completion markers are unfinished", manifest.download.session.session_date))
+	zscore_audit: tuple[ZScoreAuditRecord, ...] = ()
+	if settings.zscore_windows is not None:
+		if zscore_repository is None:
+			findings.append(ValidationFinding(FindingCategory.FAILED, ValidationCheck.ZSCORE, "Z-score validation was requested without a z-score repository"))
+		else:
+			zscore_findings, zscore_audit = audit_zscores(source, plan, calendar, settings.publication, cutoff, settings.zscore_windows, zscore_repository)
+			findings.extend(zscore_findings)
 	assessments: list[SessionCoverage] = []
 	for item in plan.sessions:
 		session_findings = tuple(finding for finding in findings if finding.session_date in {None, item.session.session_date})
@@ -179,4 +191,4 @@ def validate_database(source: SourceConfig, settings: ValidationSettings, bounda
 		fetchable_end=None if discovery is None else discovery.fetchable_end,
 		capability_resolved=True if discovery is None else discovery.provider_is_fresh,
 	)
-	return ValidationResult(plan, CoverageResult(plan.request, tuple(assessments)), result_findings, repairs, snapshots, tuple(manifests), () if scope.query is None else scope.query.sessions, inspection.record_counts, samples, settings.features, discovery)
+	return ValidationResult(plan, CoverageResult(plan.request, tuple(assessments)), result_findings, repairs, snapshots, tuple(manifests), () if scope.query is None else scope.query.sessions, inspection.record_counts, samples, settings.features, discovery, settings.zscore_windows, zscore_audit)

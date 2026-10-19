@@ -6,6 +6,7 @@ from stockguidance.cli.validation_setup import assemble_and_validate
 from stockguidance.market_data.history import UnknownHistoryBoundary
 from stockguidance.validation.reporting import render_text, report_payload
 from stockguidance.validation.result import ValidationResult
+from stockguidance.cli.zscore_args import parse_windows
 
 
 def parser() -> argparse.ArgumentParser:
@@ -24,6 +25,7 @@ def parser() -> argparse.ArgumentParser:
 	arguments.add_argument("--ticker-ids", help="Comma-separated exact ordered model universe; requires --lookback-sessions")
 	arguments.add_argument("--lookback-sessions", type=int, help="Exact historical close window; requires --ticker-ids")
 	arguments.add_argument("--signal-mode", choices=("previous_close", "entry_open"), default="previous_close", help="entry_open also audits read-only opening receipts for the full universe")
+	arguments.add_argument("--zscore-windows", type=parse_windows, help="Optional comma-separated z-score windows to audit, for example 20,60")
 	return arguments
 
 

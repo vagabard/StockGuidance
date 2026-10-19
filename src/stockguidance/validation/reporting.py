@@ -66,6 +66,12 @@ def report_payload(result: ValidationResult) -> dict[str, object]:
 	counts = {count.session_date: count for count in result.record_counts}
 	samples = {sample.timing.entry_session.session_date: sample for sample in result.samples}
 	discovery_payload = _discovery_payload(result)
+	zscore_payload = None if result.zscore_windows is None else {
+		"windows": list(result.zscore_windows),
+		"families": ["price", "price_delta"],
+		"audit_records": [record.payload() for record in result.zscore_audit],
+		"audit_contract": "verified_inputs_recomputed_independently; float32-aware rtol=1e-5 atol=1e-6",
+	}
 	schema_findings = [finding for finding in result.findings if finding.check is ValidationCheck.SCHEMA]
 	sessions: list[dict[str, object]] = []
 	for item in result.coverage.sessions:
@@ -98,6 +104,7 @@ def report_payload(result: ValidationResult) -> dict[str, object]:
 		"derived_spec": LEGACY_DERIVED_SPEC, "completeness_scope": "Declared provider request only; provider omissions do not establish ticker lifetimes or independent market completeness",
 		"target_specification": asdict(TargetSpec()), "target_storage": "computed_from_verified_raw_closes; legacy derived columns are not close-to-close targets",
 		"feature_specification": None if result.feature_specification is None else asdict(result.feature_specification),
+		"zscore_validation": zscore_payload,
 		"samples": [sample_payload(sample, assess_features=result.feature_specification is not None) for sample in result.samples],
 		"schema_state": "failed" if result.failed else "unverified" if schema_findings else "verified" if result.queried_sessions else "not_assessed",
 		"inspected_sessions": [session.session_date.isoformat() for session in result.queried_sessions], "unassigned_orphan_scope": "All records with no date mapping; no historical date bounds are inferred for these records",
@@ -115,6 +122,8 @@ def render_text(result: ValidationResult) -> str:
 	effective = discovery["effective_scope"]
 	history = "unresolved" if result.discovery is not None and result.discovery.history_boundary is None else str(result.plan.boundary.history_start)
 	lines = [f"Database validation: {status} (exit {result.exit_code})", f"Source: {result.plan.request.source.provider} {result.plan.request.source.endpoint}; {result.plan.request.source.universe}; {result.plan.request.source.adjustment.value}", f"Auditable request: {result.plan.request.start} through {result.plan.request.end}; cutoff {result.plan.request.as_of.isoformat()}", f"Local observed bounds: {local}", f"Verified retained coverage: {discovery['verified_retained_coverage']}", f"Provider capability: {provider}", f"Effective scope: {effective}; latest expected published session: {discovery['latest_expected_published_session']}", f"Unresolved limits: {discovery['unresolved_limits']}", f"Supported history: {history}; derived specification: {LEGACY_DERIVED_SPEC}"]
+	if result.zscore_windows is not None:
+		lines.append(f"Z-score validation: windows {result.zscore_windows}; audit records {len(result.zscore_audit)}; Python-only read-only audit")
 	for session in result.coverage.sessions:
 		lines.append(f"{session.session.session_date}: {session.state.value}")
 	for snapshot in result.snapshots:

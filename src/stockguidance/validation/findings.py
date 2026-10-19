@@ -31,6 +31,7 @@ class ValidationCheck(StrEnum):
 	TARGET = "close_to_close_target"
 	FEATURE = "previous_close_features"
 	OPENING = "entry_open_observations"
+	ZSCORE = "zscore_materialization"
 
 
 @dataclass(frozen=True)

@@ -161,10 +161,10 @@ def _observation_issue(observation: ZScoreObservation, family: ZScoreFamily) -> 
 		return ZScoreStatus.INVALID_INPUT, None, "invalid_input"
 	if observation.state in (InputState.UNVERIFIED, InputState.NOT_YET_AVAILABLE) or not observation.actual_available:
 		return ZScoreStatus.UNVERIFIED_INPUT, None, "input_not_verified_or_not_available"
-	if observation.state is InputState.MISSING or observation.value is None:
-		return ZScoreStatus.MISSING_INPUT, None, "missing_input"
 	if observation.state is InputState.INSUFFICIENT_HISTORY:
 		return ZScoreStatus.INSUFFICIENT_HISTORY, None, "insufficient_history"
+	if observation.state is InputState.MISSING or observation.value is None:
+		return ZScoreStatus.MISSING_INPUT, None, "missing_input"
 	value = _numeric_value(observation.value, family)
 	if value is None:
 		return ZScoreStatus.INVALID_INPUT, None, "invalid_input"

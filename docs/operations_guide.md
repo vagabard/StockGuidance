@@ -226,6 +226,16 @@ unverified coverage or no available session, `1` setup/inspection failure.
 Argument errors also use `2`. Check the findings and feature scope as well as
 the exit code: a calendar-only range can pass without any training samples.
 
+To audit optional rolling z-score materializations without any writes or
+provider access, add `--zscore-windows 20,60` to each validation command. This
+checks both price and stored close-ratio delta families, including warm-up
+dependencies, receipt cutoffs, current dependency digests, statuses, metadata,
+and independently recomputed float32 scores. Ordinary validation omits this
+audit and does not require z-score tables. The Python validator owns this
+optional audit; the Java validator retains its existing raw/derived comparison
+scope. Z-score findings require a separate explicit `update_zscores` run and
+are never interpreted as raw/delta repair authorization.
+
 To check the exact model input layout, add both arguments using **real IDs in
 the intended order**:
 

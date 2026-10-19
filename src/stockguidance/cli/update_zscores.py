@@ -19,18 +19,11 @@ from stockguidance.market_data.manifests import ManifestStore
 from stockguidance.market_data.providers.polygon import GROUPED_ENDPOINT, GROUPED_UNIVERSE
 from stockguidance.market_data.publication import DailyPublicationPolicy
 from stockguidance.workflows.update_zscores import ZScoreUpdateResult, ZScoreUpdateSettings, update_zscores
+from stockguidance.cli.zscore_args import parse_windows as _parse_windows
 
 
 def parse_windows(value: str) -> tuple[int, ...]:
-	if not isinstance(value, str) or not value.strip():
-		raise argparse.ArgumentTypeError("--windows requires comma-separated integers >= 2")
-	try:
-		windows = tuple(int(item.strip()) for item in value.split(","))
-	except ValueError:
-		raise argparse.ArgumentTypeError("--windows requires comma-separated integers >= 2") from None
-	if not windows or any(type(window) is not int or window < 2 for window in windows) or len(set(windows)) != len(windows):
-		raise argparse.ArgumentTypeError("--windows requires distinct integers >= 2")
-	return windows
+	return _parse_windows(value, "--windows")
 
 
 def parser() -> argparse.ArgumentParser:
