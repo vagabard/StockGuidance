@@ -4,7 +4,7 @@ from typing import Protocol
 
 from stockguidance.calendar.clock import Clock
 from stockguidance.calendar.sessions import TradingSession
-from stockguidance.config.source import PriceAdjustment, SourceConfig
+from stockguidance.config.source import PriceAdjustment, SourceConfig, canonical_source_family
 from stockguidance.market_data.identity import content_id, mapping
 from stockguidance.market_data.openings import OPENING_ENDPOINT, OpeningObservation
 from stockguidance.market_data.providers.polygon import GROUPED_ENDPOINT, GROUPED_UNIVERSE, HttpTransport
@@ -20,7 +20,7 @@ class PolygonOpeningProvider:
 
 	def fetch(self, source: SourceConfig, session: TradingSession, ticker_id: int, symbol: str, clock: Clock) -> OpeningObservation | None:
 		identity = source.identity
-		if (identity.provider, identity.endpoint, identity.market, identity.universe) != ("polygon", GROUPED_ENDPOINT, "us-stocks", GROUPED_UNIVERSE) or re.fullmatch(r"[A-Za-z0-9._-]+", symbol) is None:
+		if (canonical_source_family(identity.provider), identity.endpoint, identity.market, identity.universe) != ("polygon_massive", GROUPED_ENDPOINT, "us-stocks", GROUPED_UNIVERSE) or re.fullmatch(r"[A-Za-z0-9._-]+", symbol) is None:
 			raise ValueError("Opening provider requires exact supported source and symbol")
 		if not session.opens_at + timedelta(minutes=1) <= clock.now() < session.closes_at:
 			raise ValueError("Capture openings after the first minute and before the entry close")

@@ -96,7 +96,7 @@ def _rows_match(expected: tuple[ZScoreRow, ...], stored: tuple[ZScoreRow, ...]) 
 
 def _definition(source: SourceConfig, calendar: SessionCalendar, family: ZScoreFamily, specification: ZScoreSpecification, window: int) -> ZScoreSeriesDefinition:
 	return ZScoreSeriesDefinition(
-		source_key(source.identity), calendar.calendar_id, family, window,
+		 source_key(source.identity), calendar.calendar_id, family, window,
 		specification.calculation_version, specification.precision, specification.delta_definition,
 	)
 

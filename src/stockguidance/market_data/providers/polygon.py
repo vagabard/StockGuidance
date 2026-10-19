@@ -3,7 +3,7 @@ from datetime import datetime
 from typing import Protocol
 
 from stockguidance.calendar.sessions import TradingSession
-from stockguidance.config.source import PriceAdjustment, SourceConfig, SourceIdentity
+from stockguidance.config.source import PriceAdjustment, SourceConfig, SourceIdentity, canonical_source_family
 from stockguidance.market_data.identity import mapping, text_field
 from stockguidance.market_data.providers.contracts import ProviderResponse, ResponseState, ProviderCapability, unknown_capability
 from stockguidance.market_data.records import count_value, provider_bar
@@ -34,7 +34,7 @@ class PolygonGroupedProvider:
 
 	def fetch(self, source: SourceConfig, session: TradingSession) -> ProviderResponse:
 		identity = source.identity
-		if (identity.provider, identity.endpoint, identity.market, identity.universe) != ("polygon", GROUPED_ENDPOINT, "us-stocks", GROUPED_UNIVERSE):
+		if (canonical_source_family(identity.provider), identity.endpoint, identity.market, identity.universe) != ("polygon_massive", GROUPED_ENDPOINT, "us-stocks", GROUPED_UNIVERSE):
 			raise ValueError("Polygon grouped adapter requires its exact US-stocks-excluding-OTC request scope")
 		try:
 			response = self.transport.get(GROUPED_ENDPOINT.format(date=session.session_date.isoformat()), identity.adjustment is PriceAdjustment.ADJUSTED)
@@ -65,6 +65,6 @@ class PolygonGroupedProvider:
 			raise provider_failure() from None
 
 	def discover_capability(self, source: SourceIdentity, checked_at: datetime) -> ProviderCapability:
-		if (source.provider, source.endpoint, source.market, source.universe) != ("polygon", GROUPED_ENDPOINT, "us-stocks", GROUPED_UNIVERSE):
+		if (canonical_source_family(source.provider), source.endpoint, source.market, source.universe) != ("polygon_massive", GROUPED_ENDPOINT, "us-stocks", GROUPED_UNIVERSE):
 			raise ValueError("Polygon grouped adapter requires its exact US-stocks-excluding-OTC request scope")
 		return unknown_capability(source, checked_at, "Polygon grouped history has no authoritative account capability endpoint")

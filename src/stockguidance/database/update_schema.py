@@ -1,14 +1,16 @@
 from collections.abc import Iterable
+from datetime import datetime, timezone
 
 from stockguidance.config.source import SourceConfig
 from stockguidance.database.repositories.mysql_sessions import Cursor
 from stockguidance.database.write_connections import WriteConnectionFactory
-from stockguidance.market_data.identity import source_key
+from stockguidance.market_data.identity import data_configuration_key
 from stockguidance.market_data.legacy_derived import DERIVED_COLUMNS
 from stockguidance.database.table_names import TableNames, TableRole, load_table_names, quote_identifier
+from stockguidance.database.verification import VerificationStatus, VerificationType, register_verification, verification_allows
 
 
-_UPDATE_TABLE_ROLES = (TableRole.SOURCE, TableRole.SESSIONS, TableRole.TICKERS, TableRole.PRICES, TableRole.DELTAS, TableRole.IMPORTS)
+_UPDATE_TABLE_ROLES = (TableRole.DATA_CONFIGURATION, TableRole.SESSIONS, TableRole.TICKERS, TableRole.PRICES, TableRole.DELTAS, TableRole.IMPORTS, TableRole.VERIFICATIONS, TableRole.VERIFICATION_SAMPLES)
 
 
 def _validate_windows(windows: Iterable[int]) -> tuple[int, ...]:
@@ -20,12 +22,14 @@ def _validate_windows(windows: Iterable[int]) -> tuple[int, ...]:
 
 def update_schema_statements(table_names: TableNames) -> tuple[str, ...]:
 	return (
-		f"CREATE TABLE IF NOT EXISTS {quote_identifier(table_names.source)} (id INT PRIMARY KEY, source_key VARCHAR(64) NOT NULL) ENGINE=InnoDB",
+		f"CREATE TABLE IF NOT EXISTS {quote_identifier(table_names.table(TableRole.DATA_CONFIGURATION))} (id INT PRIMARY KEY, configuration_key CHAR(64) NOT NULL, source_key CHAR(64) NOT NULL, source_family VARCHAR(64) NOT NULL, endpoint VARCHAR(512) NOT NULL, market VARCHAR(64) NOT NULL, universe VARCHAR(128) NOT NULL, interval_code VARCHAR(8) NOT NULL, raw_price_split_adjusted TINYINT NOT NULL, raw_price_dividend_adjusted TINYINT NOT NULL, raw_price_vendor_defined_adjustment VARCHAR(128) NULL, created_at VARCHAR(40) NOT NULL) ENGINE=InnoDB",
 		f"CREATE TABLE IF NOT EXISTS {quote_identifier(table_names.sessions)} (id INT AUTO_INCREMENT PRIMARY KEY, transaction_date DATE NOT NULL UNIQUE) ENGINE=InnoDB",
 		f"CREATE TABLE IF NOT EXISTS {quote_identifier(table_names.tickers)} (id INT AUTO_INCREMENT PRIMARY KEY, label VARCHAR(16) NOT NULL UNIQUE) ENGINE=InnoDB",
 		f"CREATE TABLE IF NOT EXISTS {quote_identifier(table_names.prices)} (ticker_id INT NOT NULL, date_id INT NOT NULL, open DECIMAL(19,4), high DECIMAL(19,4), low DECIMAL(19,4), close DECIMAL(19,4), volume BIGINT, vwap DECIMAL(19,4), transactions BIGINT, PRIMARY KEY(ticker_id, date_id)) ENGINE=InnoDB",
 		f"CREATE TABLE IF NOT EXISTS {quote_identifier(table_names.deltas)} (ticker_id INT NOT NULL, date_id INT NOT NULL, " + ", ".join(f"{column} DOUBLE NULL" for column in DERIVED_COLUMNS) + ", PRIMARY KEY(ticker_id, date_id)) ENGINE=InnoDB",
 		f"CREATE TABLE IF NOT EXISTS {quote_identifier(table_names.imports)} (session_date DATE PRIMARY KEY, raw_id VARCHAR(64) NOT NULL, available_at VARCHAR(40) NOT NULL, derived_dependency_id VARCHAR(64) NULL, derived_content_id VARCHAR(64) NULL) ENGINE=InnoDB",
+		f"CREATE TABLE IF NOT EXISTS {quote_identifier(table_names.table(TableRole.VERIFICATIONS))} (id INT AUTO_INCREMENT PRIMARY KEY, comparison_type VARCHAR(32) NOT NULL, baseline_key CHAR(64) NOT NULL, candidate_key CHAR(64) NOT NULL, status VARCHAR(16) NOT NULL, requested_count INT NOT NULL, completed_count INT NOT NULL, random_seed BIGINT NOT NULL, registered_at VARCHAR(40) NOT NULL, completed_at VARCHAR(40) NULL, detail VARCHAR(512) NULL) ENGINE=InnoDB",
+		f"CREATE TABLE IF NOT EXISTS {quote_identifier(table_names.table(TableRole.VERIFICATION_SAMPLES))} (verification_id INT NOT NULL, sample_date DATE NOT NULL, status VARCHAR(16) NOT NULL, baseline_digest CHAR(64) NULL, candidate_digest CHAR(64) NULL, mismatch_count INT NOT NULL, detail VARCHAR(512) NULL, PRIMARY KEY (verification_id, sample_date)) ENGINE=InnoDB",
 	)
 
 
@@ -118,12 +122,74 @@ def assert_transactional_tables(cursor: Cursor, table_names: TableNames | None =
 		raise ValueError("All updater tables must exist and use InnoDB; no automatic schema conversion is performed")
 
 
-def assert_source(cursor: Cursor, source: SourceConfig, table_names: TableNames | None = None) -> None:
+def assert_data_configuration(cursor: Cursor, source: SourceConfig, table_names: TableNames | None = None, *, write: bool = False) -> None:
 	selected_names = table_names or load_table_names()
-	cursor.execute(f"SELECT source_key FROM {quote_identifier(selected_names.source)} WHERE id = 1", ())
+	cursor.execute(
+		f"SELECT configuration_key, source_key, source_family, endpoint, market, universe, interval_code, raw_price_split_adjusted, raw_price_dividend_adjusted, raw_price_vendor_defined_adjustment FROM {quote_identifier(selected_names.table(TableRole.DATA_CONFIGURATION))} WHERE id = 1",
+		(),
+	)
 	rows = cursor.fetchall()
-	if len(rows) != 1 or len(rows[0]) != 1 or rows[0][0] != source_key(source.identity):
-		raise ValueError("Database must be explicitly initialized for this source scope; use a separate database for another scope")
+	if len(rows) != 1 or len(rows[0]) != 10:
+		raise ValueError("Database must be explicitly initialized for this data configuration")
+	configuration = source.data_configuration
+	expected = (
+		data_configuration_key(configuration), configuration.source_family, configuration.endpoint, configuration.market, configuration.universe,
+		configuration.interval.value, configuration.raw_price_split_adjusted, configuration.raw_price_dividend_adjusted,
+		configuration.raw_price_vendor_defined_adjustment,
+	)
+	actual = tuple(bool(value) if index in (7, 8) else value for index, value in enumerate(rows[0]))
+	if actual[0] != expected[0] or actual[1] != expected[0] or actual[2] != expected[1] or actual[4:] != expected[3:]:
+		mode = source.data_configuration.verification_policy.source_family_mismatch
+		if not verification_allows(VerificationStatus.PENDING, mode, write):
+			raise ValueError("Database data configuration is not verified for this semantic data scope")
+	if actual[3] != expected[2]:
+		mode = source.data_configuration.verification_policy.endpoint_mismatch
+		if not verification_allows(VerificationStatus.PENDING, mode, write):
+			raise ValueError("Database data configuration endpoint is not verified")
+
+
+def assert_source(cursor: Cursor, source: SourceConfig, table_names: TableNames | None = None, *, write: bool = False) -> None:
+	assert_data_configuration(cursor, source, table_names, write=write)
+
+
+def register_configuration_verification(source: SourceConfig, connect: WriteConnectionFactory, table_names: TableNames | None = None) -> int | None:
+	selected_names = table_names or load_table_names()
+	connection = connect(source.database_config)
+	try:
+		cursor = connection.cursor()
+		try:
+			cursor.execute(
+				f"SELECT configuration_key, source_family, endpoint FROM {quote_identifier(selected_names.table(TableRole.DATA_CONFIGURATION))} WHERE id = 1",
+				(),
+			)
+			rows = cursor.fetchall()
+			if len(rows) != 1 or len(rows[0]) != 3:
+				return None
+			configuration = source.data_configuration
+			baseline_key, baseline_family, baseline_endpoint = rows[0]
+			candidate_key = data_configuration_key(configuration)
+			if baseline_key == candidate_key and baseline_endpoint == configuration.endpoint:
+				return None
+			verification_type = VerificationType.SOURCE_FAMILY if baseline_family != configuration.source_family or baseline_key != candidate_key else VerificationType.ENDPOINT
+			requested_count = configuration.verification_policy.source_family_sample_days if verification_type is VerificationType.SOURCE_FAMILY else configuration.verification_policy.endpoint_sample_pulls
+			seed = int(candidate_key[:16], 16) % (2**63 - 1)
+			cursor.execute(
+				f"SELECT id FROM {quote_identifier(selected_names.table(TableRole.VERIFICATIONS))} WHERE comparison_type = %s AND baseline_key = %s AND candidate_key = %s AND status IN (%s, %s) ORDER BY id DESC",
+				(verification_type.value, str(baseline_key), candidate_key, VerificationStatus.PENDING.value, VerificationStatus.RUNNING.value),
+			)
+			pending = cursor.fetchall()
+			if pending:
+				return pending[0][0]
+			verification_id = register_verification(cursor, selected_names, verification_type, str(baseline_key), candidate_key, requested_count, seed, datetime.now(timezone.utc))
+			connection.commit()
+			return verification_id
+		except Exception:
+			connection.rollback()
+			raise
+		finally:
+			cursor.close()
+	finally:
+		connection.close()
 
 
 def initialize_update_schema(source: SourceConfig, connect: WriteConnectionFactory, table_names: TableNames | None = None) -> None:
@@ -137,8 +203,12 @@ def initialize_update_schema(source: SourceConfig, connect: WriteConnectionFacto
 			for statement in statements:
 				cursor.execute(statement, ())
 			assert_transactional_tables(cursor, selected_names)
-			cursor.execute(f"INSERT IGNORE INTO {quote_identifier(selected_names.source)} (id, source_key) VALUES (1, %s)", (source_key(source.identity),))
-			assert_source(cursor, source, selected_names)
+			configuration = source.data_configuration
+			cursor.execute(
+				f"INSERT IGNORE INTO {quote_identifier(selected_names.table(TableRole.DATA_CONFIGURATION))} (id, configuration_key, source_key, source_family, endpoint, market, universe, interval_code, raw_price_split_adjusted, raw_price_dividend_adjusted, raw_price_vendor_defined_adjustment, created_at) VALUES (1, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+				(data_configuration_key(configuration), data_configuration_key(configuration), configuration.source_family, configuration.endpoint, configuration.market, configuration.universe, configuration.interval.value, configuration.raw_price_split_adjusted, configuration.raw_price_dividend_adjusted, configuration.raw_price_vendor_defined_adjustment, datetime.now(timezone.utc).isoformat()),
+			)
+			assert_data_configuration(cursor, source, selected_names)
 			connection.commit()
 		except Exception:
 			connection.rollback()
@@ -160,7 +230,7 @@ def initialize_zscore_schema(source: SourceConfig, connect: WriteConnectionFacto
 		try:
 			cursor.execute("START TRANSACTION", ())
 			assert_transactional_tables(cursor, selected_names)
-			assert_source(cursor, source, selected_names)
+			assert_source(cursor, source, selected_names, write=True)
 			for statement in statements:
 				cursor.execute(statement, ())
 			assert_zscore_tables(cursor, selected_names, selected_windows)

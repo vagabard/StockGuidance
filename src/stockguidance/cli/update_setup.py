@@ -5,13 +5,13 @@ from pathlib import Path
 from stockguidance.calendar.clock import Clock, SystemClock
 from stockguidance.calendar.exchange import ExchangeCalendar
 from stockguidance.cli.paths import resolve_cli_path
-from stockguidance.config.source import PriceAdjustment, SourceConfig, SourceIdentity
+from stockguidance.config.source import DataConfiguration, PriceAdjustment, SourceConfig, SourceIdentity
 from stockguidance.database.connections import MySQLConnectionFactory
 from stockguidance.database.configuration import load_database_configuration
 from stockguidance.database.repositories.mysql_market_data import MySQLMarketDataRepository
 from stockguidance.database.repositories.mysql_sessions import ConnectionFactory, MySQLSessionRepository
 from stockguidance.database.table_names import TableNames
-from stockguidance.database.update_schema import initialize_update_schema
+from stockguidance.database.update_schema import initialize_update_schema, register_configuration_verification
 from stockguidance.market_data.corrections import CorrectionPolicy
 from stockguidance.market_data.discovery import CoverageDiscoveryResult, DiscoveryRequest, HistoryOverride, discover_coverage
 from stockguidance.market_data.history import HistoryBoundary, HistoryProvenance, InventoryIssue, LocalCoverageInventory, UnknownHistoryBoundary
@@ -79,22 +79,33 @@ def _query_boundary(source: SourceConfig, calendar: ExchangeCalendar, discovery:
 
 def assemble_and_update(arguments: argparse.Namespace) -> UpdateResult:
 	clock = SystemClock()
-	identity = SourceIdentity("polygon", GROUPED_ENDPOINT, "us-stocks", GROUPED_UNIVERSE, PriceAdjustment(arguments.adjustment))
+	database_path = resolve_cli_path(arguments.dbinfo_file, "dbinfo.id")
+	database_configuration = load_database_configuration(database_path)
+	if database_configuration.data_configuration_file is None:
+		data_configuration = DataConfiguration("polygon", GROUPED_ENDPOINT, "us-stocks", GROUPED_UNIVERSE, PriceAdjustment(arguments.adjustment) is PriceAdjustment.ADJUSTED, False)
+	else:
+		data_configuration = database_configuration.load_data_configuration()
+	identity = data_configuration.to_source_identity()
 	source = SourceConfig(
 		identity,
 		resolve_cli_path(arguments.data_root, "data"),
-		resolve_cli_path(arguments.dbinfo_file, "dbinfo.id"),
+		database_path,
 		"polygon_fetch.DEFAULT_API_KEY or POLYGON_API_KEY",
+		_configuration=data_configuration,
 	)
-	database_configuration = load_database_configuration(source.database_config)
 	table_names = database_configuration.load_table_names()
+	connect = MySQLConnectionFactory()
+	if not arguments.initialize_schema:
+		try:
+			register_configuration_verification(source, connect, table_names)
+		except Exception:
+			pass
 	repair_path = getattr(arguments, "repair_plan", None)
 	repair_plan = None if repair_path is None else load_repair_plan(Path(repair_path))
 	history_store = JsonHistoryStore(source.data_root / "history")
 	boundary = history_store.load(identity)
 	calendar = _calendar_for_update(arguments, boundary, clock)
 	manifest_store = ManifestStore(source.data_root)
-	connect = MySQLConnectionFactory()
 	manifest_inventory = manifest_store.inventory(identity, calendar, start=calendar.start, end=calendar.end)
 	include_database = arguments.dbinfo_file != "dbinfo.id" or arguments.data_root == "data" or bool(manifest_inventory.observations) or boundary is not None
 	local_inventory = _local_inventory(source, calendar, manifest_inventory, connect, table_names, include_database=include_database)

@@ -2,7 +2,7 @@ from dataclasses import asdict
 from hashlib import sha256
 import json
 
-from stockguidance.config.source import PriceAdjustment, SourceIdentity
+from stockguidance.config.source import DataConfiguration, PriceAdjustment, SourceIdentity
 from stockguidance.market_data.intervals import ObservationInterval
 
 
@@ -16,6 +16,12 @@ def encode_json(value: object) -> bytes:
 
 def source_key(source: SourceIdentity) -> str:
 	return content_id(asdict(source))
+
+
+def data_configuration_key(configuration: DataConfiguration | SourceIdentity) -> str:
+	if isinstance(configuration, SourceIdentity):
+		configuration = configuration.to_data_configuration()
+	return content_id(configuration.semantic_payload())
 
 
 def mapping(value: object) -> dict[str, object]:

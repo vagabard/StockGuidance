@@ -6,7 +6,7 @@ from typing import Callable, Sequence
 from stockguidance.calendar.clock import SystemClock
 from stockguidance.calendar.exchange import ExchangeCalendar
 from stockguidance.cli.paths import resolve_cli_path
-from stockguidance.config.source import PriceAdjustment, SourceConfig, SourceIdentity
+from stockguidance.config.source import DataConfiguration, PriceAdjustment, SourceConfig, SourceIdentity
 from stockguidance.database.configuration import load_database_configuration
 from stockguidance.database.connections import MySQLConnectionFactory
 from stockguidance.database.repositories.mysql_sessions import ConnectionFactory, MySQLSessionRepository
@@ -86,9 +86,14 @@ def _boundary(
 
 def assemble_and_update_zscores(arguments: argparse.Namespace) -> ZScoreUpdateResult:
 	clock = SystemClock()
-	identity = SourceIdentity("polygon", GROUPED_ENDPOINT, "us-stocks", GROUPED_UNIVERSE, PriceAdjustment(arguments.adjustment))
-	source = SourceConfig(identity, resolve_cli_path(arguments.data_root, "data"), resolve_cli_path(arguments.dbinfo_file, "dbinfo.id"), "unused-by-local-z-score-update")
-	database_configuration = load_database_configuration(source.database_config)
+	database_path = resolve_cli_path(arguments.dbinfo_file, "dbinfo.id")
+	database_configuration = load_database_configuration(database_path)
+	if database_configuration.data_configuration_file is None:
+		data_configuration = DataConfiguration("polygon", GROUPED_ENDPOINT, "us-stocks", GROUPED_UNIVERSE, PriceAdjustment(arguments.adjustment) is PriceAdjustment.ADJUSTED, False)
+	else:
+		data_configuration = database_configuration.load_data_configuration()
+	identity = data_configuration.to_source_identity()
+	source = SourceConfig(identity, resolve_cli_path(arguments.data_root, "data"), database_path, "unused-by-local-z-score-update", _configuration=data_configuration)
 	table_names = database_configuration.load_table_names()
 	connect = MySQLConnectionFactory()
 	calendar = _calendar(arguments, clock)

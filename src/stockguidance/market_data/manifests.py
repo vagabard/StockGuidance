@@ -9,7 +9,7 @@ from stockguidance.calendar.sessions import TradingSession
 from stockguidance.config.source import SourceIdentity
 from stockguidance.market_data.atomic import atomic_write
 from stockguidance.market_data.history import EvidenceQuality, InventoryIssue, LocalCoverageInventory, LocalObservation
-from stockguidance.market_data.identity import decode_source, encode_json, mapping, source_key, text_field
+from stockguidance.market_data.identity import data_configuration_key, decode_source, encode_json, mapping, source_key, text_field
 from stockguidance.market_data.providers.contracts import DownloadedSession, ProviderResponse, ResponseState
 from stockguidance.market_data.records import bar_payload, decode_bar, records_id
 
@@ -66,13 +66,11 @@ class ManifestStore:
 		if loaded_start > loaded_end:
 			return LocalCoverageInventory(source, calendar_id)
 		allowed = {session.session_date: session for session in calendar.sessions(loaded_start, loaded_end)}
-		root = self.directory / source_key(source)
-		if not root.exists():
-			return LocalCoverageInventory(source, calendar_id)
 		observations: list[LocalObservation] = []
 		issues: list[InventoryIssue] = []
 		seen_dates: set[date] = set()
-		for path in sorted(root.glob("*.manifest.json")):
+		roots = [self.directory / data_configuration_key(source), self.directory / source_key(source)]
+		for path in sorted(path for root in roots if root.exists() for path in root.glob("*.manifest.json")):
 			session_date = None
 			try:
 				payload = mapping(json.loads(path.read_bytes()))
@@ -95,12 +93,12 @@ class ManifestStore:
 		return LocalCoverageInventory(source, calendar_id, tuple(observations), tuple(issues))
 
 	def path_for(self, source: SourceIdentity, session: TradingSession) -> Path:
-		return self.directory / source_key(source) / f"{session.session_date.isoformat()}.manifest.json"
+		return self.directory / data_configuration_key(source) / f"{session.session_date.isoformat()}.manifest.json"
 
 	def _raw_path(self, source: SourceIdentity, identity: str) -> Path:
 		if len(identity) != 64 or any(character not in "0123456789abcdef" for character in identity):
 			raise ValueError("Invalid content identity")
-		return self.directory / source_key(source) / "responses" / f"{identity}.json"
+		return self.directory / data_configuration_key(source) / "responses" / f"{identity}.json"
 
 	def save_download(self, source: SourceIdentity, download: DownloadedSession) -> SourceManifest:
 		content = encode_json(response_payload(download.response))
@@ -138,13 +136,17 @@ class ManifestStore:
 		try:
 			content = path.read_bytes()
 		except FileNotFoundError:
-			return None
+			path = self.directory / source_key(source) / f"{session.session_date.isoformat()}.manifest.json"
+			try:
+				content = path.read_bytes()
+			except FileNotFoundError:
+				return None
 		try:
 			payload = mapping(json.loads(content))
 			if type(payload["schema_version"]) is not int or payload["schema_version"] != 1 or decode_source(payload["source"]) != source or payload["calendar_id"] != session.calendar_id or payload["session_date"] != session.session_date.isoformat() or payload["observed_at"] != session.closes_at.isoformat():
 				raise ValueError("Manifest scope mismatch")
 			identity = text_field(payload, "content_id")
-			raw = self._raw_path(source, identity).read_bytes()
+			raw = (path.parent / "responses" / f"{identity}.json").read_bytes()
 			if sha256(raw).hexdigest() != identity:
 				raise ValueError("Response content mismatch")
 			response = decode_response(json.loads(raw))

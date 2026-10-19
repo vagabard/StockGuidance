@@ -12,7 +12,7 @@ from stockguidance.market_data.coverage_planning import plan_coverage
 from stockguidance.market_data.dependencies import dependency_scope
 from stockguidance.market_data.discovery import CoverageDiscoveryResult
 from stockguidance.market_data.history import HistoryBoundary
-from stockguidance.market_data.identity import content_id, source_key
+from stockguidance.market_data.identity import content_id, data_configuration_key
 from stockguidance.market_data.ingestion import derived_repairs, import_if_needed
 from stockguidance.market_data.legacy_derived import LEGACY_DERIVED_SPEC, derived_id
 from stockguidance.market_data.manifests import InvalidManifest, ManifestStore, SourceManifest
@@ -184,7 +184,7 @@ def update_market_data(source: SourceConfig, settings: UpdateSettings, boundary:
 				state, detail = CoverageState.INCOMPLETE, "Could not persist verified completion"
 		assessments.append(SessionCoverage(assessment.session, state, detail))
 	closed = _closed_dates(request.start, min(request.end, completed.astimezone(calendar.timezone).date()), plan.boundary.history_start, {item.session.session_date for item in final_plan.sessions})
-	revision = content_id([source_key(source.identity), LEGACY_DERIVED_SPEC, [(snapshot.session.session_date.isoformat(), records_id(snapshot.records), derived_id(snapshot.derived), None if snapshot.receipt is None else snapshot.receipt.derived_dependency_id) for snapshot in snapshots]])
+	revision = content_id([data_configuration_key(source.data_configuration), LEGACY_DERIVED_SPEC, [(snapshot.session.session_date.isoformat(), records_id(snapshot.records), derived_id(snapshot.derived), None if snapshot.receipt is None else snapshot.receipt.derived_dependency_id) for snapshot in snapshots]])
 	result = UpdateResult(
 		plan, CoverageResult(final_request, tuple(assessments)), tuple(manifests), closed, revision, tuple(failures), downloaded,
 		capability, tuple(sorted(stale_refreshes)),

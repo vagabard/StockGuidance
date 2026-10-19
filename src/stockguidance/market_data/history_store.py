@@ -9,6 +9,7 @@ import tempfile
 from stockguidance.config.source import PriceAdjustment, SourceIdentity
 from stockguidance.market_data.atomic import atomic_write
 from stockguidance.market_data.history import DiscoveryMetadata, HistoryBoundary, HistoryProvenance
+from stockguidance.market_data.identity import source_key
 from stockguidance.market_data.intervals import ObservationInterval
 
 
@@ -32,6 +33,9 @@ class JsonHistoryStore:
 		self.directory = directory
 
 	def path_for(self, source: SourceIdentity) -> Path:
+		return self.directory / f"{source_key(source)}.json"
+
+	def _legacy_path_for(self, source: SourceIdentity) -> Path:
 		identity = json.dumps(asdict(source), sort_keys=True, separators=(",", ":"))
 		return self.directory / f"{sha256(identity.encode('utf-8')).hexdigest()}.json"
 
@@ -60,12 +64,11 @@ class JsonHistoryStore:
 				temporary.unlink(missing_ok=True)
 
 	def load(self, source: SourceIdentity) -> HistoryBoundary | None:
-		path = self.path_for(source)
-		try:
-			with path.open(encoding="utf-8") as input_file:
-				value: object = json.load(input_file)
-		except FileNotFoundError:
+		path = next((candidate for candidate in (self.path_for(source), self._legacy_path_for(source)) if candidate.exists()), None)
+		if path is None:
 			return None
+		with path.open(encoding="utf-8") as input_file:
+			value: object = json.load(input_file)
 		try:
 			payload = _mapping(value)
 			if type(payload.get("schema_version")) is not int or payload["schema_version"] != 1:

@@ -33,7 +33,7 @@ class MySQLMarketDataRepository:
 			try:
 				cursor.execute("START TRANSACTION", ())
 				assert_transactional_tables(cursor, self.table_names)
-				assert_source(cursor, self.source, self.table_names)
+				assert_source(cursor, self.source, self.table_names, write=write)
 				yield cursor
 				if write:
 					connection.commit()

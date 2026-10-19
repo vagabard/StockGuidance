@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "source_family": "massive",
+  "endpoint": "/v2/aggs/grouped/locale/us/market/stocks/{date}",
+  "market": "us-stocks",
+  "universe": "us-stocks-excluding-otc",
+  "interval": "1d",
+  "raw_price_split_adjusted": true,
+  "raw_price_dividend_adjusted": false,
+  "raw_price_vendor_defined_adjustment": null,
+  "verification_policy": {
+    "source_family_mismatch": "block",
+    "endpoint_mismatch": "advisory",
+    "source_family_sample_days": 100,
+    "endpoint_sample_pulls": 50
+  }
+}

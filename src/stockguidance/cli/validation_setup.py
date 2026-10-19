@@ -4,7 +4,7 @@ from datetime import date, datetime, timedelta
 from stockguidance.calendar.clock import SystemClock
 from stockguidance.calendar.exchange import ExchangeCalendar
 from stockguidance.cli.paths import resolve_cli_path
-from stockguidance.config.source import PriceAdjustment, SourceConfig, SourceIdentity
+from stockguidance.config.source import DataConfiguration, PriceAdjustment, SourceConfig, SourceIdentity
 from stockguidance.database.repositories.mysql_sessions import MySQLSessionRepository
 from stockguidance.database.repositories.mysql_validation import MySQLValidationRepository
 from stockguidance.database.repositories.mysql_zscores import MySQLZScoreRepository
@@ -42,14 +42,21 @@ def _capability_from_cache(store: JsonHistoryStore, identity: SourceIdentity) ->
 
 def assemble_and_validate(arguments: argparse.Namespace) -> ValidationResult:
 	clock = SystemClock()
-	identity = SourceIdentity("polygon", GROUPED_ENDPOINT, "us-stocks", GROUPED_UNIVERSE, PriceAdjustment(arguments.adjustment))
+	database_path = resolve_cli_path(arguments.dbinfo_file, "dbinfo.id")
+	database_configuration = load_database_configuration(database_path)
+	if database_configuration.data_configuration_file is None:
+		data_configuration = DataConfiguration("polygon", GROUPED_ENDPOINT, "us-stocks", GROUPED_UNIVERSE, PriceAdjustment(arguments.adjustment) is PriceAdjustment.ADJUSTED, False)
+	else:
+		data_configuration = database_configuration.load_data_configuration()
+	identity = data_configuration.to_source_identity()
 	source = SourceConfig(
 		identity,
 		resolve_cli_path(arguments.data_root, "data"),
-		resolve_cli_path(arguments.dbinfo_file, "dbinfo.id"),
+		database_path,
 		"unused-by-read-only-validation",
+		_configuration=data_configuration,
 	)
-	table_names = load_database_configuration(source.database_config).load_table_names()
+	table_names = database_configuration.load_table_names()
 	if (arguments.ticker_ids is None) != (arguments.lookback_sessions is None):
 		raise ValueError("Feature validation requires both ticker IDs and lookback")
 	mode = SignalMode(arguments.signal_mode)
