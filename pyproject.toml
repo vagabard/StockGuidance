@@ -23,6 +23,7 @@ inspect_reports = "stockguidance.cli.reports:main"
 compare_signals = "stockguidance.cli.compare_signals:main"
 compare_database_downloads = "stockguidance.cli.compare_database_downloads:main"
 preview_schema = "stockguidance.cli.preview_schema:main"
+update_zscores = "stockguidance.cli.update_zscores:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8.3", "mypy>=1.15"]

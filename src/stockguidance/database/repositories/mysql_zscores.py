@@ -138,6 +138,17 @@ class MySQLZScoreRepository(ZScoreRepository):
 		with self._transaction() as cursor:
 			return self._load_inputs(cursor, query, lock=False)
 
+	def list_ticker_ids(self) -> tuple[int, ...]:
+		with self._transaction() as cursor:
+			cursor.execute(f"SELECT id FROM {quote_identifier(self.table_names.table(TableRole.TICKERS))} ORDER BY id", ())
+			rows = cursor.fetchall()
+		if any(len(row) != 1 for row in rows):
+			raise ValueError("Invalid z-score ticker mapping row")
+		values = tuple(normalize_date_id(row[0]) for row in rows)
+		if len(values) != len(set(values)) or not values:
+			raise ValueError("Invalid or empty z-score ticker mapping")
+		return values
+
 	def _load_inputs(self, cursor: Cursor, query: ZScoreInputQuery, *, lock: bool) -> LoadedZScoreInputs:
 		evidence, labels = self._read_evidence(cursor, query, lock=lock)
 		close_values = self._close_values(query, evidence, labels)

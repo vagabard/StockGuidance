@@ -50,6 +50,8 @@ class LoadedZScoreInputs:
 
 
 class ZScoreRepository(Protocol):
+	def list_ticker_ids(self) -> tuple[int, ...]: ...
+
 	def load_inputs(self, query: ZScoreInputQuery) -> LoadedZScoreInputs: ...
 
 	def publish(

@@ -254,6 +254,42 @@ make the plan run. Explicit date bounds must match the plan. Always validate
 again afterward. See [database_validation.md](database_validation.md) for the
 finding taxonomy and [market_data_updating.md](market_data_updating.md) for recovery.
 
+### Populate rolling z-scores locally
+
+Z-score materializations are an explicit, independent write step. They use only
+verified local raw closes, source-bound manifests and the stored
+`close_ratio_to_prior` delta column; they never call a provider or repair raw,
+date-mapping, delta, history, manifest or legacy-derived data. Review the
+selected registry and optional tables first:
+
+```powershell
+& $pythonExe -m stockguidance.cli.preview_schema --windows 20,60
+& $pythonExe -m stockguidance.cli.update_zscores `
+  --data-root 'data' --dbinfo-file 'dbinfo.id' --adjustment adjusted `
+  --windows 20,60 --start-date '<first-session>' --end-date '<last-session>' `
+  --publication-delay-minutes '<documented delay>' --publication-evidence '<publication provenance>' `
+  --history-start '<first-supported-session>' --history-evidence '<boundary provenance>' `
+  --initialize-schema
+```
+
+Use `--initialize-schema` only after reviewing the preview and only when the
+existing six updater tables and source binding are already compatible. Omit it
+for later rebuilds. Windows count exchange sessions and include warm-up context
+without publishing warm-up rows. The command reports the current cutoff,
+effective scope, ready/status counts, stale rebuilds and idempotent skips. Exit
+`0` means the requested eligible computation completed, including expected
+boundary or constant-window unavailability; exit `2` means input coverage is
+incomplete or not yet published; exit `1` means setup or storage failed.
+
+The names-file path follows database configuration rules: an explicit relative
+path is relative to that configuration file, while omission uses the packaged
+authoritative resource. Editing names does not rename existing tables, and
+`CREATE TABLE IF NOT EXISTS` does not convert incompatible schemas. Z-score
+tables are current rebuildable materializations, not revision archives; stale
+dependencies are rejected until this explicit updater is rerun. Stage 7 adds
+the optional read-only validation audit; ordinary validation does not require
+z-score tables.
+
 ## Train on a date subset
 
 Keep the full archive; choose training entry dates in the job JSON. Do not delete
