@@ -539,3 +539,12 @@ Use these fields: stage and status; changed files; accepted semantics; actual
 verification commands/results; limitations; next-stage prerequisites; operator
 actions, if any. Keep the approved decisions above authoritative unless the user
 explicitly revises them.
+
+### 2026-10-19 — Stage 1 — complete
+
+- Changed files: `src/stockguidance/database/table_names.json`, `src/stockguidance/database/table_names.py`, `src/stockguidance/database/configuration.py`, `src/stockguidance/database/update_schema.py`, `src/stockguidance/cli/update_setup.py`, `src/stockguidance/cli/preview_schema.py`, `pyproject.toml`, and `tests/stage1/test_table_names.py`.
+- Accepted semantics: the packaged JSON is the authoritative initial registry; explicit configuration paths resolve relative to the database configuration file; loading is strict about schema, fields, duplicate keys, types, identifiers, collisions, and templates; generated z-score names validate requested integer windows before use; updater DDL and initialization use one resolved registry; preview is read-only and does not open a database connection.
+- Verification: `C:\Users\formm\AppData\Local\Python\pythoncore-3.14-64\python.exe -m pytest tests/stage1/test_table_names.py tests/stage9/test_database_configuration.py tests/stage1/test_imports.py` passed with 31 tests; the affected database/session, updater, and integrity suites passed with 118 tests; `... -m mypy src/stockguidance/database src/stockguidance/cli/preview_schema.py` passed with no issues; `... -m stockguidance.cli.preview_schema` exited 0 and printed the resolved registry and six updater DDL statements; `git diff --check` passed.
+- Limitations: existing Python storage consumers still use their historical physical names until Stage 2, and Java naming parity remains a Stage 3 task. No live database was initialized or modified, and no z-score calculation or z-score DDL was added.
+- Next-stage prerequisites: Stage 2 may now replace supported Python storage-consumer literals and propagate one selected registry through each production assembly; it must preserve the packaged/external loading rules and continue using disposable fixtures.
+- Operator actions: none for this stage; review `preview_schema` output before any later explicit schema initialization against an operator-selected database.

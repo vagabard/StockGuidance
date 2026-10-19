@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "tables": {
+    "source": "stockguidance_source",
+    "sessions": "transaction_dates",
+    "tickers": "ticker_symbol",
+    "prices": "raw_stock_data",
+    "deltas": "daily_delta_stock_data",
+    "imports": "stockguidance_imports",
+    "zscore_series": "stockguidance_zscore_series",
+    "zscore_sessions": "stockguidance_zscore_sessions"
+  },
+  "zscore_templates": {
+    "price": "zscores_price_{window}",
+    "price_delta": "zscores_price_delta_{window}"
+  }
+}

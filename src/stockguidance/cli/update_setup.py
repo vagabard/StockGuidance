@@ -7,6 +7,7 @@ from stockguidance.calendar.exchange import ExchangeCalendar
 from stockguidance.cli.paths import resolve_cli_path
 from stockguidance.config.source import PriceAdjustment, SourceConfig, SourceIdentity
 from stockguidance.database.connections import MySQLConnectionFactory
+from stockguidance.database.configuration import load_database_configuration
 from stockguidance.database.repositories.mysql_market_data import MySQLMarketDataRepository
 from stockguidance.database.repositories.mysql_sessions import ConnectionFactory, MySQLSessionRepository
 from stockguidance.database.update_schema import initialize_update_schema
@@ -140,7 +141,8 @@ def assemble_and_update(arguments: argparse.Namespace) -> UpdateResult:
 		repair_plan, discovery,
 	)
 	if arguments.initialize_schema:
-		initialize_update_schema(source, connect)
+		database_configuration = load_database_configuration(source.database_config)
+		initialize_update_schema(source, connect, database_configuration.load_table_names())
 	if arguments.history_start is not None and boundary is None and discovery.history_boundary is not None:
 		history_store.save(discovery.history_boundary)
 	result = update_market_data(source, settings, query_boundary, calendar, provider, MySQLMarketDataRepository(source, connect), clock)
