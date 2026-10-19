@@ -30,12 +30,7 @@ import java.util.Set;
 import java.util.TreeMap;
 
 public final class StreamingValidator {
-    private static final List<String> DERIVED_COLUMNS = List.of(
-            "open_ratio_to_prior", "high_ratio_to_prior", "low_ratio_to_prior", "close_ratio_to_prior",
-            "volume_ratio_to_prior", "vwap_ratio_to_prior", "transactions_ratio_to_prior", "change_in_price_over_day",
-            "next_day_change_in_price", "zero_centered_next_day_price_change", "next_day_price_change_to_extremes_0_1",
-            "next_day_raise1_lower0", "next_day_top100_raise1_lower0", "zero_center_extremes_neg1_pos1",
-            "zero_center_top100_1_other_neg1", "zero_center_raise1_lower_neg1");
+    private static final List<String> DERIVED_COLUMNS = LegacyDerivedCalculator.COLUMNS;
     private static final BigDecimal PRICE_LIMIT = new BigDecimal("1000000000000000");
     private static final BigDecimal PRICE_SCALE = new BigDecimal("0.0001");
 
@@ -328,46 +323,7 @@ public final class StreamingValidator {
     }
 
     private static Map<String, List<Double>> expectedDerived(Map<String, ValidationContent.RawBar> prior, Map<String, ValidationContent.RawBar> current, Map<String, ValidationContent.RawBar> following) {
-        Map<String, Double> scores = new HashMap<>();
-        for (Map.Entry<String, ValidationContent.RawBar> item : current.entrySet()) {
-            ValidationContent.RawBar next = following.get(item.getKey());
-            if (next != null) {
-                scores.put(item.getKey(), next.close().divide(next.open(), 16, RoundingMode.HALF_UP).doubleValue());
-            }
-        }
-        List<String> ranked = scores.keySet().stream().sorted(Comparator.<String>comparingDouble(item -> scores.get(item)).reversed().thenComparing(Comparator.naturalOrder())).toList();
-        Set<String> top = new HashSet<>(ranked.subList(0, Math.min(100, ranked.size())));
-        Map<String, List<Double>> result = new TreeMap<>();
-        for (Map.Entry<String, ValidationContent.RawBar> item : current.entrySet()) {
-            String ticker = item.getKey();
-            ValidationContent.RawBar bar = item.getValue();
-            ValidationContent.RawBar previous = prior.get(ticker);
-            ValidationContent.RawBar next = following.get(ticker);
-            List<Double> values = new ArrayList<>();
-            values.add(ratio(bar.open(), previous == null ? null : previous.open()));
-            values.add(ratio(bar.high(), previous == null ? null : previous.high()));
-            values.add(ratio(bar.low(), previous == null ? null : previous.low()));
-            values.add(ratio(bar.close(), previous == null ? null : previous.close()));
-            values.add(ratio(BigDecimal.valueOf(bar.volume()), previous == null ? null : BigDecimal.valueOf(previous.volume())));
-            values.add(ratio(bar.vwap(), previous == null ? null : previous.vwap()));
-            values.add(ratio(bar.transactions() == null ? null : BigDecimal.valueOf(bar.transactions()), previous == null || previous.transactions() == null ? null : BigDecimal.valueOf(previous.transactions())));
-            values.add(ratio(bar.close(), bar.open()));
-            Double outcome = next == null ? null : ratio(next.close(), next.open());
-            values.add(outcome);
-            Double centered = outcome == null ? null : outcome - 1.0;
-            values.add(centered);
-            Double extreme = outcome == null ? null : (outcome >= 1.0 ? 0.5 : 0.0) + outcome / (2.0 * (outcome + 1.0));
-            values.add(extreme);
-            Double raise = outcome == null ? null : outcome >= 1.0 ? 1.0 : 0.0;
-            values.add(raise);
-            Double topFlag = outcome == null ? null : top.contains(ticker) ? 1.0 : 0.0;
-            values.add(topFlag);
-            values.add(extreme == null ? null : extreme * 2.0 - 1.0);
-            values.add(topFlag == null ? null : topFlag * 2.0 - 1.0);
-            values.add(raise == null ? null : raise * 2.0 - 1.0);
-            result.put(ticker, values);
-        }
-        return result;
+        return LegacyDerivedCalculator.expected(prior, current, following);
     }
 
     private static Map<String, ValidationContent.RawBar> verifiedRaw(SessionData session) {
@@ -376,10 +332,6 @@ public final class StreamingValidator {
 
     private static String rawId(Map<String, ValidationContent.RawBar> bars) {
         return bars.isEmpty() ? ValidationContent.rawId(Map.of()) : ValidationContent.rawId(bars);
-    }
-
-    private static Double ratio(BigDecimal numerator, BigDecimal denominator) {
-        return numerator == null || denominator == null || denominator.signum() == 0 ? null : numerator.divide(denominator, 16, RoundingMode.HALF_UP).doubleValue();
     }
 
     private static boolean equal(Double observed, Double required) {

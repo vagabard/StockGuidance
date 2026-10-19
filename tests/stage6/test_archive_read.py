@@ -1,4 +1,5 @@
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+from decimal import Decimal
 from hashlib import sha256
 import json
 from pathlib import Path
@@ -8,7 +9,9 @@ import subprocess
 import pytest
 
 from stockguidance.cli.archive_study import result_parity, stratified_sample
-from stockguidance.performance.archive_read import archive_records_id, read_archive, read_database, run_request
+from stockguidance.market_data.legacy_derived import DERIVED_COLUMNS, LegacyDerivedRow, derived_study_id, legacy_rows
+from stockguidance.market_data.records import DailyBar
+from stockguidance.performance.archive_read import _derived_session_result, archive_records_id, read_archive, read_database, run_request
 
 
 def write_file(tmp_path: Path, rows: list[dict[str, object]]) -> Path:
@@ -84,6 +87,37 @@ def test_cross_mode_archive_drift_blocks_benchmark_selection() -> None:
 	assert not result_parity(runs)
 	runs[1]["result"]["measurements"][0]["sessions"][0]["archive_id"] = "before"
 	assert result_parity(runs)
+
+
+def derived_bar(ticker: str, close: str, volume: int = 100) -> DailyBar:
+	return DailyBar(ticker, Decimal("10.0000"), Decimal("12.0000"), Decimal("9.0000"), Decimal(close), volume, None, None)
+
+
+def test_derived_session_result_reports_formula_parity_and_column_drift() -> None:
+	prior = date(2024, 7, 1)
+	central = date(2024, 7, 2)
+	following = date(2024, 7, 3)
+	raw = {prior: (derived_bar("AAA", "10.0000"),), central: (derived_bar("AAA", "11.0000"),), following: (derived_bar("AAA", "12.0000"),)}
+	expected = legacy_rows(raw[prior], raw[central], raw[following])
+	stored = {central: expected}
+	matched = _derived_session_result(central, prior, following, raw, stored)
+	assert matched["matches"]
+	assert matched["expected_derived_id"] == derived_study_id(expected)
+	assert len(matched["column_difference_counts"]) == len(DERIVED_COLUMNS)
+
+	changed = LegacyDerivedRow("AAA", (99.0, *expected[0].values[1:]))
+	drifted = _derived_session_result(central, prior, following, raw, {central: (changed,)})
+	assert not drifted["matches"]
+	assert drifted["column_difference_counts"]["open_ratio_to_prior"] == 1
+
+
+def test_derived_request_requires_explicit_neighbors_and_database_config() -> None:
+	request = {"paths": ["2024-07-02.ndjson"], "mode": "derived", "workers": 1, "repeats": 1}
+	with pytest.raises(ValueError, match="neighbor"):
+		run_request(request)
+	request["neighbors"] = {"2024-07-02.ndjson": ["2024-07-01.ndjson", "2024-07-02.ndjson", "2024-07-03.ndjson"]}
+	with pytest.raises(ValueError, match="configuration"):
+		run_request(request)
 
 
 def test_database_query_is_bounded_and_does_not_buffer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

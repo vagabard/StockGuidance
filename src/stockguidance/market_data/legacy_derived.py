@@ -6,6 +6,7 @@ from stockguidance.market_data.records import DailyBar
 
 
 LEGACY_DERIVED_SPEC = "legacy-open-to-close-v1"
+DERIVED_STUDY_SPEC = "legacy-open-to-close-v1-study"
 DERIVED_COLUMNS = (
 	"open_ratio_to_prior", "high_ratio_to_prior", "low_ratio_to_prior", "close_ratio_to_prior",
 	"volume_ratio_to_prior", "vwap_ratio_to_prior", "transactions_ratio_to_prior", "change_in_price_over_day",
@@ -50,3 +51,18 @@ def legacy_rows(prior: tuple[DailyBar, ...], current: tuple[DailyBar, ...], foll
 
 def derived_id(rows: tuple[LegacyDerivedRow, ...]) -> str:
 	return content_id([(row.ticker, row.values) for row in sorted(rows, key=lambda item: item.ticker)])
+
+
+def _study_value(value: float | None) -> str | None:
+	if value is None:
+		return None
+	if value == 0:
+		return "0"
+	return format(Decimal(str(value)).normalize(), "f")
+
+
+def derived_study_id(rows: tuple[LegacyDerivedRow, ...]) -> str:
+	return content_id([
+		[row.ticker, *(_study_value(value) for value in row.values)]
+		for row in sorted(rows, key=lambda item: item.ticker)
+	])

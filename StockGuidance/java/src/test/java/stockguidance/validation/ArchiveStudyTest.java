@@ -6,6 +6,8 @@ import stockguidance.json.JsonSupport;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.math.BigDecimal;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -36,5 +38,24 @@ class ArchiveStudyTest {
         request.putArray("paths").add(file.toString());
         request.put("mode", "files").put("workers", 1).put("repeats", 1);
         assertThrows(java.util.concurrent.ExecutionException.class, () -> ArchiveStudyMain.run(request));
+    }
+
+    @Test
+    void sharedDerivedCalculatorProducesAllLegacyColumns() {
+        var prior = Map.of("AAA", bar("10.0000"));
+        var current = Map.of("AAA", bar("11.0000"));
+        var following = Map.of("AAA", bar("12.0000"));
+        var expected = LegacyDerivedCalculator.expected(prior, current, following);
+
+        assertEquals(16, expected.get("AAA").size());
+        assertEquals(1.0, expected.get("AAA").get(0));
+        assertEquals(1.1, expected.get("AAA").get(7));
+        assertEquals(1.2, expected.get("AAA").get(8));
+        assertEquals(0, LegacyDerivedCalculator.differingColumns(expected.get("AAA"), expected.get("AAA")).size());
+        assertEquals(64, LegacyDerivedCalculator.studyId(expected).length());
+    }
+
+    private static ValidationContent.RawBar bar(String close) {
+        return new ValidationContent.RawBar("AAA", new BigDecimal("10.0000"), new BigDecimal("12.0000"), new BigDecimal("9.0000"), new BigDecimal(close), 100, null, null);
     }
 }

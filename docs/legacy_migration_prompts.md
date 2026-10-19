@@ -158,6 +158,12 @@ Acceptance: single/three-worker parity for both languages, bounded RSS and
 reproducible machine-readable results plus a concise comparison table. Separate
 raw/file completion from derived/write coverage in the handoff.
 
+Current handoff: Stage 2a raw/file and EXPLAIN work is complete, and Stage 2b
+derived-computation parity/study is complete in
+`output/legacy-migration/benchmark/derived/study.json`. Stage 2c remains skipped
+because no Java writer is proposed; do not perform production writes as part of
+this handoff.
+
 ## Stage 3 — Select implementations and freeze the rollout (high)
 
 Prerequisite: Stage 2 reports. Choose the lowest warm median end-to-end time
@@ -413,3 +419,28 @@ recovery and a complete list of unresolved gaps and excluded data.
   passed. JDBC UTF-8 correction was exercised by the live read study.
 - See [initial results](legacy_migration_results.md) for measured times, memory,
   commands, evidence paths and limitations. Next prompt: execute Stage 2b only.
+
+### Stage 2b derived-computation parity study completed — 2026-10-19
+
+- Stage 2a was treated as complete and its exact 25 selected paths were reused;
+  immediate retained neighbors were included without resampling or rerunning
+  Stage 2a. Stage 2c was not executed.
+- Python and Java both ran the 16-column legacy derived formulas against the
+  existing persisted rows, using four repeats and the required order: Java then
+  Python with one worker, Python then Java with three workers. Each worker used
+  a separate read-only repeatable-read transaction, bounded one-target scopes,
+  Java `-Xmx512m` serial GC and one native-library thread. No production writes
+  or writer timing occurred.
+- All 25 central sessions had context. Cross-language, cross-worker and
+  cross-repeat canonical parity passed (`parity: true`); this does not mean the
+  existing derived values passed formula validation.
+- Existing persistence validation found 217,055 stored versus 217,467 expected
+  rows, 412 missing keys, no extra keys and zero of 25 sessions matching all
+  columns under the existing tolerance. Rounding/storage differences are
+  retained as findings for the numeric precision work; they were not repaired.
+- Results: `output/legacy-migration/benchmark/derived/study.json` and its
+  per-run JSON files; report SHA-256:
+  `adb098d4afebc186484553500d4b241301296e8be821293207b9d166fc98bf7e`.
+- The provisional Stage 3 Java three-reader choice remains a reader-only choice.
+  No Java writer is proposed, so Stage 2c remains skipped; continue with the
+  separately gated Stage 5a0/5a precision and identity work.

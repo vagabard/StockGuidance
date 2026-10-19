@@ -11,9 +11,17 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from stockguidance.database.configuration import MySQLDriver, load_database_configuration
+from stockguidance.database.dates import normalize_date_id, normalize_session_date
+from stockguidance.database.repositories.mysql_market_read import decode_derived_row as _decode_derived_row
+from stockguidance.database.repositories.mysql_market_read import decode_raw_row as _decode_raw_row
 from stockguidance.database.table_names import quote_identifier
 from stockguidance.market_data.identity import encode_json
-from stockguidance.market_data.records import count_value
+from stockguidance.market_data.legacy_derived import DERIVED_COLUMNS, LegacyDerivedRow, derived_study_id, legacy_rows
+from stockguidance.market_data.records import DailyBar, count_value, records_id
+from stockguidance.validation.derived import differing_columns
+
+
+DERIVED_BATCH_SIZE = 1
 
 
 @dataclass(frozen=True)
@@ -163,6 +171,180 @@ def read_database(connection: Any, config_path: Path, session: date) -> tuple[Ar
 		cursor.close()
 
 
+def read_derived_database(
+	connection: Any,
+	config_path: Path,
+	sessions: tuple[date, ...],
+) -> tuple[dict[date, tuple[DailyBar, ...]], dict[date, tuple[LegacyDerivedRow, ...]], int]:
+	if not sessions or len(set(sessions)) != len(sessions):
+		raise ValueError("Derived database scope requires distinct sessions")
+	names = load_database_configuration(config_path).load_table_names()
+	placeholders = ",".join("%s" for _ in sessions)
+	cursor = connection.cursor()
+	query_count = 0
+	try:
+		cursor.execute(
+			f"SELECT id, transaction_date FROM {quote_identifier(names.sessions)} WHERE transaction_date IN ({placeholders}) ORDER BY transaction_date, id",
+			sessions,
+		)
+		query_count += 1
+		date_by_id: dict[int, date] = {}
+		for row in batched_rows(cursor):
+			if len(row) != 2:
+				raise ValueError("Invalid derived date mapping")
+			date_id = normalize_date_id(row[0])
+			session = normalize_session_date(row[1])
+			if session not in sessions or session in date_by_id.values() or date_id in date_by_id:
+				raise ValueError("Duplicate or out-of-scope derived date mapping")
+			date_by_id[date_id] = session
+
+		ids = tuple(date_by_id)
+		if not ids:
+			return {}, {}, query_count
+		id_placeholders = ",".join("%s" for _ in ids)
+		cursor.execute(
+			f"SELECT r.date_id, s.label, r.open, r.high, r.low, r.close, r.volume, r.vwap, r.transactions FROM {quote_identifier(names.prices)} r JOIN {quote_identifier(names.tickers)} s ON s.id = r.ticker_id WHERE r.date_id IN ({id_placeholders}) ORDER BY r.date_id, s.label",
+			ids,
+		)
+		query_count += 1
+		raw: dict[int, list[DailyBar]] = {}
+		for row in batched_rows(cursor):
+			date_id, bar = _decode_raw_row(row)
+			if date_id not in date_by_id:
+				raise ValueError("Derived raw row is outside the bounded date scope")
+			raw.setdefault(date_id, []).append(bar)
+
+		columns = ", ".join(f"r.{column}" for column in DERIVED_COLUMNS)
+		cursor.execute(
+			f"SELECT r.date_id, s.label, {columns} FROM {quote_identifier(names.deltas)} r JOIN {quote_identifier(names.tickers)} s ON s.id = r.ticker_id WHERE r.date_id IN ({id_placeholders}) ORDER BY r.date_id, s.label",
+			ids,
+		)
+		query_count += 1
+		derived: dict[int, list[LegacyDerivedRow]] = {}
+		for row in batched_rows(cursor):
+			date_id, derived_row = _decode_derived_row(row)
+			if date_id not in date_by_id:
+				raise ValueError("Derived row is outside the bounded date scope")
+			derived.setdefault(date_id, []).append(derived_row)
+		return (
+			{session: tuple(raw.get(date_id, ())) for date_id, session in date_by_id.items()},
+			{session: tuple(derived.get(date_id, ())) for date_id, session in date_by_id.items()},
+			query_count,
+		)
+	finally:
+		cursor.close()
+
+
+def _derived_session_result(
+	central: date,
+	prior: date,
+	following: date,
+	raw: dict[date, tuple[DailyBar, ...]],
+	stored: dict[date, tuple[LegacyDerivedRow, ...]],
+) -> dict[str, Any]:
+	column_counts = {column: 0 for column in DERIVED_COLUMNS}
+	current = raw.get(central, ())
+	previous = raw.get(prior, ())
+	next_rows = raw.get(following, ())
+	result: dict[str, Any] = {
+		"session": central.isoformat(),
+		"prior_session": prior.isoformat(),
+		"following_session": following.isoformat(),
+		"raw_counts": {"prior": len(previous), "current": len(current), "following": len(next_rows)},
+		"derived_count": len(stored.get(central, ())),
+		"expected_count": 0,
+		"missing_derived_keys": [],
+		"extra_derived_keys": [],
+		"column_difference_counts": column_counts,
+		"expected_derived_id": None,
+		"stored_derived_id": None,
+		"raw_ids": {"prior": None, "current": None, "following": None},
+		"state": "unavailable",
+		"reason": None,
+		"matches": False,
+	}
+	for name, records in (("prior", previous), ("current", current), ("following", next_rows)):
+		if records:
+			result["raw_ids"][name] = records_id(records)
+	if not current or not previous or not next_rows:
+		result["reason"] = "missing_raw_context"
+		return result
+	expected = legacy_rows(previous, current, next_rows)
+	actual = tuple(stored.get(central, ()))
+	expected_by_ticker = {row.ticker: row for row in expected}
+	actual_by_ticker = {row.ticker: row for row in actual}
+	missing = sorted(set(expected_by_ticker) - set(actual_by_ticker))
+	extra = sorted(set(actual_by_ticker) - set(expected_by_ticker))
+	for ticker in sorted(set(expected_by_ticker) & set(actual_by_ticker)):
+		for index in differing_columns(actual_by_ticker[ticker], expected_by_ticker[ticker]):
+			column_counts[DERIVED_COLUMNS[index]] += 1
+	result.update(
+			{
+				"expected_count": len(expected),
+				"missing_derived_keys": missing,
+				"extra_derived_keys": extra,
+				"expected_derived_id": derived_study_id(expected),
+				"stored_derived_id": derived_study_id(actual),
+				"state": "complete",
+				"matches": not missing and not extra and not any(column_counts.values()),
+			}
+		)
+	return result
+
+
+def run_derived_chunk(arguments: tuple[list[str], dict[str, list[str]], str | None]) -> dict[str, Any]:
+	target_paths, neighbors, configuration = arguments
+	if configuration is None:
+		raise ValueError("Derived study requires database configuration")
+	connection = None
+	started, cpu_started = perf_counter(), process_time()
+	try:
+		connection = streaming_connection(Path(configuration))
+		cursor = connection.cursor()
+		try:
+			cursor.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+			cursor.execute("START TRANSACTION READ ONLY")
+		finally:
+			cursor.close()
+		results = []
+		data_queries = 0
+		raw_rows = 0
+		derived_rows = 0
+		for start in range(0, len(target_paths), DERIVED_BATCH_SIZE):
+			batch = target_paths[start:start + DERIVED_BATCH_SIZE]
+			context_dates = sorted({date.fromisoformat(Path(path).stem) for path in batch for path in neighbors[path]})
+			raw, stored, batch_queries = read_derived_database(connection, Path(configuration), tuple(context_dates))
+			data_queries += batch_queries
+			raw_rows += sum(len(rows) for rows in raw.values())
+			derived_rows += sum(len(rows) for rows in stored.values())
+			for path in batch:
+				prior, central, following = neighbors[path]
+				results.append(
+					_derived_session_result(
+						date.fromisoformat(Path(central).stem),
+						date.fromisoformat(Path(prior).stem),
+						date.fromisoformat(Path(following).stem),
+						raw,
+						stored,
+					)
+				)
+		return {
+			"sessions": results,
+			"worker_seconds": perf_counter() - started,
+			"cpu_seconds": process_time() - cpu_started,
+			"query_count": data_queries + 2,
+			"data_query_count": data_queries,
+			"raw_rows": raw_rows,
+			"derived_rows": derived_rows,
+		}
+	finally:
+		if connection is not None:
+			try:
+				connection.rollback()
+			finally:
+				connection.close()
+
+
 def run_chunk(arguments: tuple[list[str], str, str | None]) -> dict[str, Any]:
 	paths, mode, configuration = arguments
 	connection = None
@@ -205,7 +387,7 @@ def run_request(request: dict[str, Any]) -> dict[str, Any]:
 	if type(workers) is not int or not 1 <= workers <= 3:
 		raise ValueError("Workers must be between one and three")
 	mode = request["mode"]
-	if mode not in {"files", "database", "reconcile"}:
+	if mode not in {"files", "database", "reconcile", "derived"}:
 		raise ValueError("Unsupported study mode")
 	paths = request["paths"]
 	if not paths or len(set(paths)) != len(paths):
@@ -213,6 +395,37 @@ def run_request(request: dict[str, Any]) -> dict[str, Any]:
 	repeats = request.get("repeats", 4)
 	if type(repeats) is not int or not 1 <= repeats <= 10:
 		raise ValueError("Repeats must be between one and ten")
+	if mode == "derived":
+		neighbors = request.get("neighbors")
+		if not isinstance(neighbors, dict) or set(neighbors) != set(paths):
+			raise ValueError("Derived study requires a neighbor triple for every target")
+		for path in paths:
+			triple = neighbors[path]
+			if not isinstance(triple, list) or len(triple) != 3 or triple[1] != path or len(set(triple)) != 3:
+				raise ValueError("Derived study neighbor triples are invalid")
+		configuration = request.get("dbinfo_file")
+		if not isinstance(configuration, str) or not configuration:
+			raise ValueError("Derived study requires database configuration")
+		chunks = [(paths[index::workers], neighbors, configuration) for index in range(workers) if paths[index::workers]]
+		measurements = []
+		with ProcessPoolExecutor(max_workers=workers) if workers > 1 else _SerialExecutor() as executor:
+			for repeat in range(repeats):
+				started = perf_counter()
+				parts = list(executor.map(run_derived_chunk, chunks))
+				sessions = sorted((session for part in parts for session in part["sessions"]), key=lambda item: item["session"])
+				measurements.append(
+					{
+						"seconds": perf_counter() - started,
+						"cpu_seconds": sum(part["cpu_seconds"] for part in parts),
+						"query_count": sum(part["query_count"] for part in parts),
+						"data_query_count": sum(part["data_query_count"] for part in parts),
+						"raw_rows": sum(part["raw_rows"] for part in parts),
+						"derived_rows": sum(part["derived_rows"] for part in parts),
+						"digest": sha256(encode_json(sessions)).hexdigest(),
+						"sessions": sessions,
+					}
+				)
+		return {"schema_version": 1, "backend": "python", "workers": workers, "mode": mode, "measurements": measurements}
 	chunks = [(paths[index::workers], mode, request.get("dbinfo_file")) for index in range(workers) if paths[index::workers]]
 	measurements = []
 	with ProcessPoolExecutor(max_workers=workers) if workers > 1 else _SerialExecutor() as executor:
