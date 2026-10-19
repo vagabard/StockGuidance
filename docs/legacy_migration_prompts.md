@@ -444,3 +444,18 @@ recovery and a complete list of unresolved gaps and excluded data.
 - The provisional Stage 3 Java three-reader choice remains a reader-only choice.
   No Java writer is proposed, so Stage 2c remains skipped; continue with the
   separately gated Stage 5a0/5a precision and identity work.
+
+### Stage 2c prerequisite review completed — 2026-10-19
+
+- Stage 1 correctness, Stage 2a read/EXPLAIN completion and Stage 2b derived
+  parity were rechecked from their reports. `output/legacy-migration/decision.json`
+  still records `processor: null`, `writer: null` and `production_ready: false`;
+  the Java selection is reader-only.
+- The current Java source tree contains no writer or import candidate. Because
+  Stage 2c is authorized only when a Java writer is proposed, its disposable
+  write-study deliverable is not applicable and no candidate study was run.
+- Focused validation passed: `pytest` archive/read/sample/artifact tests, 58
+  passed; offline `mvn -o test`, 32 passed. No disposable or production
+  database writes, schema changes, receipts or source changes occurred.
+- Stage 2c is intentionally recorded as skipped pending a future Java writer
+  proposal; do not treat the reader selection or these tests as write evidence.
