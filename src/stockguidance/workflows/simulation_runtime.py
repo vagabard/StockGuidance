@@ -9,6 +9,7 @@ from stockguidance.database.repositories.mysql_validation import MySQLValidation
 from stockguidance.database.repositories.verified_closes import VerifiedCloseRepository
 from stockguidance.database.repositories.signals import SignalRepository
 from stockguidance.database.connections import MySQLConnectionFactory
+from stockguidance.database.configuration import load_database_configuration
 from stockguidance.market_data.history import UnknownHistoryBoundary
 from stockguidance.market_data.history_store import JsonHistoryStore
 from stockguidance.market_data.opening_store import OpeningStore
@@ -38,7 +39,8 @@ def assemble_and_simulate(configuration: SimulationConfiguration, arguments: Sim
 	if configuration.audit_cutoff < calendar.session(configuration.end).closes_at:
 		raise ValueError("Execution audit cutoff must include the evaluation end close")
 	request = SimulationRequest(configuration.source.identity, configuration.features, TargetSpec(), AllocationSpec(configuration.allocation_policy, calendar.session(configuration.anchor_date)), configuration.start, configuration.end, configuration.initial_capital, configuration.decision_lead, configuration.eligibility, configuration.top_k, configuration.execution, configuration.availability_policy, configuration.data_snapshot)
-	closes = VerifiedCloseRepository(configuration.source, MySQLValidationRepository(configuration.source, MySQLConnectionFactory()))
+	table_names = load_database_configuration(configuration.source.database_config).load_table_names()
+	closes = VerifiedCloseRepository(configuration.source, MySQLValidationRepository(configuration.source, MySQLConnectionFactory(), table_names))
 	signals = HistoricalSignals(boundary, calendar, configuration.publication, SignalRepository(closes, OpeningStore(configuration.source.data_root)), VerifiedEligibilityRepository(closes), configuration.availability_policy, configuration.data_snapshot)
 	scores: ScoreSource
 	if EvaluationPolicy(arguments.model_policy) is EvaluationPolicy.FIXED:

@@ -6,8 +6,6 @@ from pathlib import Path
 from stockguidance.calendar.clock import SystemClock
 from stockguidance.calendar.decisions import DecisionTiming
 from stockguidance.database.connections import MySQLConnectionFactory
-from stockguidance.database.repositories.mysql_validation import MySQLValidationRepository
-from stockguidance.database.repositories.verified_closes import VerifiedCloseRepository
 from stockguidance.market_data.opening_refresh import OpeningRefresh
 from stockguidance.market_data.opening_store import OpeningStore
 from stockguidance.market_data.providers.configured_openings import ConfiguredOpeningProvider
@@ -21,12 +19,11 @@ def main(argv: list[str] | None = None) -> int:
 	arguments = parser.parse_args(argv)
 	try:
 		job = load_job(arguments.config)
-		history = open_job_history(job)
+		history = open_job_history(job, connect=MySQLConnectionFactory())
 		entry = history.calendar.session(arguments.session)
 		clock = SystemClock()
 		timing = DecisionTiming(history.calendar.shift(entry, -1), entry, history.calendar.shift(entry, 1), clock.now())
-		closes = VerifiedCloseRepository(job.source, MySQLValidationRepository(job.source, MySQLConnectionFactory()))
-		result = OpeningRefresh(job.source, OpeningStore(job.source.data_root), ConfiguredOpeningProvider(), closes).refresh(job.features, timing, history.boundary, clock)
+		result = OpeningRefresh(job.source, OpeningStore(job.source.data_root), ConfiguredOpeningProvider(), history.closes).refresh(job.features, timing, history.boundary, clock)
 		print(json.dumps({"successful": True, "session": entry.session_date.isoformat(), "ticker_ids": result.query.ticker_ids, "opening_revision": result.revision, "available_at": max(item.available_at for item in result.observations).isoformat()}))
 		return 0
 	except Exception:

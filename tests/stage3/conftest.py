@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+import json
 from pathlib import Path
 import re
 import sqlite3
@@ -36,7 +37,7 @@ class FakeCursor:
 	def execute(self, operation, parameters):
 		self.database.statements.append((operation, parameters))
 		self.synthetic = None
-		if self.database.fail_on and self.database.fail_on in operation:
+		if self.database.fail_on and self.database.fail_on in operation.replace("`", ""):
 			if self.database.fail_after_matches:
 				self.database.fail_after_matches -= 1
 			else:
@@ -130,6 +131,7 @@ def harness(tmp_path, calendar):
 	clock = FrozenClock(datetime(2024, 7, 10, 23, tzinfo=timezone.utc))
 	identity = SourceIdentity("polygon", GROUPED_ENDPOINT, "us-stocks", GROUPED_UNIVERSE, PriceAdjustment.ADJUSTED)
 	source = SourceConfig(identity, tmp_path / "custom-root", tmp_path / "custom-source.id", "fixture-credential-reference")
+	source.database_config.write_text(json.dumps({"host": "fixture", "database": "fixture", "user": "fixture", "password": "", "driver": "auto"}), encoding="utf-8")
 	boundary = establish_history_boundary(identity, calendar, date(2024, 7, 1), clock, provenance=HistoryProvenance.EXPLICIT_BOUNDARY, evidence="Fixture-only boundary")
 	settings = UpdateSettings(date(2024, 7, 1), date(2024, 7, 8), DailyPublicationPolicy(timedelta(minutes=15), "Fixture-only publication"), CorrectionPolicy(timedelta(days=30), timedelta(hours=1), timedelta(days=7), "Fixture-only corrections"))
 	database = FakeDatabase(tmp_path / "fixture.sqlite")

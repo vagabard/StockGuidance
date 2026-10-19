@@ -11,6 +11,7 @@ from stockguidance.database.repositories.mysql_validation import MySQLValidation
 from stockguidance.database.repositories.verified_closes import VerifiedCloseRepository
 from stockguidance.database.repositories.signals import SignalRepository
 from stockguidance.database.connections import MySQLConnectionFactory
+from stockguidance.database.configuration import load_database_configuration
 from stockguidance.market_data.history import UnknownHistoryBoundary
 from stockguidance.market_data.history_store import JsonHistoryStore
 from stockguidance.market_data.opening_store import OpeningStore
@@ -56,8 +57,9 @@ def assemble_and_recommend(configuration: RecommendationConfiguration, arguments
 			raise ValueError("Initial cash requires entry at the anchor; supply actual portfolio state for later sessions")
 		portfolio = initial_portfolio(job.allocation, decimal_text(arguments.capital), clock.now())
 	connect = MySQLConnectionFactory()
-	validation = MySQLValidationRepository(job.source, connect)
+	table_names = load_database_configuration(job.source.database_config).load_table_names()
+	validation = MySQLValidationRepository(job.source, connect, table_names)
 	closes = VerifiedCloseRepository(job.source, validation)
 	opening_store = OpeningStore(job.source.data_root)
-	services = RecommendationServices(ConfiguredPolygonProvider(arguments.max_retries), MySQLMarketDataRepository(job.source, connect), validation, SignalRepository(closes, opening_store), VerifiedEligibilityRepository(closes), OpeningRefresh(job.source, opening_store, ConfiguredOpeningProvider(arguments.max_retries), closes))
+	services = RecommendationServices(ConfiguredPolygonProvider(arguments.max_retries), MySQLMarketDataRepository(job.source, connect, table_names), validation, SignalRepository(closes, opening_store), VerifiedEligibilityRepository(closes), OpeningRefresh(job.source, opening_store, ConfiguredOpeningProvider(arguments.max_retries), closes))
 	return recommend(job, boundary, calendar, services, clock, portfolio=portfolio, execution=ExecutionPolicy(decimal_text(arguments.fee_per_fill)))

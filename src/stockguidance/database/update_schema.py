@@ -3,10 +3,10 @@ from stockguidance.database.repositories.mysql_sessions import Cursor
 from stockguidance.database.write_connections import WriteConnectionFactory
 from stockguidance.market_data.identity import source_key
 from stockguidance.market_data.legacy_derived import DERIVED_COLUMNS
-from stockguidance.database.table_names import TableNames, load_table_names, quote_identifier
+from stockguidance.database.table_names import TableNames, TableRole, load_table_names, quote_identifier
 
 
-_UPDATE_TABLE_ROLES = ("source", "sessions", "tickers", "prices", "deltas", "imports")
+_UPDATE_TABLE_ROLES = (TableRole.SOURCE, TableRole.SESSIONS, TableRole.TICKERS, TableRole.PRICES, TableRole.DELTAS, TableRole.IMPORTS)
 
 
 def update_schema_statements(table_names: TableNames) -> tuple[str, ...]:
@@ -22,7 +22,7 @@ def update_schema_statements(table_names: TableNames) -> tuple[str, ...]:
 
 def assert_transactional_tables(cursor: Cursor, table_names: TableNames | None = None) -> None:
 	selected_names = table_names or load_table_names()
-	physical_names = tuple(getattr(selected_names, role) for role in _UPDATE_TABLE_ROLES)
+	physical_names = tuple(selected_names.table(role) for role in _UPDATE_TABLE_ROLES)
 	placeholders = ",".join("%s" for _ in physical_names)
 	cursor.execute(f"SELECT TABLE_NAME, ENGINE FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME IN ({placeholders})", physical_names)
 	rows = cursor.fetchall()

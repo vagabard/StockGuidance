@@ -4,6 +4,7 @@ from pathlib import Path
 from stockguidance.calendar.decisions import DecisionTiming
 from stockguidance.calendar.exchange import ExchangeCalendar
 from stockguidance.database.connections import MySQLConnectionFactory
+from stockguidance.database.configuration import load_database_configuration
 from stockguidance.database.repositories.eligibility import VerifiedEligibilityRepository
 from stockguidance.database.repositories.mysql_validation import MySQLValidationRepository
 from stockguidance.database.repositories.signals import SignalRepository
@@ -33,7 +34,8 @@ def assemble_signal_comparison(configuration: SimulationConfiguration, artifacts
 		expected = configuration.publication.expected_at(latest_signal)
 		if expected is None or configuration.data_snapshot is None or configuration.data_snapshot < expected:
 			raise ValueError("Retrospective data_snapshot must include the latest previous-close publication")
-	closes = VerifiedCloseRepository(configuration.source, MySQLValidationRepository(configuration.source, MySQLConnectionFactory()))
+	table_names = load_database_configuration(configuration.source.database_config).load_table_names()
+	closes = VerifiedCloseRepository(configuration.source, MySQLValidationRepository(configuration.source, MySQLConnectionFactory(), table_names))
 	signals = HistoricalSignals(boundary, calendar, configuration.publication, SignalRepository(closes, OpeningStore(configuration.source.data_root)), VerifiedEligibilityRepository(closes), configuration.availability_policy, configuration.data_snapshot)
 	request = SimulationRequest(configuration.source.identity, configuration.features, TargetSpec(), AllocationSpec(configuration.allocation_policy, calendar.session(configuration.anchor_date)), configuration.start, configuration.end, configuration.initial_capital, configuration.decision_lead, configuration.eligibility, configuration.top_k, configuration.execution)
 	decisions = tuple(DecisionTiming(calendar.shift(session, -1), session, calendar.shift(session, 1), session.closes_at - settings.decision_lead) for session in calendar.sessions(settings.start, settings.end))

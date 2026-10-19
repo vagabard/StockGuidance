@@ -10,6 +10,7 @@ from stockguidance.database.connections import MySQLConnectionFactory
 from stockguidance.database.configuration import load_database_configuration
 from stockguidance.database.repositories.mysql_market_data import MySQLMarketDataRepository
 from stockguidance.database.repositories.mysql_sessions import ConnectionFactory, MySQLSessionRepository
+from stockguidance.database.table_names import TableNames
 from stockguidance.database.update_schema import initialize_update_schema
 from stockguidance.market_data.corrections import CorrectionPolicy
 from stockguidance.market_data.discovery import CoverageDiscoveryResult, DiscoveryRequest, HistoryOverride, discover_coverage
@@ -51,11 +52,11 @@ def _calendar_for_update(arguments: argparse.Namespace, boundary: HistoryBoundar
 	return ExchangeCalendar("XNYS", calendar_start, calendar_end)
 
 
-def _local_inventory(source: SourceConfig, calendar: ExchangeCalendar, manifest_inventory: LocalCoverageInventory, connect: ConnectionFactory, *, include_database: bool) -> LocalCoverageInventory:
+def _local_inventory(source: SourceConfig, calendar: ExchangeCalendar, manifest_inventory: LocalCoverageInventory, connect: ConnectionFactory, table_names: TableNames, *, include_database: bool) -> LocalCoverageInventory:
 	inventories = [manifest_inventory]
 	if include_database:
 		try:
-			inventories.append(MySQLSessionRepository(source, connect).inventory(calendar.start, calendar.end, calendar.calendar_id))
+			inventories.append(MySQLSessionRepository(source, connect, table_names).inventory(calendar.start, calendar.end, calendar.calendar_id))
 		except Exception:
 			inventories.append(LocalCoverageInventory(source.identity, calendar.calendar_id, issues=(InventoryIssue(calendar.calendar_id, "Database history inventory could not be read; retained database observations remain unresolved"),)))
 	return LocalCoverageInventory.merge(inventories)
@@ -85,6 +86,8 @@ def assemble_and_update(arguments: argparse.Namespace) -> UpdateResult:
 		resolve_cli_path(arguments.dbinfo_file, "dbinfo.id"),
 		"polygon_fetch.DEFAULT_API_KEY or POLYGON_API_KEY",
 	)
+	database_configuration = load_database_configuration(source.database_config)
+	table_names = database_configuration.load_table_names()
 	repair_path = getattr(arguments, "repair_plan", None)
 	repair_plan = None if repair_path is None else load_repair_plan(Path(repair_path))
 	history_store = JsonHistoryStore(source.data_root / "history")
@@ -94,7 +97,7 @@ def assemble_and_update(arguments: argparse.Namespace) -> UpdateResult:
 	connect = MySQLConnectionFactory()
 	manifest_inventory = manifest_store.inventory(identity, calendar, start=calendar.start, end=calendar.end)
 	include_database = arguments.dbinfo_file != "dbinfo.id" or arguments.data_root == "data" or bool(manifest_inventory.observations) or boundary is not None
-	local_inventory = _local_inventory(source, calendar, manifest_inventory, connect, include_database=include_database)
+	local_inventory = _local_inventory(source, calendar, manifest_inventory, connect, table_names, include_database=include_database)
 	cached_capability, capability_issue = _capability_from_cache(history_store, identity)
 	if capability_issue is not None:
 		local_inventory = LocalCoverageInventory.merge((local_inventory, LocalCoverageInventory(identity, calendar.calendar_id, issues=(InventoryIssue(calendar.calendar_id, capability_issue),))))
@@ -141,10 +144,9 @@ def assemble_and_update(arguments: argparse.Namespace) -> UpdateResult:
 		repair_plan, discovery,
 	)
 	if arguments.initialize_schema:
-		database_configuration = load_database_configuration(source.database_config)
-		initialize_update_schema(source, connect, database_configuration.load_table_names())
+		initialize_update_schema(source, connect, table_names)
 	if arguments.history_start is not None and boundary is None and discovery.history_boundary is not None:
 		history_store.save(discovery.history_boundary)
-	result = update_market_data(source, settings, query_boundary, calendar, provider, MySQLMarketDataRepository(source, connect), clock)
+	result = update_market_data(source, settings, query_boundary, calendar, provider, MySQLMarketDataRepository(source, connect, table_names), clock)
 	history_store.save_discovery_metadata(discovery.metadata())
 	return result

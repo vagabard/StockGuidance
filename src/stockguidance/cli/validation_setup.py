@@ -8,6 +8,7 @@ from stockguidance.config.source import PriceAdjustment, SourceConfig, SourceIde
 from stockguidance.database.repositories.mysql_sessions import MySQLSessionRepository
 from stockguidance.database.repositories.mysql_validation import MySQLValidationRepository
 from stockguidance.database.connections import MySQLConnectionFactory
+from stockguidance.database.configuration import load_database_configuration
 from stockguidance.features.specification import CloseFeature, FeatureSpec, SignalMode
 from stockguidance.market_data.discovery import DiscoveryRequest, HistoryOverride, discover_coverage
 from stockguidance.market_data.history import InventoryIssue, LocalCoverageInventory, UnknownHistoryBoundary
@@ -47,6 +48,7 @@ def assemble_and_validate(arguments: argparse.Namespace) -> ValidationResult:
 		resolve_cli_path(arguments.dbinfo_file, "dbinfo.id"),
 		"unused-by-read-only-validation",
 	)
+	table_names = load_database_configuration(source.database_config).load_table_names()
 	if (arguments.ticker_ids is None) != (arguments.lookback_sessions is None):
 		raise ValueError("Feature validation requires both ticker IDs and lookback")
 	mode = SignalMode(arguments.signal_mode)
@@ -68,7 +70,7 @@ def assemble_and_validate(arguments: argparse.Namespace) -> ValidationResult:
 	local_inventories.append(manifest_inventory)
 	if arguments.dbinfo_file != "dbinfo.id" or arguments.data_root == "data" or manifest_inventory.observations:
 		try:
-			local_inventories.append(MySQLSessionRepository(source, MySQLConnectionFactory()).inventory(calendar.start, calendar.end, calendar.calendar_id))
+			local_inventories.append(MySQLSessionRepository(source, MySQLConnectionFactory(), table_names).inventory(calendar.start, calendar.end, calendar.calendar_id))
 		except Exception:
 			local_inventories.append(LocalCoverageInventory(identity, calendar.calendar_id, issues=(InventoryIssue(calendar.calendar_id, "Database history inventory could not be read; schema inspection remains unresolved"),)))
 	local_inventory = LocalCoverageInventory.merge(local_inventories)
@@ -93,4 +95,4 @@ def assemble_and_validate(arguments: argparse.Namespace) -> ValidationResult:
 	if discovery.effective_start is None or discovery.effective_end is None:
 		raise UnknownHistoryBoundary("Supported history is unknown")
 	settings = ValidationSettings(requested_start, requested_end, publication, cutoff, features)
-	return validate_database(source, settings, boundary, calendar, MySQLValidationRepository(source, MySQLConnectionFactory()), clock, discovery=discovery)
+	return validate_database(source, settings, boundary, calendar, MySQLValidationRepository(source, MySQLConnectionFactory(), table_names), clock, discovery=discovery)

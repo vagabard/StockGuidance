@@ -7,6 +7,7 @@ from stockguidance.config.source import SourceConfig
 from stockguidance.market_data.history import EvidenceQuality, InventoryIssue, LocalCoverageInventory, LocalObservation
 from stockguidance.database.dates import normalize_date_id, normalize_session_date
 from stockguidance.database.repositories.sessions import SessionQuery, StoredSession
+from stockguidance.database.table_names import TableNames, TableRole, load_table_names, quote_identifier
 from stockguidance.validation.coverage import CoverageState
 
 
@@ -28,9 +29,9 @@ class ConnectionFactory(Protocol):
 class MySQLSessionRepository:
 	"""Read legacy date mappings without claiming source/provider completeness."""
 
-	def __init__(self, source: SourceConfig, connect: ConnectionFactory) -> None:
-		self.source = source
-		self.connect = connect
+	def __init__(self, source: SourceConfig, connect: ConnectionFactory, table_names: TableNames | None = None) -> None:
+		self.source, self.connect = source, connect
+		self.table_names = table_names or load_table_names()
 
 	def inventory(self, start: date, end: date, calendar_id: str) -> LocalCoverageInventory:
 		"""Inventory legacy mappings with one bounded read-only query.
@@ -41,8 +42,8 @@ class MySQLSessionRepository:
 		if not isinstance(start, date) or not isinstance(end, date) or start > end or not isinstance(calendar_id, str) or not calendar_id:
 			raise ValueError("Invalid legacy inventory bounds")
 		sql = (
-			"SELECT t.id, t.transaction_date, COUNT(r.ticker_id) "
-			"FROM transaction_dates t LEFT JOIN raw_stock_data r ON r.date_id = t.id "
+			f"SELECT t.id, t.transaction_date, COUNT(r.ticker_id) FROM {quote_identifier(self.table_names.table(TableRole.SESSIONS))} t "
+			f"LEFT JOIN {quote_identifier(self.table_names.table(TableRole.PRICES))} r ON r.date_id = t.id "
 			"WHERE t.transaction_date BETWEEN %s AND %s "
 			"GROUP BY t.id, t.transaction_date ORDER BY t.transaction_date ASC, t.id ASC"
 		)
@@ -79,8 +80,8 @@ class MySQLSessionRepository:
 		dates = tuple(session.session_date for session in query.sessions)
 		placeholders = ",".join("%s" for session in query.sessions)
 		sql = (
-			"SELECT t.id, t.transaction_date, COUNT(r.ticker_id) "
-			"FROM transaction_dates t LEFT JOIN raw_stock_data r ON r.date_id = t.id "
+			f"SELECT t.id, t.transaction_date, COUNT(r.ticker_id) FROM {quote_identifier(self.table_names.table(TableRole.SESSIONS))} t "
+			f"LEFT JOIN {quote_identifier(self.table_names.table(TableRole.PRICES))} r ON r.date_id = t.id "
 			f"WHERE t.transaction_date IN ({placeholders}) "
 			"GROUP BY t.id, t.transaction_date ORDER BY t.transaction_date ASC, t.id ASC"
 		)

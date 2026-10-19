@@ -16,6 +16,8 @@ from stockguidance.database.repositories.verified_closes import VerifiedCloseRep
 from stockguidance.database.repositories.closes import CloseRepository
 from stockguidance.database.repositories.signals import SignalRepository
 from stockguidance.database.connections import MySQLConnectionFactory
+from stockguidance.database.configuration import load_database_configuration
+from stockguidance.database.write_connections import WriteConnectionFactory
 from stockguidance.features.specification import FeatureSpec
 from stockguidance.market_data.history import HistoryBoundary, UnknownHistoryBoundary
 from stockguidance.market_data.availability import AvailabilityPolicy
@@ -90,11 +92,12 @@ class JobHistory:
 	boundary: HistoryBoundary
 	calendar: SessionCalendar
 	repository: CloseRepository
+	closes: VerifiedCloseRepository
 	decisions: tuple[DecisionTiming, ...]
 	evaluation_decisions: tuple[DecisionTiming, ...]
 
 
-def open_job_history(job: TrainingJob) -> JobHistory:
+def open_job_history(job: TrainingJob, *, connect: WriteConnectionFactory | None = None) -> JobHistory:
 	boundary = JsonHistoryStore(job.source.data_root / "history").load(job.source.identity)
 	if boundary is None:
 		raise UnknownHistoryBoundary("Training requires evidenced, persisted source history")
@@ -107,8 +110,9 @@ def open_job_history(job: TrainingJob) -> JobHistory:
 		return tuple(DecisionTiming(calendar.shift(session, -1), session, calendar.shift(session, 1), session.closes_at - job.decision_lead) for session in calendar.sessions(start, end))
 
 	evaluation_decisions = () if job.evaluation_start is None or job.evaluation_end is None else decisions(job.evaluation_start, job.evaluation_end)
-	repository = VerifiedCloseRepository(job.source, MySQLValidationRepository(job.source, MySQLConnectionFactory()))
-	return JobHistory(boundary, calendar, SignalRepository(repository, OpeningStore(job.source.data_root)), decisions(job.start, job.end), evaluation_decisions)
+	table_names = load_database_configuration(job.source.database_config).load_table_names()
+	repository = VerifiedCloseRepository(job.source, MySQLValidationRepository(job.source, connect or MySQLConnectionFactory(), table_names))
+	return JobHistory(boundary, calendar, SignalRepository(repository, OpeningStore(job.source.data_root)), repository, decisions(job.start, job.end), evaluation_decisions)
 
 
 def execute_job(job: TrainingJob, artifact_path: Path, *, checkpoint_path: Path | None = None, resume_from: Path | None = None) -> TrainingResult:

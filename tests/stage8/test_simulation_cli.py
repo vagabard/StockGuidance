@@ -14,6 +14,7 @@ from stockguidance.workflows.train_model import HistoryTrainingRequest, train_fr
 @pytest.fixture
 def simulation_json(simulation, tmp_path, monkeypatch):
 	JsonHistoryStore(tmp_path / "source" / "history").save(simulation.samples.boundary)
+	(tmp_path / "custom-config.id").write_text(json.dumps({"host": "fixture", "database": "fixture", "user": "fixture", "password": ""}), encoding="utf-8")
 	monkeypatch.setattr(setup, "ExchangeCalendar", lambda *values: simulation.calendar)
 	monkeypatch.setattr(setup, "MySQLConnectionFactory", lambda: object())
 	monkeypatch.setattr(setup, "MySQLValidationRepository", lambda *values: object())

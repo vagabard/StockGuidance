@@ -7,18 +7,19 @@ from stockguidance.database.repositories.mysql_market_read import decode_derived
 from stockguidance.database.repositories.mysql_sessions import Cursor
 from stockguidance.database.repositories.sessions import SessionQuery
 from stockguidance.database.repositories.validation import DatabaseInspection, SessionRecordCounts
+from stockguidance.database.table_names import TableNames, TableRole, quote_identifier
 from stockguidance.market_data.legacy_derived import DERIVED_COLUMNS, LegacyDerivedRow
 from stockguidance.market_data.records import DailyBar
 from stockguidance.validation.findings import FindingCategory, ValidationCheck, ValidationFinding
 
 
-def inspect_rows(cursor: Cursor, query: SessionQuery) -> DatabaseInspection:
+def inspect_rows(cursor: Cursor, query: SessionQuery, table_names: TableNames) -> DatabaseInspection:
 	dates = tuple(session.session_date for session in query.sessions)
 	placeholders = ",".join("%s" for session in query.sessions)
 	findings: list[ValidationFinding] = []
 	ids: dict[int, date] = {}
 	seen_dates: set[date] = set()
-	cursor.execute(f"SELECT id, transaction_date FROM transaction_dates WHERE transaction_date IN ({placeholders}) ORDER BY transaction_date", dates)
+	cursor.execute(f"SELECT id, transaction_date FROM {quote_identifier(table_names.table(TableRole.SESSIONS))} WHERE transaction_date IN ({placeholders}) ORDER BY transaction_date", dates)
 	for row in cursor.fetchall():
 		date_id, session_date = normalize_date_id(row[0]), normalize_session_date(row[1])
 		if session_date not in dates:
@@ -33,8 +34,9 @@ def inspect_rows(cursor: Cursor, query: SessionQuery) -> DatabaseInspection:
 	counts: dict[date, list[int]] = {session_date: [0, 0] for session_date in dates}
 	ticker_symbols: dict[int, str] = {}
 	symbol_ids: dict[str, int] = {}
-	for table, columns in (("raw_stock_data", "r.open, r.high, r.low, r.close, r.volume, r.vwap, r.transactions"), ("daily_delta_stock_data", ", ".join(f"r.{column}" for column in DERIVED_COLUMNS))):
-		cursor.execute(f"SELECT r.date_id, r.ticker_id, t.transaction_date, s.label, {columns} FROM {table} r LEFT JOIN ticker_symbol s ON s.id = r.ticker_id LEFT JOIN transaction_dates t ON t.id = r.date_id WHERE t.transaction_date IN ({placeholders}) OR t.id IS NULL ORDER BY r.date_id, r.ticker_id", dates)
+	for role, columns in ((TableRole.PRICES, "r.open, r.high, r.low, r.close, r.volume, r.vwap, r.transactions"), (TableRole.DELTAS, ", ".join(f"r.{column}" for column in DERIVED_COLUMNS))):
+		physical_table = table_names.table(role)
+		cursor.execute(f"SELECT r.date_id, r.ticker_id, t.transaction_date, s.label, {columns} FROM {quote_identifier(physical_table)} r LEFT JOIN {quote_identifier(table_names.table(TableRole.TICKERS))} s ON s.id = r.ticker_id LEFT JOIN {quote_identifier(table_names.table(TableRole.SESSIONS))} t ON t.id = r.date_id WHERE t.transaction_date IN ({placeholders}) OR t.id IS NULL ORDER BY r.date_id, r.ticker_id", dates)
 		for row in cursor.fetchall():
 			try:
 				ticker_id = normalize_date_id(row[1])
@@ -49,10 +51,10 @@ def inspect_rows(cursor: Cursor, query: SessionQuery) -> DatabaseInspection:
 				row_date = normalize_session_date(row[2])
 				if row_date not in counts:
 					raise ValueError("Record outside the bounded query")
-				counts[row_date][0 if table == "raw_stock_data" else 1] += 1
-			_read_record(row, table, ids, raw, derived, findings)
+				counts[row_date][0 if role is TableRole.PRICES else 1] += 1
+			_read_record(row, role, ids, raw, derived, findings, physical_table)
 	receipts: dict[date, ImportReceipt] = {}
-	cursor.execute(f"SELECT session_date, raw_id, available_at, derived_dependency_id, derived_content_id FROM stockguidance_imports WHERE session_date IN ({placeholders})", dates)
+	cursor.execute(f"SELECT session_date, raw_id, available_at, derived_dependency_id, derived_content_id FROM {quote_identifier(table_names.table(TableRole.IMPORTS))} WHERE session_date IN ({placeholders})", dates)
 	for row in cursor.fetchall():
 		session_date = normalize_session_date(row[0])
 		if session_date not in dates:
@@ -78,20 +80,20 @@ def inspect_rows(cursor: Cursor, query: SessionQuery) -> DatabaseInspection:
 	return DatabaseInspection(tuple(snapshots), tuple(findings), tuple(SessionRecordCounts(session_date, count[0], count[1]) for session_date, count in counts.items()), tuple(sorted(ticker_symbols.items())))
 
 
-def _read_record(row: Sequence[object], table: str, ids: dict[int, date], raw: dict[int, dict[str, DailyBar]], derived: dict[int, dict[str, LegacyDerivedRow]], findings: list[ValidationFinding]) -> None:
+def _read_record(row: Sequence[object], role: TableRole, ids: dict[int, date], raw: dict[int, dict[str, DailyBar]], derived: dict[int, dict[str, LegacyDerivedRow]], findings: list[ValidationFinding], physical_table: str) -> None:
 	session_date = None if row[2] is None else normalize_session_date(row[2])
 	tickers = (row[3],) if isinstance(row[3], str) else ()
 	try:
 		date_id = normalize_date_id(row[0])
 		ticker_id = normalize_date_id(row[1])
 	except ValueError:
-		findings.append(ValidationFinding(FindingCategory.INVALID, ValidationCheck.ORPHAN, f"{table} record has invalid mapping identifiers", session_date, tickers, tuple(value for value in row[:2] if type(value) is int)))
+		findings.append(ValidationFinding(FindingCategory.INVALID, ValidationCheck.ORPHAN, f"{physical_table} record has invalid mapping identifiers", session_date, tickers, tuple(value for value in row[:2] if type(value) is int)))
 		return
 	if date_id not in ids or not tickers:
-		findings.append(ValidationFinding(FindingCategory.INVALID, ValidationCheck.ORPHAN, f"{table} record lacks a valid date or ticker mapping; unassigned dates are checked across storage", session_date, tickers, (date_id, ticker_id)))
+		findings.append(ValidationFinding(FindingCategory.INVALID, ValidationCheck.ORPHAN, f"{physical_table} record lacks a valid date or ticker mapping; unassigned dates are checked across storage", session_date, tickers, (date_id, ticker_id)))
 		return
 	try:
-		if table == "raw_stock_data":
+		if role is TableRole.PRICES:
 			decoded_id, bar = decode_raw_row((row[0], row[3], *row[4:]))
 			bars = raw.setdefault(decoded_id, {})
 			if bar.ticker in bars:
@@ -106,5 +108,5 @@ def _read_record(row: Sequence[object], table: str, ids: dict[int, date], raw: d
 			else:
 				rows[derived_row.ticker] = derived_row
 	except (ValueError, TypeError, OverflowError):
-		check = ValidationCheck.RAW_VALUES if table == "raw_stock_data" else ValidationCheck.DERIVED
-		findings.append(ValidationFinding(FindingCategory.INVALID, check, f"Invalid {table} prices, counts, or numerical values", session_date, tickers, (date_id, ticker_id)))
+		check = ValidationCheck.RAW_VALUES if role is TableRole.PRICES else ValidationCheck.DERIVED
+		findings.append(ValidationFinding(FindingCategory.INVALID, check, f"Invalid {physical_table} prices, counts, or numerical values", session_date, tickers, (date_id, ticker_id)))
