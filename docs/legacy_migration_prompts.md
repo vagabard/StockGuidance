@@ -1090,3 +1090,44 @@ parity/recovery handoff that follows.
   changed. This is correctness evidence only; Stage 9 still owns comparable
   startup-inclusive MySQL measurements. Next prompt: **Read
   docs/legacy_migration_prompts.md and execute revised Stage 8a only.**
+
+### Revised Stage 8a SQL raw candidate completed — 2026-10-20
+
+- Implemented the guarded SQL raw candidate in
+  `src/stockguidance/performance/sql_raw_candidate.py`. Validated archive files
+  are loaded one session at a time into the binary-collated
+  `stage8a_raw_stage` table with exact Decimal strings, corrected Stage 5
+  numeric definitions, full file hashes and exact records IDs. The candidate
+  does not assume `LOAD DATA` or file-loading privileges.
+- The registry-bound `stage8a_adopt_raw` MySQL procedure performs set-based
+  session/ticker mapping, raw `INSERT ... SELECT`/duplicate-key reconciliation,
+  import receipt publication and completion publication. It preserves existing
+  exact ticker/date IDs and derived metadata, has no internal commit, and is
+  installed only in disposable schemas. Its bounded EXPLAIN uses the staging
+  primary key for the session restriction and the ticker label index.
+- The final trial used MySQL `9.5.0`, InnoDB, and disposable schemas
+  `stockguidance_disposable_s8a_20261020g` plus its `_fx` fixture schema. The
+  unchanged Stage 6 manifest identity is
+  `e5d9446e8bae97244edf17824be680eda6e8990bf1b80a2e6629809896022a14`.
+  The trial matched all 25 fixed sessions and 217,734 raw rows exactly,
+  including fractional volumes, extreme prices and exact-case `AAP`/`AAp`.
+- Seven recovery checks passed: before-commit rollback, durable post-commit
+  restart without a checkpoint, idempotent restart, missing/differing-row
+  repair, unchanged adoption preserving derived metadata, changed-input
+  rejection and stale-checkpoint rejection. The report records production DDL
+  and DML as false and includes the full registry, corrected schema hash
+  `00d2f5da9dbc1e0353a7fbf9da8fb9fd78aa1d0fb57ac63d2caecf3def7f6101`, actual
+  schema hash `b7d22d4a943ced2eaf832ddf4625640f67d583d96114921165d014280a7e067a`,
+  routine `stage8a_adopt_raw`, routine hash
+  `f85fb7df0cbc924f64147358a3b9fef86f5408aadbedb4490a2e41af12ad349a` and
+  object hash `36fa235486140ebf1439aa06126968b428454a1877d5002f9a33ff2366a0ed8d`.
+- Artifact: `output/legacy-migration/benchmark/candidates/sql-raw-mysql.json`;
+  SHA-256 `ef6f43b7e4a507448f42fe1b8608cc36af8f61a66b740ac720678a78394b7d2e`.
+  Reproduce with a fresh `stockguidance_disposable_...` schema using
+  `& $pythonExe -m stockguidance.cli.legacy_migration_benchmark --run-sql-raw-trial --dbinfo-file dbinfo.id --disposable-schema <fresh_schema> --manifest output/legacy-migration/benchmark/candidates/manifest.json --output output/legacy-migration/benchmark/candidates/sql-raw-mysql.json`.
+- Focused SQL/MySQL tests passed 13 tests; the complete Stage 6 suite passed
+  126 tests with three pre-existing PyTorch warnings. No production schema,
+  rows, receipts, source bindings or retained source files changed. Stage 8a
+  correctness is complete; Stage 9 still owns comparable startup-inclusive
+  timings. Next prompt: **Read docs/legacy_migration_prompts.md and execute
+  revised Stage 8b only.**

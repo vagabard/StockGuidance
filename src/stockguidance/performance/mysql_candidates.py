@@ -63,13 +63,14 @@ def mysql_schema_statements(manifest: dict) -> tuple[str, ...]:
 
 
 class MySQLTarget:
-	def __init__(self, dbinfo_file: Path, schema: str, manifest: dict) -> None:
+	def __init__(self, dbinfo_file: Path, schema: str, manifest: dict, *, extra_statements: tuple[str, ...] = (), extra_objects: tuple[str, ...] = ()) -> None:
 		production = load_database_configuration(dbinfo_file)
 		self.schema = validate_schema(schema, production.database)
 		self.configuration = replace(production, database=self.schema)
 		self.production_schema = production.database
 		self.manifest = manifest
-		self.statements = mysql_schema_statements(manifest)
+		self.statements = mysql_schema_statements(manifest) + tuple(extra_statements)
+		self.extra_objects = tuple(extra_objects)
 		self.metadata = {
 			"production_target": "false", "database_engine": "mysql", "database_schema": self.schema,
 			"schema_hash": content_id(self.statements), "corrected_schema_hash": manifest["corrected_schema_hash"],
@@ -91,6 +92,7 @@ class MySQLTarget:
 		try:
 			cursor = connection.cursor()
 			objects, production_inventory = self.validation_objects(cursor)
+			objects += self.extra_objects
 			cursor.execute("SELECT SCHEMA_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = %s", (self.schema,))
 			if cursor.fetchone() is None:
 				cursor.execute(f"CREATE DATABASE {quote_identifier(self.schema)} CHARACTER SET utf8mb4 COLLATE utf8mb4_bin")
