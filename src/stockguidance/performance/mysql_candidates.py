@@ -220,7 +220,7 @@ class MySQLBaselineConnection:
 
 	def executemany(self, statement, parameters):
 		parameters = list(parameters)
-		self.trace(len(parameters))
+		self.trace(1)
 		self.cursor.executemany(mysql_statement(statement), parameters)
 		return self
 

@@ -26,6 +26,7 @@ def parser() -> argparse.ArgumentParser:
 	mode.add_argument("--run-sql-raw-trial", action="store_true")
 	mode.add_argument("--run-sql-derived-trial", action="store_true")
 	mode.add_argument("--run-sql-zscore-trial", action="store_true")
+	mode.add_argument("--run-stage9-raw", action="store_true")
 	arguments.add_argument("--data-root", type=_path, default=Path("data"))
 	arguments.add_argument("--dbinfo-file", type=_path, default=Path("dbinfo.id"))
 	arguments.add_argument("--evaluation-plan", type=_path, default=Path("output/legacy-migration/evaluation-plan.json"))
@@ -41,6 +42,7 @@ def parser() -> argparse.ArgumentParser:
 	arguments.add_argument("--timeout-seconds", type=float, default=3600.0)
 	arguments.add_argument("--report", type=_path, action="append", default=[])
 	arguments.add_argument("--aggregate-output", type=_path, default=Path("output/legacy-migration/benchmark/candidates/study.json"))
+	arguments.add_argument("--stage9-timeout-seconds", type=float, default=3600.0)
 	return arguments
 
 
@@ -50,6 +52,17 @@ def _resolve(path: Path) -> Path:
 
 def main(argv: Sequence[str] | None = None) -> int:
 	arguments = parser().parse_args(argv)
+	if arguments.run_stage9_raw:
+		from stockguidance.performance.stage9_raw import aggregate_stage9_study, run_stage9_raw
+
+		try:
+			raw_report = run_stage9_raw(_resolve(arguments.manifest), _resolve(arguments.dbinfo_file), _resolve(arguments.output), timeout_seconds=arguments.stage9_timeout_seconds)
+			aggregate_stage9_study(raw_report, _resolve(arguments.output))
+		except Exception:
+			print(json.dumps({"successful": False, "error": "Stage 9a raw measurement failed"}))
+			return 1
+		print(json.dumps({"successful": raw_report["status"] == "complete", "raw_report": str((_resolve(arguments.output) / "stage9a-raw.json").resolve()), "study": str((_resolve(arguments.output) / "study.json").resolve()), "status": raw_report["status"]}))
+		return 0 if raw_report["status"] == "complete" else 1
 	if arguments.run_java_writer_trial:
 		from stockguidance.performance.java_writer_trial import run_trial
 

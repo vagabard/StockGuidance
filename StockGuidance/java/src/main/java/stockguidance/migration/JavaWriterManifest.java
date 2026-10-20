@@ -146,10 +146,14 @@ public final class JavaWriterManifest {
     }
 
     public ArchiveCandidateReader.SessionArchive archive(LocalDate session) {
+        return archive(session, ArchiveCandidateReader.Parser.JACKSON);
+    }
+
+    public ArchiveCandidateReader.SessionArchive archive(LocalDate session, ArchiveCandidateReader.Parser parser) {
         FileEntry entry = file(session);
         if (!entry.valid()) throw new InvalidSourceException("Archive session is not adoptable: " + session);
         if (entry.path() == null) throw new InvalidSourceException("Archive path is unavailable: " + session);
-        ArchiveCandidateReader.SessionArchive archive = ArchiveCandidateReader.read(entry.path(), session);
+        ArchiveCandidateReader.SessionArchive archive = ArchiveCandidateReader.read(entry.path(), session, parser);
         if (entry.fileSha256() == null || !entry.fileSha256().equals(archive.fileSha256())) {
             throw new IllegalArgumentException("Changed Stage 6 input: " + session);
         }
@@ -157,6 +161,15 @@ public final class JavaWriterManifest {
             throw new IllegalArgumentException("Changed Stage 6 record identity: " + session);
         }
         return archive;
+    }
+
+    public void verifyArchiveIdentity(ArchiveCandidateReader.SessionArchive archive) {
+        FileEntry entry = file(archive.session());
+        if (!entry.valid() || entry.path() == null || entry.fileSha256() == null || entry.recordsId() == null
+                || !entry.fileSha256().equals(archive.fileSha256()) || !entry.recordsId().equals(archive.recordsId())
+                || !entry.fileSha256().equals(hash(entry.path()))) {
+            throw new IllegalArgumentException("Changed Stage 6 input: " + archive.session());
+        }
     }
 
     public boolean isAdoptable(LocalDate session) {

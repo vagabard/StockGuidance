@@ -145,6 +145,7 @@ class SQLRawCandidate:
 		self.output = output
 		self.names = _manifest_table_names(manifest)
 		self.columns = _precision_columns(manifest)
+		self.query_count = 0
 
 	def _archive(self, session: str) -> tuple[tuple[ExactArchiveBar, ...], str, dict]:
 		item = next((value for value in self.manifest["files"] if value.get("session") == session), None)
@@ -181,6 +182,7 @@ class SQLRawCandidate:
 		path.write_text(json.dumps({"schema_version": CHECKPOINT_SCHEMA_VERSION, "workload": "raw", "session": session, "content_digest": records_id, "after_commit": True}, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 	def _execute(self, cursor, statement: str, parameters=()) -> None:
+		self.query_count += 1
 		cursor.execute(statement, parameters)
 		while cursor.nextset():
 			if cursor.with_rows:
@@ -188,11 +190,13 @@ class SQLRawCandidate:
 
 	def _load_stage(self, cursor, session: str, bars: tuple[ExactArchiveBar, ...], file_hash: str, records_id: str) -> int:
 		stage = quote_identifier(STAGE_TABLE)
+		self.query_count += 1
 		cursor.execute(f"DELETE FROM {stage} WHERE session_date = %s", (session,))
 		rows = [(
 			session, bar.ticker, *(None if getattr(bar, field) is None else format(getattr(bar, field), "f") for field in ("open", "high", "low", "close", "volume", "vwap")),
 			bar.transactions, file_hash, records_id,
 		) for bar in bars]
+		self.query_count += 1
 		cursor.executemany(f"INSERT INTO {stage} (session_date, ticker_label, `open`, `high`, `low`, `close`, volume, vwap, transactions, file_sha256, records_id) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)", rows)
 		return len(rows)
 
@@ -201,6 +205,7 @@ class SQLRawCandidate:
 		prices = quote_identifier(self.names.prices)
 		tickers = quote_identifier(self.names.tickers)
 		sessions = quote_identifier(self.names.sessions)
+		self.query_count += 1
 		cursor.execute(f"""SELECT COUNT(*) FROM {stage} s
 LEFT JOIN {sessions} d ON d.transaction_date = s.session_date
 LEFT JOIN {tickers} t ON t.label = s.ticker_label
@@ -213,17 +218,19 @@ WHERE s.session_date = %s AND (p.ticker_id IS NULL OR NOT (p.`open` <=> s.`open`
 		if not labels:
 			return {}
 		placeholders = ",".join("%s" for _ in labels)
+		self.query_count += 1
 		cursor.execute(f"SELECT label, id FROM {tickers} WHERE label IN ({placeholders})", labels)
 		return {str(label): int(identifier) for label, identifier in cursor.fetchall()}
 
 	def _call(self, cursor, session: str) -> None:
 		self._execute(cursor, f"CALL {quote_identifier(ROUTINE_NAME)}(%s)", (session,))
 
-	def write_raw(self, session: str, *, checkpoint: Path | None = None, interruption: str | None = None) -> dict[str, object]:
+	def write_raw(self, session: str, *, checkpoint: Path | None = None, interruption: str | None = None, connection=None) -> dict[str, object]:
 		bars, file_hash, item = self._archive(session)
 		records_id = str(item["records_id"])
 		self._validate_checkpoint(checkpoint, session, records_id)
-		connection = self.target.connect()
+		owns_connection = connection is None
+		connection = connection or self.target.connect()
 		cursor = connection.cursor()
 		committed = False
 		started = perf_counter()
@@ -255,7 +262,8 @@ WHERE s.session_date = %s AND (p.ticker_id IS NULL OR NOT (p.`open` <=> s.`open`
 			raise
 		finally:
 			cursor.close()
-			connection.close()
+			if owns_connection:
+				connection.close()
 
 	def query(self, sql: str, parameters=(), *, write: bool = False):
 		connection = self.target.connect()

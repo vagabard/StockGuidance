@@ -450,6 +450,9 @@ class PythonBaseline:
 
 	def _raw_session(self, session: str, *, seed: bool = False) -> dict[str, object]:
 		bars = self._bars(session)
+		return self._raw_session_prepared(session, bars, exact_records_id(bars), seed=seed)
+
+	def _raw_session_prepared(self, session: str, bars: tuple[ExactArchiveBar, ...], records_id: str, *, seed: bool = False) -> dict[str, object]:
 		started, cpu = perf_counter(), process_time()
 		before_queries = self._trace_count
 		connection = self._connect()
@@ -480,10 +483,10 @@ class PythonBaseline:
 					changed_rows.append(payload)
 			if changed_rows:
 				connection.executemany(f"INSERT OR REPLACE INTO {price_table}(ticker_id, date_id, open, high, low, close, volume, vwap, transactions) VALUES (?,?,?,?,?,?,?,?,?)", changed_rows)
-			connection.execute(f"INSERT OR REPLACE INTO {imports_table}(session_date, raw_id, available_at, derived_dependency_id, derived_content_id) VALUES (?,?,?,?,?)", (session, exact_records_id(bars), TRIAL_RECEIPT, None, None))
-			connection.execute("INSERT OR REPLACE INTO stage6_completion(workload, session_date, series_key, content_digest, committed_at) VALUES (?,?,?,?,?)", ("raw", session, "raw", exact_records_id(bars), TRIAL_RECEIPT))
+			connection.execute(f"INSERT OR REPLACE INTO {imports_table}(session_date, raw_id, available_at, derived_dependency_id, derived_content_id) VALUES (?,?,?,?,?)", (session, records_id, TRIAL_RECEIPT, None, None))
+			connection.execute("INSERT OR REPLACE INTO stage6_completion(workload, session_date, series_key, content_digest, committed_at) VALUES (?,?,?,?,?)", ("raw", session, "raw", records_id, TRIAL_RECEIPT))
 			connection.commit()
-			self._checkpoint("raw", session, exact_records_id(bars))
+			self._checkpoint("raw", session, records_id)
 			return {"session": session, "rows": len(bars), "changed_rows": len(changed_rows), "seconds": perf_counter() - started, "cpu_seconds": process_time() - cpu, "query_count": self._trace_count - before_queries, "seed": seed, "committed": True}
 		except Exception:
 			connection.rollback()

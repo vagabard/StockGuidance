@@ -1,6 +1,7 @@
 package stockguidance.migration;
 
 import com.fasterxml.jackson.core.JsonFactory;
+import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.core.StreamReadFeature;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -8,6 +9,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.apache.fory.json.ForyJson;
 import stockguidance.json.CanonicalJson;
 import stockguidance.validation.ValidationContent;
 
@@ -39,13 +41,24 @@ public final class ArchiveCandidateReader {
             .enable(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS)
             .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
             .setNodeFactory(JsonNodeFactory.withExactBigDecimals(true));
+    private static final JsonFactory STRICT_VALIDATOR = JsonFactory.builder()
+            .enable(StreamReadFeature.STRICT_DUPLICATE_DETECTION)
+            .build();
+    private static final ForyJson FORY_READER = ForyJson.builder().withFieldMode(true).build();
 
     private ArchiveCandidateReader() {
     }
 
     public static SessionArchive read(Path path, LocalDate session) {
+        return read(path, session, Parser.JACKSON);
+    }
+
+    public static SessionArchive read(Path path, LocalDate session, Parser parser) {
         if (path == null || session == null) {
             throw new IllegalArgumentException("Archive path and session are required");
+        }
+        if (parser == null) {
+            throw new IllegalArgumentException("Archive parser is required");
         }
         MessageDigest digest = sha256();
         Map<String, ValidationContent.RawBar> bars = new TreeMap<>();
@@ -56,11 +69,13 @@ public final class ArchiveCandidateReader {
                 if (line.length == 0) {
                     throw new IllegalArgumentException("Archive record is empty");
                 }
-                JsonNode row = READER.readTree(decodeUtf8(line));
-                if (!row.isObject()) {
-                    throw new IllegalArgumentException("Archive record must be an object");
+                ValidationContent.RawBar bar;
+                if (parser == Parser.JACKSON) {
+                    bar = decode(READER.readTree(decodeUtf8(line)), session);
+                } else {
+                    validateStrictJson(line);
+                    bar = decode(FORY_READER.fromJson(line, RawArchiveRecord.class), session);
                 }
-                ValidationContent.RawBar bar = decode(row, session);
                 if (bars.putIfAbsent(bar.ticker(), bar) != null) {
                     throw new IllegalArgumentException("Duplicate archive ticker");
                 }
@@ -73,6 +88,35 @@ public final class ArchiveCandidateReader {
         }
         String fileSha256 = hex(digest.digest());
         return new SessionArchive(path, session, fileSha256, Map.copyOf(bars), recordsId(bars));
+    }
+
+    public enum Parser {
+        JACKSON,
+        FORY;
+
+        public static Parser parse(String value) {
+            if (value == null) throw new IllegalArgumentException("Archive parser is required");
+            return switch (value.toLowerCase(java.util.Locale.ROOT)) {
+                case "jackson" -> JACKSON;
+                case "fory" -> FORY;
+                default -> throw new IllegalArgumentException("Unknown archive parser: " + value);
+            };
+        }
+    }
+
+    public static final class RawArchiveRecord {
+        public String T;
+        public BigDecimal o;
+        public BigDecimal h;
+        public BigDecimal l;
+        public BigDecimal c;
+        public BigDecimal v;
+        public BigDecimal vw;
+        public Long n;
+        public Long t;
+
+        public RawArchiveRecord() {
+        }
     }
 
     public static String recordsId(Map<String, ValidationContent.RawBar> bars) {
@@ -101,6 +145,9 @@ public final class ArchiveCandidateReader {
     }
 
     private static ValidationContent.RawBar decode(JsonNode row, LocalDate session) {
+        if (row == null || !row.isObject()) {
+            throw new IllegalArgumentException("Archive record must be an object");
+        }
         String ticker = text(row, "T");
         if (ticker.isEmpty() || ticker.length() > 16 || ticker.codePoints().anyMatch(Character::isWhitespace)) {
             throw new IllegalArgumentException("Invalid archive ticker");
@@ -128,8 +175,49 @@ public final class ArchiveCandidateReader {
         return new ValidationContent.RawBar(ticker, open, high, low, close, volume, vwap, transactions);
     }
 
+    private static ValidationContent.RawBar decode(RawArchiveRecord row, LocalDate session) {
+        if (row == null) {
+            throw new IllegalArgumentException("Archive record must be an object");
+        }
+        String ticker = row.T;
+        if (ticker == null || ticker.isEmpty() || ticker.length() > 16 || ticker.codePoints().anyMatch(Character::isWhitespace)) {
+            throw new IllegalArgumentException("Invalid archive ticker");
+        }
+        if (row.t == null || row.t < 0) {
+            throw new IllegalArgumentException("Invalid archive timestamp");
+        }
+        if (!Instant.ofEpochMilli(row.t).atZone(EXCHANGE_ZONE).toLocalDate().equals(session)) {
+            throw new IllegalArgumentException("Archive timestamp and session disagree");
+        }
+        BigDecimal open = price(row.o, "o");
+        BigDecimal high = price(row.h, "h");
+        BigDecimal low = price(row.l, "l");
+        BigDecimal close = price(row.c, "c");
+        BigDecimal volume = quantity(row.v, "volume");
+        if (volume.signum() < 0 || volume.compareTo(MAX_LONG) > 0) {
+            throw new IllegalArgumentException("Invalid archive volume");
+        }
+        BigDecimal vwap = row.vw == null ? null : price(row.vw, "vw");
+        Long transactions = row.n;
+        if (transactions != null && transactions < 0) {
+            throw new IllegalArgumentException("Invalid transactions");
+        }
+        if (low.compareTo(open.min(close)) > 0 || high.compareTo(open.max(close)) < 0 || low.compareTo(high) > 0) {
+            throw new IllegalArgumentException("Inconsistent archive OHLC");
+        }
+        return new ValidationContent.RawBar(ticker, open, high, low, close, volume, vwap, transactions);
+    }
+
     private static BigDecimal price(JsonNode row, String name) {
         BigDecimal value = quantity(row.get(name), name);
+        if (value.signum() <= 0 || value.compareTo(MAX_PRICE) >= 0) {
+            throw new IllegalArgumentException("Invalid archive price");
+        }
+        return value;
+    }
+
+    private static BigDecimal price(BigDecimal value, String name) {
+        value = quantity(value, name);
         if (value.signum() <= 0 || value.compareTo(MAX_PRICE) >= 0) {
             throw new IllegalArgumentException("Invalid archive price");
         }
@@ -144,6 +232,22 @@ public final class ArchiveCandidateReader {
             return new BigDecimal(value.asText());
         } catch (NumberFormatException error) {
             throw new IllegalArgumentException("Invalid archive " + name, error);
+        }
+    }
+
+    private static BigDecimal quantity(BigDecimal value, String name) {
+        if (value == null) {
+            throw new IllegalArgumentException("Invalid archive " + name);
+        }
+        return value;
+    }
+
+    private static void validateStrictJson(byte[] bytes) {
+        try (JsonParser parser = STRICT_VALIDATOR.createParser(bytes)) {
+            while (parser.nextToken() != null) {
+            }
+        } catch (IOException error) {
+            throw new IllegalArgumentException("Invalid archive JSON", error);
         }
     }
 

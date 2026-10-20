@@ -51,6 +51,12 @@ public final class JavaWriterCandidate {
         } catch (JavaWriterManifest.InvalidSourceException error) {
             return new WriteResult("raw", session, "invalid_source", false, 0, null);
         }
+        return writeRaw(connection, archive, checkpoint, interruption);
+    }
+
+    public WriteResult writeRaw(Connection connection, ArchiveCandidateReader.SessionArchive archive,
+                                Path checkpoint, InterruptPoint interruption) throws SQLException {
+        LocalDate session = archive.session();
         validateCheckpoint(checkpoint, RAW_SERIES, session, archive.recordsId());
         validateTarget(connection);
         boolean committed = false;
@@ -82,7 +88,7 @@ public final class JavaWriterCandidate {
             batchUpdateBars(connection, updates);
             upsertImport(connection, session, archive.recordsId(), null, null);
             upsertCompletion(connection, RAW_SERIES, session, RAW_SERIES, archive.recordsId());
-            manifest.archive(session);
+            manifest.verifyArchiveIdentity(archive);
             applyInterruption(interruption, InterruptPoint.BEFORE_COMMIT);
             connection.commit();
             committed = true;
