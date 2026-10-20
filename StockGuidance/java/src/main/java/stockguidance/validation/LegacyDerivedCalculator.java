@@ -54,7 +54,7 @@ final class LegacyDerivedCalculator {
             values.add(ratio(bar.high(), previous == null ? null : previous.high()));
             values.add(ratio(bar.low(), previous == null ? null : previous.low()));
             values.add(ratio(bar.close(), previous == null ? null : previous.close()));
-            values.add(ratio(BigDecimal.valueOf(bar.volume()), previous == null ? null : BigDecimal.valueOf(previous.volume())));
+			values.add(ratio(bar.volume(), previous == null ? null : previous.volume()));
             values.add(ratio(bar.vwap(), previous == null ? null : previous.vwap()));
             values.add(ratio(bar.transactions() == null ? null : BigDecimal.valueOf(bar.transactions()), previous == null || previous.transactions() == null ? null : BigDecimal.valueOf(previous.transactions())));
             values.add(ratio(bar.close(), bar.open()));

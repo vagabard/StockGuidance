@@ -134,9 +134,9 @@ def streaming_connection(config_path: Path) -> Any:
 			continue
 		parameters: dict[str, Any] = {"host": configuration.host, "database": configuration.database, "user": configuration.user, "password": configuration.password, "port": configuration.port, "autocommit": False}
 		if driver is MySQLDriver.CONNECTOR:
-			parameters["buffered"] = False
+			parameters.update(buffered=False, connection_timeout=30)
 		else:
-			parameters.update(charset="utf8mb4", cursorclass=module.cursors.SSCursor)
+			parameters.update(charset="utf8mb4", cursorclass=module.cursors.SSCursor, connect_timeout=30)
 		try:
 			return module.connect(**parameters)
 		except Exception:

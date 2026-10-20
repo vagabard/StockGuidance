@@ -256,7 +256,7 @@ public final class LegacyDownloadComparator {
             throw new IllegalArgumentException("Downloaded timestamp belongs to another session");
         }
         Bar bar = new Bar(ticker, price(value, "o"), price(value, "h"), price(value, "l"), price(value, "c"),
-                integer(value, "v"), nullablePrice(value, "vw"), nullableInteger(value, "n"));
+                decimal(value, "v"), nullablePrice(value, "vw"), nullableInteger(value, "n"));
         if (bar.low().compareTo(bar.open()) > 0 || bar.low().compareTo(bar.close()) > 0 ||
                 bar.high().compareTo(bar.open()) < 0 || bar.high().compareTo(bar.close()) < 0 || bar.low().compareTo(bar.high()) > 0) {
             throw new IllegalArgumentException("Downloaded OHLC values are inconsistent");
@@ -278,6 +278,18 @@ public final class LegacyDownloadComparator {
             throw new IllegalArgumentException("Downloaded integer field is invalid");
         }
         return field.longValue();
+    }
+
+    private static BigDecimal decimal(JsonNode value, String name) {
+        JsonNode field = value.get(name);
+        if (field == null || (!field.isNumber() && !field.isTextual())) {
+            throw new IllegalArgumentException("Downloaded decimal field is invalid");
+        }
+        BigDecimal result = new BigDecimal(field.asText());
+        if (result.signum() < 0 || !result.abs().equals(result)) {
+            throw new IllegalArgumentException("Downloaded decimal field is invalid");
+        }
+        return result.stripTrailingZeros();
     }
 
     private static BigDecimal price(JsonNode value, String name) {
@@ -318,7 +330,7 @@ public final class LegacyDownloadComparator {
     private record FileEntry(LocalDate date, Path path) { }
     private record Inventory(List<FileEntry> files) { }
     private record FileSnapshot(LocalDate date, Map<String, Bar> bars) { }
-    private record Bar(String ticker, BigDecimal open, BigDecimal high, BigDecimal low, BigDecimal close, long volume, BigDecimal vwap, Long transactions) { }
+    private record Bar(String ticker, BigDecimal open, BigDecimal high, BigDecimal low, BigDecimal close, BigDecimal volume, BigDecimal vwap, Long transactions) { }
     private record DbBar(LocalDate date, String ticker, Bar bar) { }
 
     private static final class DbCursor {
@@ -338,7 +350,7 @@ public final class LegacyDownloadComparator {
             LocalDate date = rows.getDate(1).toLocalDate();
             String ticker = rows.getString(2);
             current = new DbBar(date, ticker, new Bar(ticker, sqlPrice(rows, 3), sqlPrice(rows, 4), sqlPrice(rows, 5), sqlPrice(rows, 6),
-                    rows.getLong(7), sqlNullablePrice(rows, 8), sqlNullableLong(rows, 9)));
+                    rows.getBigDecimal(7).stripTrailingZeros(), sqlNullablePrice(rows, 8), sqlNullableLong(rows, 9)));
         }
 
         private static BigDecimal sqlPrice(ResultSet rows, int index) throws SQLException {

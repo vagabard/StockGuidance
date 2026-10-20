@@ -25,7 +25,7 @@ public final class ValidationContent {
             value.put("h", bar.high().toPlainString());
             value.put("l", bar.low().toPlainString());
             value.put("c", bar.close().toPlainString());
-            value.put("v", bar.volume());
+            value.put("v", bar.volume().stripTrailingZeros().toPlainString());
             if (bar.vwap() == null) {
                 value.putNull("vw");
             } else {
@@ -67,7 +67,11 @@ public final class ValidationContent {
     }
 
     public record RawBar(String ticker, BigDecimal open, BigDecimal high, BigDecimal low, BigDecimal close,
-                         long volume, BigDecimal vwap, Long transactions) {
+                         BigDecimal volume, BigDecimal vwap, Long transactions) {
+        public RawBar(String ticker, BigDecimal open, BigDecimal high, BigDecimal low, BigDecimal close,
+                      long volume, BigDecimal vwap, Long transactions) {
+            this(ticker, open, high, low, close, BigDecimal.valueOf(volume), vwap, transactions);
+        }
     }
 
     public record DerivedRow(String ticker, List<Double> values) {

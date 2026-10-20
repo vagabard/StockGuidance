@@ -20,12 +20,13 @@ def _validate_windows(windows: Iterable[int]) -> tuple[int, ...]:
 	return values
 
 
-def update_schema_statements(table_names: TableNames) -> tuple[str, ...]:
+def update_schema_statements(table_names: TableNames, *, case_sensitive_tickers: bool = True) -> tuple[str, ...]:
+	ticker_definition = "label VARCHAR(16) COLLATE utf8mb4_bin NOT NULL UNIQUE" if case_sensitive_tickers else "label VARCHAR(16) NOT NULL UNIQUE"
 	return (
 		f"CREATE TABLE IF NOT EXISTS {quote_identifier(table_names.table(TableRole.DATA_CONFIGURATION))} (id INT PRIMARY KEY, configuration_key CHAR(64) NOT NULL, source_key CHAR(64) NOT NULL, source_family VARCHAR(64) NOT NULL, endpoint VARCHAR(512) NOT NULL, market VARCHAR(64) NOT NULL, universe VARCHAR(128) NOT NULL, interval_code VARCHAR(8) NOT NULL, raw_price_split_adjusted TINYINT NOT NULL, raw_price_dividend_adjusted TINYINT NOT NULL, raw_price_vendor_defined_adjustment VARCHAR(128) NULL, created_at VARCHAR(40) NOT NULL) ENGINE=InnoDB",
 		f"CREATE TABLE IF NOT EXISTS {quote_identifier(table_names.sessions)} (id INT AUTO_INCREMENT PRIMARY KEY, transaction_date DATE NOT NULL UNIQUE) ENGINE=InnoDB",
-		f"CREATE TABLE IF NOT EXISTS {quote_identifier(table_names.tickers)} (id INT AUTO_INCREMENT PRIMARY KEY, label VARCHAR(16) NOT NULL UNIQUE) ENGINE=InnoDB",
-		f"CREATE TABLE IF NOT EXISTS {quote_identifier(table_names.prices)} (ticker_id INT NOT NULL, date_id INT NOT NULL, open DECIMAL(19,4), high DECIMAL(19,4), low DECIMAL(19,4), close DECIMAL(19,4), volume BIGINT, vwap DECIMAL(19,4), transactions BIGINT, PRIMARY KEY(ticker_id, date_id)) ENGINE=InnoDB",
+		f"CREATE TABLE IF NOT EXISTS {quote_identifier(table_names.tickers)} (id INT AUTO_INCREMENT PRIMARY KEY, {ticker_definition}) ENGINE=InnoDB",
+		f"CREATE TABLE IF NOT EXISTS {quote_identifier(table_names.prices)} (ticker_id INT NOT NULL, date_id INT NOT NULL, open DECIMAL(28,8), high DECIMAL(28,8), low DECIMAL(28,8), close DECIMAL(28,8), volume DECIMAL(20,8), vwap DECIMAL(42,22), transactions BIGINT, PRIMARY KEY(ticker_id, date_id)) ENGINE=InnoDB",
 		f"CREATE TABLE IF NOT EXISTS {quote_identifier(table_names.deltas)} (ticker_id INT NOT NULL, date_id INT NOT NULL, " + ", ".join(f"{column} DOUBLE NULL" for column in DERIVED_COLUMNS) + ", PRIMARY KEY(ticker_id, date_id)) ENGINE=InnoDB",
 		f"CREATE TABLE IF NOT EXISTS {quote_identifier(table_names.imports)} (session_date DATE PRIMARY KEY, raw_id VARCHAR(64) NOT NULL, available_at VARCHAR(40) NOT NULL, derived_dependency_id VARCHAR(64) NULL, derived_content_id VARCHAR(64) NULL) ENGINE=InnoDB",
 		f"CREATE TABLE IF NOT EXISTS {quote_identifier(table_names.table(TableRole.VERIFICATIONS))} (id INT AUTO_INCREMENT PRIMARY KEY, comparison_type VARCHAR(32) NOT NULL, baseline_key CHAR(64) NOT NULL, candidate_key CHAR(64) NOT NULL, status VARCHAR(16) NOT NULL, requested_count INT NOT NULL, completed_count INT NOT NULL, random_seed BIGINT NOT NULL, registered_at VARCHAR(40) NOT NULL, completed_at VARCHAR(40) NULL, detail VARCHAR(512) NULL) ENGINE=InnoDB",
@@ -195,9 +196,10 @@ def register_configuration_verification(source: SourceConfig, connect: WriteConn
 def initialize_update_schema(source: SourceConfig, connect: WriteConnectionFactory, table_names: TableNames | None = None) -> None:
 	"""Explicit updater setup only; DDL is separate from ingestion transactions."""
 	selected_names = table_names or load_table_names()
-	statements = update_schema_statements(selected_names)
 	connection = connect(source.database_config)
 	try:
+		sqlite_compatible = type(getattr(connection, "connection", None)).__module__ == "sqlite3"
+		statements = update_schema_statements(selected_names, case_sensitive_tickers=not sqlite_compatible)
 		cursor = connection.cursor()
 		try:
 			for statement in statements:

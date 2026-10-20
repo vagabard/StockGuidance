@@ -323,17 +323,17 @@ public final class ArchiveStudyMain {
         BigDecimal high = price(nullableDecimal(rows, 4));
         BigDecimal low = price(nullableDecimal(rows, 5));
         BigDecimal close = price(nullableDecimal(rows, 6));
-        Long volume = nullableLong(rows, 7);
+        BigDecimal volume = nullableDecimal(rows, 7);
         BigDecimal vwap = optionalPrice(nullableDecimal(rows, 8));
         Long transactions = nullableLong(rows, 9);
-        if (open == null || high == null || low == null || close == null || volume == null || volume < 0 || (transactions != null && transactions < 0) || (vwap != null && vwap.signum() <= 0) || low.compareTo(open.min(close)) > 0 || high.compareTo(open.max(close)) < 0 || low.compareTo(high) > 0) {
+        if (open == null || high == null || low == null || close == null || volume == null || volume.signum() < 0 || (transactions != null && transactions < 0) || (vwap != null && vwap.signum() <= 0) || low.compareTo(open.min(close)) > 0 || high.compareTo(open.max(close)) < 0 || low.compareTo(high) > 0) {
             throw new IllegalArgumentException("Invalid derived raw value");
         }
         return new ValidationContent.RawBar(ticker, open, high, low, close, volume, vwap, transactions);
     }
 
     private static BigDecimal price(BigDecimal value) {
-        if (value == null || value.signum() <= 0 || value.compareTo(new BigDecimal("1000000000000000")) >= 0) return null;
+        if (value == null || value.signum() <= 0 || value.compareTo(new BigDecimal("1e60")) >= 0) return null;
         BigDecimal result = value.setScale(4, java.math.RoundingMode.HALF_UP);
         return result.signum() <= 0 ? null : result;
     }

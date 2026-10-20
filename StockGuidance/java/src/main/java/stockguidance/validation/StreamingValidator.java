@@ -31,7 +31,7 @@ import java.util.TreeMap;
 
 public final class StreamingValidator {
     private static final List<String> DERIVED_COLUMNS = LegacyDerivedCalculator.COLUMNS;
-    private static final BigDecimal PRICE_LIMIT = new BigDecimal("1000000000000000");
+    private static final BigDecimal PRICE_LIMIT = new BigDecimal("1e60");
     private static final BigDecimal PRICE_SCALE = new BigDecimal("0.0001");
 
     private final ConnectionFactory connectionFactory;
@@ -573,10 +573,10 @@ public final class StreamingValidator {
         BigDecimal high = price(nullableDecimal(rows, 6));
         BigDecimal low = price(nullableDecimal(rows, 7));
         BigDecimal close = price(nullableDecimal(rows, 8));
-        Long volume = nullableLong(rows, 9);
+        BigDecimal volume = nullableDecimal(rows, 9);
         BigDecimal vwap = optionalPrice(nullableDecimal(rows, 10));
         Long transactions = nullableLong(rows, 11);
-        boolean valid = open != null && high != null && low != null && close != null && volume != null && volume >= 0 && (transactions == null || transactions >= 0) && (vwap == null || vwap.signum() > 0);
+        boolean valid = open != null && high != null && low != null && close != null && volume != null && volume.signum() >= 0 && (transactions == null || transactions >= 0) && (vwap == null || vwap.signum() > 0);
         if (valid) valid = low.compareTo(open.min(close)) <= 0 && high.compareTo(open.max(close)) >= 0 && low.compareTo(high) <= 0;
         return new RawBarResult(valid ? new ValidationContent.RawBar(ticker, open, high, low, close, volume, vwap, transactions) : null, valid);
     }

@@ -14,7 +14,7 @@ substage separately, not its entire parent stage in one conversation. A stage
 is complete only when its acceptance criteria and handoff exist. Do not interpret
 completed scaffolding as a completed production migration.
 
-**Resume here: Stage 3, Luna medium.** Stages 1–2 and their historical handoffs
+**Resume here: Stage 5c, Luna high.** Stages 1–4 and their historical handoffs
 are preserved below. Their passing reader/derived measurements remain evidence
 for those workloads, but the expanded comparison is incomplete. Stage 2c reviewed
 prerequisites and skipped timing; it did not evaluate a Java writer. SQL has not
@@ -808,3 +808,45 @@ the independent semantic reference, not only the selected backend's own formulas
   `src/stockguidance/cli/verify_archive_sample.py`. Focused validation passed:
   `python -m pytest tests/stage6/test_archive_sample.py` (5 tests). Stage 4
   source acceptance is complete; next prompt: Stage 5a0 only.
+
+### Revised Stage 5 contracts and audit — 2026-10-19
+
+- Implemented the separately gated Stage 5 contracts. The new
+  `stockguidance.cli.legacy_migration` frontend defaults to audit mode and
+  rejects `--apply` until the Stage 11/12 gates. It supports bounded identity,
+  precision, evidence, audit and fixed-cutoff snapshot operations; checkpoints
+  and reports contain no credentials or fabricated HTTP receipt metadata.
+- Stage 5a0's exact retained-archive key inventory found 33,277 keys and the
+  read-only database label inventory found 36,866 IDs: 29,882 exact matches,
+  6,984 one-to-one uppercase aliases eligible for ID-preserving rename after
+  collation migration, 103 folded collisions and one unresolved alias
+  (`KBRW` against `KBRw`/`KBrw`). The required exact-case examples include
+  `AAP`/`AAp` and `ABKPZ`/`ABKpZ`; IDs are never merged by case folding.
+  Evidence: `output/legacy-migration/ticker-identity.json`.
+- Stage 5a streamed all 5,130 retained files. It validated 42,482,212
+  records in 4,898 files and quarantined 232 files with invalid archive
+  records. Valid source maxima require `DECIMAL(28,8)` for OHLC,
+  `DECIMAL(42,22)` for VWAP and `DECIMAL(20,8)` for fractional volume;
+  transactions remain integral. The measured schema hash is
+  `00d2f5da9dbc1e0353a7fbf9da8fb9fd78aa1d0fb57ac63d2caecf3def7f6101`.
+  Evidence: `output/legacy-migration/precision-inventory.json`.
+- Stage 5b materialized typed evidence for all 4,898 valid files under
+  `output/legacy-migration/evidence/`. It stores source identity, attestation
+  ID, original path/hash, versioned exact records ID/count, validation time and
+  an explicit unknown original network receipt time. It rejects network
+  status/count/pagination fields and changed file content.
+- Stage 5d's offline snapshot contract passed a fixed aware-cutoff smoke test
+  against a materialized evidence record. It requires evidence/file hash
+  agreement, a nonfuture aware cutoff and validated-at-or-before-cutoff data;
+  it does not construct provider responses or invented observations.
+- Stage 5c's archive-side audit report covers all 5,130 retained sessions with
+  the 232 invalid files explicit, but the configured read-only database
+  connection timed out after the bounded retry. No database rows, receipts,
+  source files or schema were changed. `output/legacy-migration/audit.json`
+  therefore records `complete: false` and `database_available: false`; the
+  database-side audit, orphan counts and exact row comparison remain blocked
+  until connectivity is restored. Do not advance to Stage 6 until 5c is
+  rerun successfully.
+- Python focused validation passed: 32 Stage 5/archive contract tests; the
+  existing Stage 3/4 workflow set passed 65 tests. Offline Java validation
+  passed all 32 tests. Production DDL/repairs were not applied.

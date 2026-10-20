@@ -27,6 +27,7 @@ verify_archive_sample = "stockguidance.cli.verify_archive_sample:main"
 compare_archive_sample = "stockguidance.cli.compare_archive_sample:main"
 preview_schema = "stockguidance.cli.preview_schema:main"
 update_zscores = "stockguidance.cli.update_zscores:main"
+legacy_migration = "stockguidance.cli.legacy_migration:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8.3", "mypy>=1.15"]
