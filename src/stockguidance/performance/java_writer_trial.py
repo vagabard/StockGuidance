@@ -46,7 +46,7 @@ class WriterTrial:
 		self.schema = self.target.prepare()
 		self.names = _manifest_table_names(self.manifest)
 		self.python = MySQLPythonBaseline(self.manifest, self.target, directory / "python-reference.json")
-		java_root = Path(__file__).resolve().parents[3] / "StockGuidance" / "java"
+		java_root = Path(__file__).resolve().parents[3] / "java"
 		self.classpath = ";".join(str(java_root / value) for value in ("target/classes", "target/dependency/*", "lib/mysql-connector-j-9.6.0.jar"))
 
 	def java(self, workload: str, session: str, *, checkpoint: Path | None = None, interruption: str | None = None, fail: bool = False, manifest_path: Path | None = None) -> dict:
@@ -183,7 +183,7 @@ def run_trial(manifest_path: Path, dbinfo_file: Path, schema: str, output: Path)
 	output.parent.mkdir(parents=True, exist_ok=True)
 	repository = Path(__file__).resolve().parents[3]
 	code_files = [Path(__file__), Path(__file__).with_name("mysql_candidates.py"), Path(__file__).with_name("candidates.py")]
-	code_files.extend((repository / "StockGuidance/java/src/main/java/stockguidance/migration").glob("*.java"))
+	code_files.extend((repository / "java/src/main/java/stockguidance/migration").glob("*.java"))
 	report = {"schema_version": 1, "stage": "7a", "backend": "java", "storage_engine": "mysql",
 		"status": "incomplete", "manifest_id": manifest["manifest_id"], "recovery_checks": [], "sessions": [],
 		"comparison_eligible": False, "production_access": {"ddl": False, "dml": False},

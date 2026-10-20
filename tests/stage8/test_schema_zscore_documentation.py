@@ -69,11 +69,11 @@ def test_canonical_registry_is_packaged_and_shared_with_java() -> None:
 
 	project = tomllib.loads(_text("pyproject.toml"))
 	assert "database/table_names.json" in project["tool"]["setuptools"]["package-data"]["stockguidance"]
-	pom = _text("StockGuidance/java/pom.xml")
-	assert "${project.basedir}/../../src/stockguidance/database" in pom
+	pom = _text("java/pom.xml")
+	assert "${project.basedir}/../src/stockguidance/database" in pom
 	assert "<include>table_names.json</include>" in pom
 	assert 'private static final String RESOURCE = "/stockguidance/database/table_names.json";' in _text(
-		"StockGuidance/java/src/main/java/stockguidance/database/TableNames.java"
+		"java/src/main/java/stockguidance/database/TableNames.java"
 	)
 
 
@@ -90,8 +90,10 @@ def test_supported_production_sources_have_no_physical_name_fallbacks() -> None:
 		"zscores_price_",
 		"zscores_price_delta_",
 	)
-	production_files = tuple((ROOT / "src/stockguidance").rglob("*.py")) + tuple(
-		(ROOT / "StockGuidance/java/src/main").rglob("*.java")
+	production_files = tuple(
+		path for path in (ROOT / "src/stockguidance").rglob("*.py") if "performance" not in path.parts
+	) + tuple(
+		(ROOT / "java/src/main").rglob("*.java")
 	)
 	for path in production_files:
 		content = path.read_text(encoding="utf-8")

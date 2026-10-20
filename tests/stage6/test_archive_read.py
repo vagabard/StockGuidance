@@ -168,13 +168,13 @@ def test_worker_rolls_back_and_closes_on_parse_failure(tmp_path: Path, monkeypat
 def test_java_and_python_have_identical_real_contract(tmp_path: Path) -> None:
 	from stockguidance.cli.compare_database_downloads import _classpath
 	root = Path(__file__).resolve().parents[2]
-	if shutil.which("java") is None or not (root / "StockGuidance/java/target/classes/stockguidance/validation/ArchiveStudyMain.class").exists():
+	if shutil.which("java") is None or not (root / "java/target/classes/stockguidance/validation/ArchiveStudyMain.class").exists():
 		pytest.skip("Build the Java module before cross-language acceptance")
 	path = write_file(tmp_path, [record(v=14982.4), record(T="BBB", o="1702500000000000", h="1728750000000000", l="1522500000000000", c="1590000000000000")])
 	request = {"paths": [str(path)], "workers": 3, "mode": "files", "repeats": 1}
 	request_file = tmp_path / "request.json"
 	request_file.write_text(json.dumps(request), encoding="utf-8")
-	completed = subprocess.run(["java", "-XX:ActiveProcessorCount=3", "-XX:+UseSerialGC", "-cp", _classpath(None), "stockguidance.validation.ArchiveStudyMain", str(request_file)], capture_output=True, text=True, timeout=30, check=True)
+	completed = subprocess.run(["java", "-XX:ActiveProcessorCount=3", "-XX:+UseSerialGC", "-cp", _classpath(None), "stockguidance.validation.ArchiveStudyMain", str(request_file)], capture_output=True, text=True, timeout=30, check=True, stdin=subprocess.DEVNULL)
 	java = json.loads(completed.stdout)
 	python = run_request(dict(request, workers=1))
 	assert java["measurements"][0]["sessions"] == python["measurements"][0]["sessions"]

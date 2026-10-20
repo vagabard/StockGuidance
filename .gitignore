@@ -6,4 +6,9 @@ cache/
 *.egg-info/
 *.pt
 /tests/test_model/
-StockGuidance/java/target/
+/java/target/
+*.class
+/java/lib/mysql-connector-j-9.6.0.jar
+/java/lib/mysql-connector-j-9.6.0.zip
+
+/.junie/

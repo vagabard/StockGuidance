@@ -103,7 +103,7 @@ $env:PYTHONPATH = (Join-Path (Get-Location) 'src')
   --study-report output/legacy-migration/benchmark/study.json `
   --output output/legacy-migration/benchmark/derived `
   --dbinfo-file dbinfo.id `
-  --java-classpath 'StockGuidance/java/target/classes;StockGuidance/java/target/dependency/*;StockGuidance/java/lib/mysql-connector-j-9.6.0.jar'
+  --java-classpath 'java/target/classes;java/target/dependency/*;java/lib/mysql-connector-j-9.6.0.jar'
 ```
 
 Artifacts, intentionally ignored by Git:

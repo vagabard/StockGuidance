@@ -20,7 +20,7 @@ from stockguidance.calendar.exchange import ExchangeCalendar
 
 def _java_paths() -> str:
 
-    java_root = Path(__file__).resolve().parents[3] / "StockGuidance" / "java"
+    java_root = Path(__file__).resolve().parents[3] / "java"
     return ";".join(str(java_root / value) for value in ("target/classes", "target/dependency/*", "lib/mysql-connector-j-9.6.0.jar"))
 
 
@@ -281,7 +281,7 @@ def run_trial(manifest_path: Path, dbinfo_file: Path, schema: str, output: Path)
     output.parent.mkdir(parents=True, exist_ok=True)
     repository = Path(__file__).resolve().parents[3]
     code_files = [Path(__file__)]
-    code_files.extend((repository / "StockGuidance/java/src/main/java/stockguidance/migration").glob("Java*Score*.java"))
+    code_files.extend((repository / "java/src/main/java/stockguidance/migration").glob("Java*Score*.java"))
     report = {
         "schema_version": 1, "stage": "7b", "backend": "java", "storage_engine": "mysql",
         "status": "incomplete", "manifest_id": manifest["manifest_id"], "series": [], "recovery_checks": [],

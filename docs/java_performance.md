@@ -102,7 +102,7 @@ Stage 7 is the supported Java foundation. It uses the explicit JSON database
 configuration, typed Jackson decoding, the versioned Python/Java interchange
 contract, prepared SQL parameters, allowlisted identifiers, and read-only
 repeatable-read transactions. Run its offline checks from
-`StockGuidance/java` with `mvn -o test` and `mvn -o -DskipTests package`.
+`java` with `mvn -o test` and `mvn -o -DskipTests package`.
 
 Stage 8 is an opt-in `stockguidance.validation.ValidatorMain` backend for the
 bounded raw/derived reconciliation operation. It streams bounded read-only

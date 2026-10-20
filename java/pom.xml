@@ -34,9 +34,7 @@
         <dependency>
             <groupId>com.mysql</groupId>
             <artifactId>mysql-connector-j</artifactId>
-            <version>9.6.0</version>
-            <scope>system</scope>
-            <systemPath>${project.basedir}/lib/mysql-connector-j-9.6.0.jar</systemPath>
+            <version>9.2.0</version>
         </dependency>
         <dependency>
             <groupId>org.junit.jupiter</groupId>
@@ -54,7 +52,7 @@
                 <directory>fixtures</directory>
             </resource>
             <resource>
-                <directory>${project.basedir}/../../src/stockguidance/database</directory>
+                <directory>${project.basedir}/../src/stockguidance/database</directory>
                 <includes>
                     <include>table_names.json</include>
                 </includes>

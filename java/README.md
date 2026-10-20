@@ -12,7 +12,7 @@ The build supports Java 21 bytecode. The acceptance run used OpenJDK 26.0.2.1
 and Maven 3.9.9 on Windows 11. From `C:\Projects\StockGuidance`:
 
 ```powershell
-Set-Location StockGuidance\java
+Set-Location java
 mvn -o test
 mvn -o -DskipTests package
 ```
@@ -82,7 +82,7 @@ It retains strict duplicate-key rejection, exact decimal fields, source
 hashing, timestamp validation and records identity checks. The parser is used
 by `JavaRawBenchmarkMain` and the disposable writer path.
 
-See [`docs/benchmarkingJava.md`](../../docs/benchmarkingJava.md) for the
+See [`docs/benchmarkingJava.md`](../docs/benchmarkingJava.md) for the
 available correctness, direct writer and Stage 9a benchmark commands.
 
 ## Current database contract

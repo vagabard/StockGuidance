@@ -25,7 +25,7 @@ def parser() -> argparse.ArgumentParser:
 def _classpath(value: str | None) -> str:
 	if value:
 		return value
-	root = project_root() / "StockGuidance" / "java"
+	root = project_root() / "java"
 	classes = root / "target" / "classes"
 	dependencies = root / "target" / "dependency" / "*"
 	connector = root / "lib" / "mysql-connector-j-9.6.0.jar"

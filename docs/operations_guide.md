@@ -50,7 +50,7 @@ fetch providers, write databases, repair rows, or replace the Python default.
 Python remains the semantic reference and owns provider, calendar, feature,
 training, and simulation policy.
 
-From `StockGuidance/java`, the offline Java checks are:
+From `java`, the offline Java checks are:
 
 ```powershell
 mvn -o test

@@ -184,12 +184,12 @@ Build the Java module first, then provide the compiled classes and dependencies
 on the classpath:
 
 ```powershell
-Set-Location StockGuidance\java
+Set-Location java
 mvn -o package
-Set-Location ..\..
+Set-Location ..
 & $pythonExe -m stockguidance.cli.compare_database_downloads `
   --data-root data --dbinfo-file dbinfo.id --adjustment adjusted `
-  --java-classpath 'StockGuidance\java\target\classes;StockGuidance\java\target\dependency\*;StockGuidance\java\lib\mysql-connector-j-9.6.0.jar' `
+  --java-classpath 'java\target\classes;java\target\dependency\*;java\lib\mysql-connector-j-9.6.0.jar' `
   --format json > output/download-comparison.json
 ```
 

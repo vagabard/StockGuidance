@@ -164,7 +164,7 @@ def _sql_worker(arguments: dict[str, str]) -> dict[str, Any]:
 
 def _java_worker_command(arguments: dict[str, str]) -> list[str]:
 	repository = Path(__file__).resolve().parents[3]
-	java_root = repository / "StockGuidance" / "java"
+	java_root = repository / "java"
 	classpath = ";".join(str(java_root / value) for value in ("target/classes", "target/dependency/*", "lib/mysql-connector-j-9.6.0.jar"))
 	return [
 		"java", "-Xmx512m", "-XX:ActiveProcessorCount=3", "-XX:+UseSerialGC", "-cp", classpath,

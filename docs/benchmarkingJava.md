@@ -13,7 +13,7 @@ production schema.
 Build the Java classes and runtime dependencies:
 
 ```powershell
-Set-Location StockGuidance\java
+Set-Location java
 mvn -o test package
 ```
 
@@ -61,7 +61,7 @@ The schema must first contain the disposable candidate marker; the correctness
 trial above is one way to provision and validate it.
 
 ```powershell
-Set-Location C:\Projects\StockGuidance\StockGuidance\java
+Set-Location C:\Projects\StockGuidance\java
 $manifest = '..\..\output\legacy-migration\benchmark\candidates\manifest.json'
 $sessions = ((Get-Content $manifest -Raw | ConvertFrom-Json).fixed_targets -join ',')
 $report = '..\..\output\legacy-migration\benchmark\candidates\java-raw-manual-p3.json'
