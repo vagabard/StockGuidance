@@ -37,32 +37,13 @@ class JavaWriterCandidateTest {
     }
 
     @Test
-    void foryReaderMatchesJacksonReaderForExactArchiveContent() throws Exception {
-        Path file = directory.resolve("2024-07-01.ndjson");
-        Files.writeString(file,
-                "{\"T\":\"AAP\",\"o\":1702500000000000.0,\"h\":1702500000000000.1,\"l\":1702500000000000.0,\"c\":1702500000000000.1,\"v\":61812.9999,\"vw\":null,\"n\":10,\"t\":1719864000000}\n"
-                        + "{\"T\":\"AAp\",\"o\":10,\"h\":12,\"l\":9,\"c\":11,\"v\":14982.4,\"vw\":10.5,\"n\":null,\"t\":1719864000000}\n");
-
-        ArchiveCandidateReader.SessionArchive jackson = ArchiveCandidateReader.read(
-                file, LocalDate.of(2024, 7, 1), ArchiveCandidateReader.Parser.JACKSON);
-        ArchiveCandidateReader.SessionArchive fory = ArchiveCandidateReader.read(
-                file, LocalDate.of(2024, 7, 1), ArchiveCandidateReader.Parser.FORY);
-
-        assertEquals(jackson.fileSha256(), fory.fileSha256());
-        assertEquals(jackson.recordsId(), fory.recordsId());
-        assertEquals(jackson.bars(), fory.bars());
-    }
-
-    @Test
-    void bothReadersRejectDuplicateJsonFields() throws Exception {
+    void readerRejectsDuplicateJsonFields() throws Exception {
         Path file = directory.resolve("2024-07-01.ndjson");
         Files.writeString(file,
                 "{\"T\":\"AAP\",\"o\":10,\"o\":11,\"h\":12,\"l\":9,\"c\":11,\"v\":100,\"t\":1719864000000}\n");
 
         assertThrows(IllegalArgumentException.class, () -> ArchiveCandidateReader.read(
-                file, LocalDate.of(2024, 7, 1), ArchiveCandidateReader.Parser.JACKSON));
-        assertThrows(IllegalArgumentException.class, () -> ArchiveCandidateReader.read(
-                file, LocalDate.of(2024, 7, 1), ArchiveCandidateReader.Parser.FORY));
+                file, LocalDate.of(2024, 7, 1)));
     }
 
     @Test

@@ -75,29 +75,15 @@ refuses existing targets whose identities changed and never resets schemas.
 SQLite is available only as an explicit offline Python fixture option; its
 historical write timings are excluded from the MySQL candidate comparison.
 
-## Archive parser A/B benchmark
+## Archive parser
 
-`ArchiveCandidateReader` keeps Jackson as the default parser and exposes an
-Apache Fory JSON arm. `JavaArchiveParserBenchmarkMain` warms both parsers,
-alternates their order for each measured repetition in one JVM, and rejects
-the result if the parser record identities differ. The timing includes archive
-I/O, SHA-256, JSON decoding, validation and records identity, but excludes JVM
-startup. Fory uses the same strict duplicate-key guard as the Jackson arm.
+`ArchiveCandidateReader` uses Apache Fory JSON as its sole archive decoder.
+It retains strict duplicate-key rejection, exact decimal fields, source
+hashing, timestamp validation and records identity checks. The parser is used
+by `JavaRawBenchmarkMain` and the disposable writer path.
 
-After the Maven package has downloaded the Fory dependency, run from the
-checkout root:
-
-```powershell
-$manifest = 'output/legacy-migration/benchmark/candidates/manifest.json'
-$sessions = ((Get-Content $manifest -Raw | ConvertFrom-Json).fixed_targets -join ',')
-java -cp "StockGuidance/java/target/classes;StockGuidance/java/target/dependency/*;StockGuidance/java/lib/mysql-connector-j-9.6.0.jar" `
-  stockguidance.migration.JavaArchiveParserBenchmarkMain `
-  --manifest $manifest --sessions $sessions --warmups 1 --repetitions 4 `
-  > output/legacy-migration/benchmark/candidates/java-parser-ab.json
-```
-
-`JavaRawBenchmarkMain` also accepts `--parser jackson` or `--parser fory` for
-an end-to-end disposable-writer trial.
+See [`docs/benchmarkingJava.md`](../../docs/benchmarkingJava.md) for the
+available correctness, direct writer and Stage 9a benchmark commands.
 
 ## Current database contract
 

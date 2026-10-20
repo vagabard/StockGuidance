@@ -50,7 +50,6 @@ public final class JavaRawBenchmarkMain {
             throw new IllegalArgumentException("Disposable database registry does not match the manifest");
         }
         int preparers = Integer.parseInt(required(arguments, "preparers"));
-        ArchiveCandidateReader.Parser parser = ArchiveCandidateReader.Parser.parse(arguments.getOrDefault("parser", "jackson"));
         if (preparers != 1 && preparers != 3) throw new IllegalArgumentException("Java preparers must be one or three");
         List<LocalDate> sessions = parseSessions(required(arguments, "sessions"));
         Path checkpointDirectory = Path.of(required(arguments, "checkpoint-directory"));
@@ -71,7 +70,7 @@ public final class JavaRawBenchmarkMain {
             while (remaining.hasNext() || !pending.isEmpty()) {
                 while (remaining.hasNext() && pending.size() < 3) {
                     LocalDate session = remaining.next();
-                    pending.addLast(new PendingArchive(session, executor.submit(() -> manifest.archive(session, parser))));
+                    pending.addLast(new PendingArchive(session, executor.submit(() -> manifest.archive(session))));
                 }
                 PendingArchive next = pending.removeFirst();
                 ArchiveCandidateReader.SessionArchive archive = next.future().get();
@@ -94,7 +93,6 @@ public final class JavaRawBenchmarkMain {
         ObjectNode report = JsonNodeFactory.instance.objectNode();
         report.put("schema_version", 1);
         report.put("backend", "java");
-        report.put("parser", parser.name().toLowerCase(java.util.Locale.ROOT));
         report.put("preparers", preparers);
         report.put("status", "complete");
         report.put("rows", rows);

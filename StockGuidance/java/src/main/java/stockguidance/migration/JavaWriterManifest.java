@@ -146,14 +146,10 @@ public final class JavaWriterManifest {
     }
 
     public ArchiveCandidateReader.SessionArchive archive(LocalDate session) {
-        return archive(session, ArchiveCandidateReader.Parser.JACKSON);
-    }
-
-    public ArchiveCandidateReader.SessionArchive archive(LocalDate session, ArchiveCandidateReader.Parser parser) {
         FileEntry entry = file(session);
         if (!entry.valid()) throw new InvalidSourceException("Archive session is not adoptable: " + session);
         if (entry.path() == null) throw new InvalidSourceException("Archive path is unavailable: " + session);
-        ArchiveCandidateReader.SessionArchive archive = ArchiveCandidateReader.read(entry.path(), session, parser);
+        ArchiveCandidateReader.SessionArchive archive = ArchiveCandidateReader.read(entry.path(), session);
         if (entry.fileSha256() == null || !entry.fileSha256().equals(archive.fileSha256())) {
             throw new IllegalArgumentException("Changed Stage 6 input: " + session);
         }
