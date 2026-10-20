@@ -22,7 +22,8 @@ public final class JavaWriterMain {
             ObjectNode report = run(parse(arguments));
             System.out.print(new String(CanonicalJson.bytes(report), StandardCharsets.UTF_8));
         } catch (Exception error) {
-            System.out.print("{\"failed\":true,\"error\":\"Java writer failed\"}\n");
+            System.out.print("{\"failed\":true,\"error\":\"Java writer failed\",\"failure_type\":\""
+                    + error.getClass().getSimpleName() + "\"}\n");
             System.exit(1);
         }
     }
@@ -30,6 +31,13 @@ public final class JavaWriterMain {
     static ObjectNode run(Map<String, String> arguments) throws Exception {
         JavaWriterManifest manifest = JavaWriterManifest.read(Path.of(required(arguments, "manifest")));
         DatabaseConfiguration configuration = DatabaseConfiguration.load(Path.of(required(arguments, "dbinfo-file")));
+        String schema = required(arguments, "disposable-schema");
+        if (!schema.matches("stockguidance_disposable_[a-z0-9_]{1,39}")
+                || schema.equalsIgnoreCase(configuration.database())) {
+            throw new IllegalArgumentException("Require a distinct disposable MySQL schema");
+        }
+        configuration = new DatabaseConfiguration(configuration.host(), schema, configuration.user(),
+                configuration.password(), configuration.port(), configuration.driver(), configuration.tableNamesFile());
         if (!configuration.loadTableNames().tables().equals(manifest.tableNames().tables())) {
             throw new IllegalArgumentException("Disposable database registry does not match the manifest");
         }

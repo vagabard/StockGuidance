@@ -682,6 +682,8 @@ def run_python_baselines(manifest_path: Path, output: Path, target: Path, worklo
 		"backend": "python",
 		"workloads": trials,
 		"protocol": {"first_plus_warm_repetitions": repetitions, "preparers": [1, 3], "writers": 1, "queued_sessions_max": 3, "native_threads": 1, "timeout_seconds": timeout_seconds, "database_server_metrics": "unavailable: disposable SQLite target", "java_sql_timings": "pending Stage 7/8"},
+		"comparison_eligible": False,
+		"storage_engine": "sqlite",
 		"correctness": {"raw_decimal_and_case": True, "derived_tolerance": "existing persistence tolerance", "zscore_float32_and_status": True, "recovery": {"rollback": "transactional rollback path", "restart": "checkpoint after commit", "idempotency": "unchanged rerun scenario"}},
 		"production_access": {"ddl": False, "dml": False, "read_only_extraction": False},
 	}
@@ -699,6 +701,7 @@ def aggregate_candidate_reports(reports: tuple[Path, ...], output: Path) -> dict
 	manifest_ids = {report.get("manifest", {}).get("id") for report in loaded}
 	if len(manifest_ids) != 1:
 		raise ValueError("Stage 6 candidate reports use different manifests")
+	comparable = all(report.get("storage_engine") == "mysql" and report.get("comparison_eligible") is True for report in loaded)
 	workloads: dict[str, object] = {}
 	rows: list[dict[str, object]] = []
 	for report in loaded:
@@ -707,7 +710,8 @@ def aggregate_candidate_reports(reports: tuple[Path, ...], output: Path) -> dict
 				raise ValueError(f"Duplicate Stage 6 workload report: {workload}")
 			workloads[workload] = trials
 			end_to_end = [float(trial["end_to_end_seconds"]) for trial in trials]
-			rows.append({"workload": workload, "backend": "python", "status": "measured", "trial_count": len(trials), "first_seconds": end_to_end[0] if end_to_end else None, "warm_median_seconds": sorted(end_to_end[1:])[len(end_to_end[1:]) // 2] if len(end_to_end) > 1 else None})
+			status = "measured" if comparable else "mysql_diagnostic_only" if report.get("storage_engine") == "mysql" else "offline_sqlite_only"
+			rows.append({"workload": workload, "backend": "python", "status": status, "trial_count": len(trials), "first_seconds": end_to_end[0] if end_to_end else None, "warm_median_seconds": sorted(end_to_end[1:])[len(end_to_end[1:]) // 2] if len(end_to_end) > 1 else None})
 	for workload in WORKLOADS:
 		if workload not in workloads:
 			rows.append({"workload": workload, "backend": "python", "status": "missing", "trial_count": 0, "first_seconds": None, "warm_median_seconds": None})
@@ -717,13 +721,14 @@ def aggregate_candidate_reports(reports: tuple[Path, ...], output: Path) -> dict
 		"schema_version": REPORT_SCHEMA_VERSION,
 		"benchmark": "stockguidance-legacy-migration-stage6-candidate-study-v1",
 		"stage": 6,
-		"status": "complete" if all(workload in workloads for workload in WORKLOADS) else "incomplete",
+		"status": "complete" if all(workload in workloads for workload in WORKLOADS) and comparable else "incomplete",
 		"manifest": {"id": next(iter(manifest_ids)), "reports": [str(path.resolve()) for path in reports]},
 		"workloads": workloads,
 		"comparison_table": rows,
-		"candidate_status": {"python": "complete", "java": "pending_stage7", "sql": "pending_stage8"},
+		"candidate_status": {"python": "measured_comparable" if comparable else "reference_only_mysql_measurements_pending", "java": "pending_stage7", "sql": "pending_stage8"},
 		"selection": {"production_backend_selected": False, "selection_stage": 10, "rule": "Java and SQL require a comparable startup-inclusive warm median at least 10% faster than Python"},
 		"production_access": {"ddl": False, "dml": False, "read_only_extraction": False},
+		"comparison_eligible": comparable,
 	}
 	output.parent.mkdir(parents=True, exist_ok=True)
 	output.write_text(json.dumps(aggregate, indent=2, sort_keys=True) + "\n", encoding="utf-8")

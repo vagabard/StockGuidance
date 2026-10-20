@@ -16,11 +16,12 @@ def _path(value: str) -> Path:
 
 
 def parser() -> argparse.ArgumentParser:
-	arguments = argparse.ArgumentParser(description="Build and run the disposable Stage 6 candidate harness")
+	arguments = argparse.ArgumentParser(description="Build and run isolated MySQL migration candidates; SQLite requires explicit offline selection")
 	mode = arguments.add_mutually_exclusive_group(required=True)
 	mode.add_argument("--build-manifest", action="store_true")
 	mode.add_argument("--run-python", action="store_true")
 	mode.add_argument("--aggregate", action="store_true")
+	mode.add_argument("--run-java-writer-trial", action="store_true")
 	arguments.add_argument("--data-root", type=_path, default=Path("data"))
 	arguments.add_argument("--dbinfo-file", type=_path, default=Path("dbinfo.id"))
 	arguments.add_argument("--evaluation-plan", type=_path, default=Path("output/legacy-migration/evaluation-plan.json"))
@@ -28,7 +29,9 @@ def parser() -> argparse.ArgumentParser:
 	arguments.add_argument("--audit-report", type=_path, default=Path("output/legacy-migration/audit.json"))
 	arguments.add_argument("--manifest", type=_path, default=Path("output/legacy-migration/benchmark/candidates/manifest.json"))
 	arguments.add_argument("--output", type=_path, default=Path("output/legacy-migration/benchmark/candidates/python-baselines.json"))
-	arguments.add_argument("--target", type=_path, default=Path("output/legacy-migration/benchmark/candidates/python-disposable.sqlite"))
+	arguments.add_argument("--target", type=_path, default=Path("output/legacy-migration/benchmark/candidates/python-disposable.sqlite"), help="Offline database file, used only with --storage sqlite")
+	arguments.add_argument("--storage", choices=("mysql", "sqlite"), default="mysql")
+	arguments.add_argument("--disposable-schema")
 	arguments.add_argument("--workloads", default=",".join(WORKLOADS))
 	arguments.add_argument("--repetitions", type=int, default=4)
 	arguments.add_argument("--timeout-seconds", type=float, default=3600.0)
@@ -43,6 +46,14 @@ def _resolve(path: Path) -> Path:
 
 def main(argv: Sequence[str] | None = None) -> int:
 	arguments = parser().parse_args(argv)
+	if arguments.run_java_writer_trial:
+		from stockguidance.performance.java_writer_trial import run_trial
+
+		if not arguments.disposable_schema:
+			parser().error("--run-java-writer-trial requires --disposable-schema")
+		report = run_trial(_resolve(arguments.manifest), _resolve(arguments.dbinfo_file), arguments.disposable_schema, _resolve(arguments.output))
+		print(json.dumps({"successful": report["status"] == "complete", "report": str(_resolve(arguments.output)), "status": report["status"]}))
+		return 0 if report["status"] == "complete" else 1
 	if arguments.build_manifest:
 		manifest = build_manifest(
 			ManifestPaths(
@@ -70,7 +81,14 @@ def main(argv: Sequence[str] | None = None) -> int:
 		print(json.dumps({"successful": False, "error": "Unknown Stage 6 workload"}))
 		return 2
 	try:
-		report = run_python_baselines(_resolve(arguments.manifest), _resolve(arguments.output), _resolve(arguments.target), workloads, repetitions=arguments.repetitions, timeout_seconds=arguments.timeout_seconds)
+		if arguments.storage == "mysql":
+			from stockguidance.performance.mysql_candidates import run_mysql_baselines
+
+			if not arguments.disposable_schema:
+				parser().error("MySQL candidate trials require --disposable-schema")
+			report = run_mysql_baselines(_resolve(arguments.manifest), _resolve(arguments.dbinfo_file), arguments.disposable_schema, _resolve(arguments.output), workloads, repetitions=arguments.repetitions, timeout_seconds=arguments.timeout_seconds)
+		else:
+			report = run_python_baselines(_resolve(arguments.manifest), _resolve(arguments.output), _resolve(arguments.target), workloads, repetitions=arguments.repetitions, timeout_seconds=arguments.timeout_seconds)
 	except Exception:
 		print(json.dumps({"successful": False, "error": "Stage 6 Python baseline failed"}))
 		return 1

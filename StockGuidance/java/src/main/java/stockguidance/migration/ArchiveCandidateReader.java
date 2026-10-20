@@ -1,14 +1,18 @@
 package stockguidance.migration;
 
+import com.fasterxml.jackson.core.JsonFactory;
+import com.fasterxml.jackson.core.StreamReadFeature;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import stockguidance.json.CanonicalJson;
-import stockguidance.json.JsonSupport;
 import stockguidance.validation.ValidationContent;
 
 import java.io.ByteArrayOutputStream;
+import java.io.BufferedInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.math.BigDecimal;
@@ -30,6 +34,11 @@ public final class ArchiveCandidateReader {
     private static final BigDecimal MAX_PRICE = new BigDecimal("1e60");
     private static final BigDecimal MAX_LONG = BigDecimal.valueOf(Long.MAX_VALUE);
     private static final ZoneId EXCHANGE_ZONE = ZoneId.of("America/New_York");
+    private static final ObjectMapper READER = new ObjectMapper(JsonFactory.builder()
+            .enable(StreamReadFeature.STRICT_DUPLICATE_DETECTION).build())
+            .enable(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS)
+            .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
+            .setNodeFactory(JsonNodeFactory.withExactBigDecimals(true));
 
     private ArchiveCandidateReader() {
     }
@@ -40,14 +49,14 @@ public final class ArchiveCandidateReader {
         }
         MessageDigest digest = sha256();
         Map<String, ValidationContent.RawBar> bars = new TreeMap<>();
-        try (InputStream input = Files.newInputStream(path)) {
+        try (InputStream input = new BufferedInputStream(Files.newInputStream(path))) {
             LineReader lines = new LineReader(input, digest);
             byte[] line;
             while ((line = lines.next()) != null) {
                 if (line.length == 0) {
                     throw new IllegalArgumentException("Archive record is empty");
                 }
-                JsonNode row = JsonSupport.parse(decodeUtf8(line));
+                JsonNode row = READER.readTree(decodeUtf8(line));
                 if (!row.isObject()) {
                     throw new IllegalArgumentException("Archive record must be an object");
                 }

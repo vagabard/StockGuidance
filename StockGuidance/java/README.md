@@ -34,16 +34,20 @@ as one session transaction. Derived publication reuses
 `LegacyDerivedCalculator`, requires matching raw evidence for both neighboring
 sessions, and publishes the derived rows and dependency metadata atomically.
 
-The target must be a disposable MySQL configuration whose database contains
+Use the existing explicit MySQL configuration with a distinct
+`--disposable-schema stockguidance_disposable_...` override. Credentials stay
+in the existing configuration. The target database must contain
 the Stage 6 `stage6_disposable_metadata` marker with `production_target=false`
-and the manifest registry. The bounded entry point processes one raw or derived
+and matching schema, manifest, registry, actual DDL and validation-object hashes.
+The bounded entry point processes one raw or derived
 session and supports recovery probes:
 
 ```powershell
 java -Xmx512m -cp "target/classes;target/dependency/*;lib/mysql-connector-j-9.6.0.jar" `
   stockguidance.migration.JavaWriterMain `
   --manifest ..\..\output\legacy-migration\benchmark\candidates\manifest.json `
-  --dbinfo-file <disposable-dbinfo.id> --workload raw --session <YYYY-MM-DD> `
+  --dbinfo-file ..\..\dbinfo.id --disposable-schema <stockguidance_disposable_schema> `
+  --workload raw --session <YYYY-MM-DD> `
   --checkpoint output\legacy-migration\benchmark\candidates\java-raw-checkpoint.json
 ```
 
@@ -52,6 +56,24 @@ java -Xmx512m -cp "target/classes;target/dependency/*;lib/mysql-connector-j-9.6.
 rerun. Checkpoints are rejected when their manifest, workload, session or
 content identity is stale. This candidate is not a production writer and does
 not implement Stage 7b z-scores.
+
+From the checkout root, provision and validate a fresh disposable MySQL target
+with Python/Java shared precision, case, transaction and recovery fixtures plus
+the fixed 25 real raw/derived sessions:
+
+```powershell
+$env:PYTHONPATH = (Join-Path (Get-Location) 'src')
+# Set $pythonExe using PyCharm get_python_environment.
+& $pythonExe -m stockguidance.cli.legacy_migration_benchmark --run-java-writer-trial `
+  --dbinfo-file dbinfo.id --disposable-schema stockguidance_disposable_s7a_<unique_suffix> `
+  --output output/legacy-migration/benchmark/candidates/java-writer-mysql.json
+```
+
+The harness uses corrected Stage 5 DECIMAL types, binary ticker collation,
+InnoDB, retained IDs and equivalent ticker-validation triggers/procedure. It
+refuses existing targets whose identities changed and never resets schemas.
+SQLite is available only as an explicit offline Python fixture option; its
+historical write timings are excluded from the MySQL candidate comparison.
 
 ## Current database contract
 

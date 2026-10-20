@@ -31,6 +31,7 @@ class JavaWriterCandidateTest {
         assertEquals(2, archive.bars().size());
         assertEquals(new BigDecimal("61812.9999"), archive.bars().get("AAP").volume());
         assertEquals(0, new BigDecimal("1702500000000000.0").compareTo(archive.bars().get("AAP").open()));
+        assertEquals(0, new BigDecimal("1702500000000000.1").compareTo(archive.bars().get("AAP").high()));
         assertEquals(64, archive.recordsId().length());
         assertNotEquals(archive.bars().get("AAP"), archive.bars().get("AAp"));
     }
@@ -65,6 +66,16 @@ class JavaWriterCandidateTest {
         assertEquals(16, rows.get("AAP").size());
         assertEquals(101.4 / 100.4, rows.get("AAP").get(4), 1e-12);
         assertEquals(null, rows.get("AAp").get(5));
+    }
+
+    @Test
+    void derivedMetadataUsesPythonFloatEncoding() {
+        assertEquals("1.0", JavaWriterCandidate.pythonFloat(1.0));
+        assertEquals("-0.0", JavaWriterCandidate.pythonFloat(-0.0));
+        assertEquals("0.0001", JavaWriterCandidate.pythonFloat(0.0001));
+        assertEquals("1e-05", JavaWriterCandidate.pythonFloat(0.00001));
+        assertEquals("10000000.0", JavaWriterCandidate.pythonFloat(1e7));
+        assertEquals("1e+16", JavaWriterCandidate.pythonFloat(1e16));
     }
 
     @Test

@@ -82,6 +82,7 @@ public final class JavaWriterCandidate {
             batchUpdateBars(connection, updates);
             upsertImport(connection, session, archive.recordsId(), null, null);
             upsertCompletion(connection, RAW_SERIES, session, RAW_SERIES, archive.recordsId());
+            manifest.archive(session);
             applyInterruption(interruption, InterruptPoint.BEFORE_COMMIT);
             connection.commit();
             committed = true;
@@ -122,7 +123,7 @@ public final class JavaWriterCandidate {
         Map<String, List<Double>> expected = LegacyDerivedCalculator.expected(previousRows, currentRows, followingRows);
         Map<String, ValidationContent.DerivedRow> rows = new TreeMap<>();
         expected.forEach((ticker, values) -> rows.put(ticker, new ValidationContent.DerivedRow(ticker, values)));
-        String contentDigest = ValidationContent.derivedId(rows);
+        String contentDigest = derivedContentId(rows);
         validateCheckpoint(checkpoint, DERIVED_SERIES, session, contentDigest);
         validateTarget(connection);
         boolean committed = false;
@@ -131,14 +132,17 @@ public final class JavaWriterCandidate {
             connection.setAutoCommit(false);
             writeMetadata(connection);
             long dateId = ensureSession(connection, session);
-            requireRawImport(connection, session, current.recordsId());
-            requireRawImport(connection, dependencies.get(0), prior.recordsId());
-            requireRawImport(connection, dependencies.get(1), following.recordsId());
+            requireRawImport(connection, current);
+            requireRawImport(connection, prior);
+            requireRawImport(connection, following);
             String dependencyDigest = dependencyDigest(prior, following);
             deleteDerived(connection, dateId);
             batchInsertDerived(connection, dateId, rows);
             upsertImport(connection, session, current.recordsId(), dependencyDigest, contentDigest);
             upsertCompletion(connection, "derived", session, DERIVED_SERIES, contentDigest);
+            manifest.archive(session);
+            manifest.archive(dependencies.get(0));
+            manifest.archive(dependencies.get(1));
             applyInterruption(interruption, InterruptPoint.BEFORE_COMMIT);
             connection.commit();
             committed = true;
@@ -167,6 +171,62 @@ public final class JavaWriterCandidate {
         }
         if (!"false".equalsIgnoreCase(metadata.get("production_target"))) {
             throw new IllegalArgumentException("Java writer target is not marked disposable");
+        }
+        String schema = connection.getCatalog();
+        if (schema == null || !schema.matches("stockguidance_disposable_[a-z0-9_]{1,39}")
+                || !schema.equals(metadata.get("database_schema"))
+                || !"mysql".equals(metadata.get("database_engine"))
+                || !manifest.correctedSchemaHash().equals(metadata.get("corrected_schema_hash"))) {
+            throw new IllegalArgumentException("Disposable MySQL schema identity mismatch");
+        }
+        List<String> tableNames = new ArrayList<>();
+        try (PreparedStatement statement = connection.prepareStatement(
+                "SELECT TABLE_NAME, ENGINE FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? ORDER BY TABLE_NAME")) {
+            statement.setString(1, schema);
+            try (ResultSet rows = statement.executeQuery()) {
+                while (rows.next()) {
+                    tableNames.add(rows.getString(1));
+                    if (!"InnoDB".equals(rows.getString(2))) {
+                        throw new IllegalArgumentException("Disposable tables must be InnoDB");
+                    }
+                }
+            }
+        }
+        ArrayNode definitions = JsonNodeFactory.instance.arrayNode();
+        for (String tableName : tableNames) {
+            try (PreparedStatement statement = connection.prepareStatement("SHOW CREATE TABLE " + SqlIdentifiers.quote(tableName, tableName));
+                 ResultSet rows = statement.executeQuery()) {
+                if (!rows.next()) throw new IllegalArgumentException("Missing disposable DDL");
+                ArrayNode definition = definitions.addArray();
+                definition.add(tableName);
+                definition.add(rows.getString(2).replaceAll(" AUTO_INCREMENT=\\d+", ""));
+            }
+        }
+        if (!CanonicalJson.sha256(definitions).equals(metadata.get("actual_schema_hash"))) {
+            throw new IllegalArgumentException("Disposable MySQL DDL changed");
+        }
+        ArrayNode objects = JsonNodeFactory.instance.arrayNode();
+        String[] inventories = {
+                "SELECT TRIGGER_NAME, EVENT_OBJECT_TABLE, ACTION_TIMING, EVENT_MANIPULATION, ACTION_STATEMENT FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = ? ORDER BY TRIGGER_NAME",
+                "SELECT ROUTINE_NAME, ROUTINE_DEFINITION FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA = ? ORDER BY ROUTINE_NAME"
+        };
+        for (String inventory : inventories) {
+            ArrayNode entries = objects.addArray();
+            try (PreparedStatement statement = connection.prepareStatement(inventory)) {
+                statement.setString(1, schema);
+                try (ResultSet rows = statement.executeQuery()) {
+                    while (rows.next()) {
+                        ArrayNode entry = entries.addArray();
+                        for (int index = 1; index <= rows.getMetaData().getColumnCount(); index++) {
+                            String value = rows.getString(index);
+                            if (value == null) entry.addNull(); else entry.add(value);
+                        }
+                    }
+                }
+            }
+        }
+        if (!CanonicalJson.sha256(objects).equals(metadata.get("actual_objects_hash"))) {
+            throw new IllegalArgumentException("Disposable MySQL routines or triggers changed");
         }
         String registry = metadata.get("registry");
         if (registry == null || !registryMatches(registry)) {
@@ -372,20 +432,38 @@ public final class JavaWriterCandidate {
         }
     }
 
-    private void requireRawImport(Connection connection, LocalDate session, String recordsId) throws SQLException {
+    private void requireRawImport(Connection connection, ArchiveCandidateReader.SessionArchive archive) throws SQLException {
+        LocalDate session = archive.session();
         String sql = "SELECT raw_id FROM " + SqlIdentifiers.quote(names.imports(), "imports") + " WHERE session_date = ?";
         try (PreparedStatement statement = connection.prepareStatement(sql)) {
             statement.setObject(1, session);
             try (ResultSet rows = statement.executeQuery()) {
-                if (!rows.next() || !recordsId.equals(rows.getString(1)) || rows.next()) {
+                if (!rows.next() || !archive.recordsId().equals(rows.getString(1)) || rows.next()) {
                     throw new IllegalArgumentException("Raw dependency is not adopted: " + session);
                 }
             }
+        }
+        Map<String, StoredBar> stored = readStoredBars(connection, ensureSession(connection, session));
+        if (!stored.keySet().equals(archive.bars().keySet())
+                || archive.bars().entrySet().stream().anyMatch(entry -> !stored.get(entry.getKey()).matches(entry.getValue()))) {
+            throw new IllegalArgumentException("Stored raw dependency differs from adopted archive: " + session);
         }
     }
 
     private void upsertImport(Connection connection, LocalDate session, String rawId, String dependencyId, String derivedId) throws SQLException {
         String table = SqlIdentifiers.quote(names.imports(), "imports");
+        if (dependencyId == null && derivedId == null) {
+            try (PreparedStatement statement = connection.prepareStatement(
+                    "SELECT raw_id, derived_dependency_id, derived_content_id FROM " + table + " WHERE session_date = ?")) {
+                statement.setObject(1, session);
+                try (ResultSet rows = statement.executeQuery()) {
+                    if (rows.next() && rawId.equals(rows.getString(1))) {
+                        dependencyId = rows.getString(2);
+                        derivedId = rows.getString(3);
+                    }
+                }
+            }
+        }
         String update = "UPDATE " + table + " SET raw_id = ?, available_at = ?, derived_dependency_id = ?, derived_content_id = ? WHERE session_date = ?";
         try (PreparedStatement statement = connection.prepareStatement(update)) {
             statement.setString(1, rawId);
@@ -445,12 +523,47 @@ public final class JavaWriterCandidate {
     private static String dependencyDigest(ArchiveCandidateReader.SessionArchive prior,
                                            ArchiveCandidateReader.SessionArchive following) {
         ObjectNode value = JsonNodeFactory.instance.objectNode();
-        value.put("prior", prior.recordsId());
-        value.put("following", following.recordsId());
+        value.put("prior", prior.session().toString());
+        value.put("following", following.session().toString());
         ArrayNode raw = value.putArray("raw");
         raw.add(prior.recordsId());
         raw.add(following.recordsId());
         return CanonicalJson.sha256(value);
+    }
+
+    private static String derivedContentId(Map<String, ValidationContent.DerivedRow> rows) {
+        StringBuilder payload = new StringBuilder("[");
+        rows.values().stream().sorted(java.util.Comparator.comparing(ValidationContent.DerivedRow::ticker)).forEach(row -> {
+            if (payload.length() > 1) payload.append(',');
+            String ticker = new String(CanonicalJson.bytes(JsonNodeFactory.instance.textNode(row.ticker())), java.nio.charset.StandardCharsets.UTF_8);
+            payload.append('[').append(ticker, 0, ticker.length() - 1).append(",[");
+            for (int index = 0; index < row.values().size(); index++) {
+                if (index > 0) payload.append(',');
+                Double value = row.values().get(index);
+                payload.append(value == null ? "null" : pythonFloat(value));
+            }
+            payload.append("]]");
+        });
+        payload.append("]\n");
+        try {
+            return java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256")
+                    .digest(payload.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+        } catch (java.security.NoSuchAlgorithmException error) {
+            throw new IllegalStateException(error);
+        }
+    }
+
+    static String pythonFloat(double value) {
+        if (!Double.isFinite(value)) throw new IllegalArgumentException("Non-finite derived value");
+        if (value == 0) return Double.toString(value);
+        java.math.BigDecimal decimal = java.math.BigDecimal.valueOf(value).stripTrailingZeros();
+        int exponent = decimal.precision() - decimal.scale() - 1;
+        if (exponent < -4 || exponent >= 16) {
+            return decimal.movePointLeft(exponent).toPlainString() + "e"
+                    + (exponent < 0 ? "-" : "+") + String.format(java.util.Locale.ROOT, "%02d", Math.abs(exponent));
+        }
+        String text = decimal.toPlainString();
+        return text.contains(".") ? text : text + ".0";
     }
 
     private void validateCheckpoint(Path checkpoint, String workload, LocalDate session, String digest) {

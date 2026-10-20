@@ -14,7 +14,8 @@ substage separately, not its entire parent stage in one conversation. A stage
 is complete only when its acceptance criteria and handoff exist. Do not interpret
 completed scaffolding as a completed production migration.
 
-**Resume here: Stage 7a disposable JDBC trial, Luna high.** Stage 5c's complete read-only audit passed
+**Resume here: Stage 7b Java z-scores, Luna high.** Stage 7a's MySQL
+parity/recovery evidence is recorded in the latest handoff. Stage 5c's complete read-only audit passed
 its readiness gate on 2026-10-20; documented data gaps remain (see the latest
 handoff). Stages 1–4 and their historical handoffs
 are preserved below. Their passing reader/derived measurements remain evidence
@@ -87,6 +88,13 @@ numbering and measured scope; use this file's revised sequence for new work.
   by production configuration. Preview routine names and DDL through the selected
   table registry, preserve caller-controlled transaction boundaries, and do not
   introduce implicit commits inside data-publication transactions.
+- The database engine for candidate writes and comparisons is MySQL. Use a
+  distinct `stockguidance_disposable_...` schema on the configured server, with
+  corrected Stage 5 numeric types, exact-case keys, InnoDB, and applicable
+  validation triggers/routines. Read credentials from the existing `dbinfo.id`
+  and override only the disposable schema in memory. SQLite is an explicit
+  offline fixture option; its measurements cannot satisfy MySQL parity or
+  performance gates. Never add a SQLite JDBC driver to resolve a target mismatch.
 - Stop on failed source acceptance, conflicting identities, invalid mappings,
   changed input hashes, unavailable backups or failed recovery tests. Finish
   independent implementation/tests and record exactly which production work is
@@ -364,12 +372,17 @@ trial interface for `raw`, `derived` and `zscores`, an explicit disposable schem
 workload manifest, repetitions, preparer count, timeout and output path. Reuse
 compatible study infrastructure. Record actual CLI/API commands in the handoff.
 
-Create disposable schemas from corrected Stage 5 DDL and the authoritative
+Create disposable MySQL schemas from corrected Stage 5 DDL and the authoritative
 registry, including equivalent indexes, constraints and applicable production
 triggers/routines. Inventory their overhead rather than silently omitting it.
 Keep source data immutable; reset targets to identical starting states outside
 timing and report setup/reset time and disk separately. Refuse production DDL/DML
 targets. Production access is limited to explicit bounded read-only extraction.
+The benchmark CLI defaults to MySQL and requires `--disposable-schema` for
+candidate operations; `--storage sqlite` explicitly selects offline fixtures.
+Use fresh schema names for independent recovery trials. Existing schemas are
+reused only after manifest, registry, precision, actual DDL and routine/trigger
+fingerprints pass; the MySQL harness never drops or resets a schema.
 
 Implement Python reference baselines for all workloads using Stage 5 contracts,
 existing formulas, evidence and z-score semantics. Raw scenarios must include
@@ -432,8 +445,8 @@ Stage 6 in another conversation; do not bundle Stage 7 or claim partial completi
 
 ## Stage 7 — Required Java candidates (high; execute 7a then 7b)
 
-**7a — Java writer.** Prerequisite: Stage 6. Implement a bounded JDBC candidate
-for raw adoption/repair and derived persistence in disposable storage. Use
+**7a — Java writer.** Prerequisite: Stage 6. Implement a bounded MySQL JDBC candidate
+for raw adoption/repair and derived persistence in a disposable MySQL schema. Use
 BigDecimal, exact-case mappings, batch statements, and Python's input contract,
 session transactions, evidence and metadata. Reuse the existing Java derived
 formulas after Stage 5 parity updates. Include matching raw adoption without
@@ -441,7 +454,11 @@ rewriting bars and file-hash/source/dependency rechecks. Prove rollback,
 before/after-commit interruption, changed input, stale checkpoint and idempotent
 rerun behavior. Record the harness entry point and runnable command.
 
-**7b — Java z-scores.** Prerequisite: 7a. Implement both price and price-delta
+**7b — Java z-scores.** Prerequisite: passing Stage 7a MySQL trial in
+`output/legacy-migration/benchmark/candidates/java-writer-mysql.json` and its
+latest handoff. Reuse the guarded MySQL target/registry and the unchanged
+Stage 6 manifest. Historical SQLite trials do not satisfy this prerequisite.
+Implement both price and price-delta
 20/60 candidates with the Python semantic reference as oracle. Use consecutive
 exchange-session windows inclusive of the target, population variance, stable
 float64 computation and float32 persistence. Read stored `close_ratio_to_prior - 1`
@@ -505,6 +522,11 @@ Prerequisite: Stages 6–8 complete. Execute separate conversations in order:
 and SQL against the same manifest under Stage 6's protocol. Separate candidate
 debugging from measurement; changed code/schema/inputs invalidate affected trials
 and require their complete paired comparison to be rerun.
+All three backends must use equivalent disposable MySQL targets with the same
+server version, corrected column definitions, indexes and validation objects.
+Replace the historical SQLite Python write timings with MySQL measurements for
+every workload. Stage 7a correctness trials and single-process MySQL diagnostics
+are also excluded from ranking; they do not include the Stage 9 timing protocol.
 
 Include fixed targets and the chronological block, one/three-preparer results
 where applicable, first plus three warm repeats, all raw scenarios and full
@@ -907,7 +929,11 @@ the independent semantic reference, not only the selected backend's own formulas
   Next prompt: **Read docs/legacy_migration_prompts.md and execute revised
   Stage 6 only.** Stage 6 was not started by this audit recovery.
 
-### Revised Stage 6 disposable candidates completed — 2026-10-20
+### Historical Stage 6 SQLite reference trials — 2026-10-20
+
+This records the original offline implementation. The MySQL correction below
+supersedes its target and comparison-completion claims; preserve its artifacts
+as historical evidence only.
 
 - Added `stockguidance.performance.candidates` and the
   `legacy_migration_benchmark` CLI. The harness refuses source/configuration
@@ -935,13 +961,16 @@ the independent semantic reference, not only the selected backend's own formulas
   focused command is `python -m pytest tests/stage6/test_legacy_candidates.py`.
 - Reproduction commands from the checkout are:
   `PYTHONPATH=src <configured-python> -m stockguidance.cli.legacy_migration_benchmark --build-manifest`
-  and `PYTHONPATH=src <configured-python> -m stockguidance.cli.legacy_migration_benchmark --run-python --manifest output/legacy-migration/benchmark/candidates/manifest.json --workloads raw,derived,zscores`.
+  and `PYTHONPATH=src <configured-python> -m stockguidance.cli.legacy_migration_benchmark --run-python --storage sqlite --manifest output/legacy-migration/benchmark/candidates/manifest.json --workloads raw,derived,zscores`.
   Aggregate with `--aggregate --report output/legacy-migration/benchmark/candidates/python-raw.json --report output/legacy-migration/benchmark/candidates/python-derived.json --report output/legacy-migration/benchmark/candidates/python-zscores.json`.
   Java and SQL timings remain pending Stage 7/8; no production schema, rows,
   receipts, source bindings or source files were changed. Next prompt: Stage 7a
   only.
 
-### Revised Stage 7a Java writer implementation completed — 2026-10-20
+### Historical Stage 7a implementation-only handoff — 2026-10-20
+
+The implementation-only state below is superseded by the completed MySQL
+parity/recovery handoff that follows.
 
 - Added the bounded `stockguidance.migration.JavaWriterCandidate` JDBC writer
   and `stockguidance.migration.JavaWriterMain` entry point under
@@ -970,3 +999,63 @@ the independent semantic reference, not only the selected backend's own formulas
   bindings or source files changed. Stage 7b z-score implementation and all
   Java timings remain pending. Complete the disposable JDBC trial before
   starting Stage 7b.
+
+### Revised Stage 7a MySQL correction and acceptance — 2026-10-20
+
+- Stage 7a is complete. The candidate engine is MySQL 9.5.0 with InnoDB and
+  the server's strict SQL mode. The CLI defaults to MySQL; an explicit
+  `--disposable-schema` selects a separate database while credentials remain
+  in `dbinfo.id`. Schema names must begin `stockguidance_disposable_` and
+  differ from the configured production database. No production DDL/DML,
+  receipts, source bindings or retained source files changed.
+- Added `performance/mysql_candidates.py` and `performance/java_writer_trial.py`.
+  They provision registry-resolved MySQL tables with Stage 5 DECIMAL types,
+  binary ticker collation, retained ticker/date IDs and date indexes. Existing
+  targets require matching manifest, registry, corrected precision, actual DDL
+  and routine/trigger fingerprints. Targets are never dropped/reset.
+- Read-only inventory found four production raw/derived ticker-validation
+  triggers calling `check_ticker_exists`; equivalent validation is installed
+  only in the disposable schemas. The legacy `populate_daily_delta_stock_data`
+  routine is inventoried but not invoked. This supersedes Stage 6's incorrect
+  empty applicable-trigger/routine inventory.
+- Fixed decimal parsing in the Java candidate reader: Jackson now constructs
+  BigDecimal values directly, retaining `1702500000000000.1` exactly. Also
+  aligned derived dependency/content digest encoding with Python, preserved
+  derived metadata during unchanged raw adoption, and rejected altered stored
+  raw dependencies before derived publication. File identities are rechecked
+  before commit.
+- `output/legacy-migration/benchmark/candidates/java-writer-mysql.json` records
+  the unchanged manifest ID
+  `e5d9446e8bae97244edf17824be680eda6e8990bf1b80a2e6629809896022a14`,
+  source-code hashes, schema/routine inventory and passing checks for all 25
+  fixed real target sessions: 217,734 raw rows and 217,734 derived rows. Matching
+  Java adoption changed zero raw rows; every raw decimal/key matched exactly,
+  every derived column matched the existing `1e-10` relative / `1e-12` absolute
+  tolerance, and persisted dependency/content digests passed independent checks.
+  Completed schemas are `stockguidance_disposable_s7a_20261020d` and its `_fx`
+  fixture schema; earlier disposable debugging schemas are not acceptance evidence.
+  Report SHA-256:
+  `7ddbfaf71fe90e6e8fcd4f4ce1e896dc415cab8773ef3c4102b76bbb1da6720c`.
+- Eleven MySQL recovery checks passed: raw and derived rollback before commit,
+  durable commit before checkpoint, idempotent restart, missing/differing-row
+  repair, unchanged adoption preserving derived metadata, stale checkpoint,
+  changed input, corrupted stored dependency, and missing-session rejection.
+  Fixtures include fractional volume, extreme prices, exact-case `AAP`/`AAp`
+  and nullable inputs. `java-writer.json` now points to this passing trial.
+- Reproduce from the checkout after `mvn -o test package` in `StockGuidance/java`:
+  set `PYTHONPATH=src`, rediscover `$pythonExe` with `get_python_environment`,
+  cap native thread variables at one, then run
+  `& $pythonExe -m stockguidance.cli.legacy_migration_benchmark --run-java-writer-trial --dbinfo-file dbinfo.id --disposable-schema stockguidance_disposable_s7a_<fresh_suffix> --output output/legacy-migration/benchmark/candidates/java-writer-mysql.json`.
+  Use a fresh schema suffix and output for independent repeats. Java checks
+  passed 37 tests and packaging; `python -m pytest tests/stage6 -q` passed
+  121 tests. Focused MySQL/offline harness tests also passed after the final
+  precision-identity and aggregation changes.
+- Historical SQLite Python reports remain offline evidence and are excluded
+  from MySQL rankings. The new MySQL Python adapter supports the existing
+  workloads, but diagnostic runs do not supply Stage 9's startup/resource
+  measurement protocol. All three backends still need comparable MySQL
+  timings in Stages 9a–9c; no production backend is selected. Stage 7b must
+  implement and test both z-score families/windows and their stored-delta,
+  provenance/status and atomic publication contracts on this MySQL harness.
+  Next prompt: **Read docs/legacy_migration_prompts.md and execute revised
+  Stage 7b only.** Stage 7b was not started in this correction.
