@@ -14,7 +14,7 @@ substage separately, not its entire parent stage in one conversation. A stage
 is complete only when its acceptance criteria and handoff exist. Do not interpret
 completed scaffolding as a completed production migration.
 
-**Resume here: Stage 6, Luna high.** Stage 5c's complete read-only audit passed
+**Resume here: Stage 7a disposable JDBC trial, Luna high.** Stage 5c's complete read-only audit passed
 its readiness gate on 2026-10-20; documented data gaps remain (see the latest
 handoff). Stages 1–4 and their historical handoffs
 are preserved below. Their passing reader/derived measurements remain evidence
@@ -940,3 +940,33 @@ the independent semantic reference, not only the selected backend's own formulas
   Java and SQL timings remain pending Stage 7/8; no production schema, rows,
   receipts, source bindings or source files were changed. Next prompt: Stage 7a
   only.
+
+### Revised Stage 7a Java writer implementation completed — 2026-10-20
+
+- Added the bounded `stockguidance.migration.JavaWriterCandidate` JDBC writer
+  and `stockguidance.migration.JavaWriterMain` entry point under
+  `StockGuidance/java`. The candidate accepts only a disposable target marked
+  `production_target=false`, verifies the manifest registry and schema marker,
+  and records its manifest/source/schema identities in disposable metadata.
+- Raw adoption streams one exact archive session, rechecks the original file
+  hash and exact-decimal records identity, preserves unchanged bars, uses
+  exact-case ticker mappings and batch statements, and commits raw rows,
+  import evidence and completion metadata as one transaction. Derived
+  persistence reuses `LegacyDerivedCalculator`, requires matching raw
+  evidence for the target and both neighboring sessions, and records the
+  dependency/content identities atomically.
+- `ArchiveCandidateReader` preserves fractional volumes, extreme adjusted
+  prices, nullable fields and case-distinct keys such as `AAP`/`AAp`. Changed
+  source identities and stale checkpoints fail before publication. Explicit
+  before/after-commit interruption hooks support rollback and restart probes;
+  after-commit reruns remain idempotent by comparing stored canonical values.
+- Focused Java tests cover the exact reader, changed inputs, fractional and
+  extreme quantities, exact-case keys, nullable derived inputs and the
+  interruption contract. Offline Maven validation passed 36 tests:
+  `mvn -o test` from `StockGuidance/java`.
+- No disposable JDBC trial was run because the Stage 6 target is SQLite while
+  the Java module currently bundles only MySQL Connector/J; no SQLite driver or
+  target credentials were added. No production schema, rows, receipts, source
+  bindings or source files changed. Stage 7b z-score implementation and all
+  Java timings remain pending. Complete the disposable JDBC trial before
+  starting Stage 7b.

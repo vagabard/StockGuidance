@@ -23,6 +23,36 @@ the bundled jar in `lib`; it is a local system dependency rather than a
 downloaded Maven artifact. A dependent project must provide its own JDBC
 dependency instead of relying on this system-scoped path.
 
+## Stage 7a disposable writer
+
+`stockguidance.migration.JavaWriterCandidate` is the bounded Java writer for
+the Stage 6 disposable schema. It revalidates the manifest audit identity,
+archive file hashes and exact decimal record IDs before each session. Raw
+publication preserves unchanged rows, uses exact-case ticker mappings and
+batch statements, and commits raw data, import evidence and completion metadata
+as one session transaction. Derived publication reuses
+`LegacyDerivedCalculator`, requires matching raw evidence for both neighboring
+sessions, and publishes the derived rows and dependency metadata atomically.
+
+The target must be a disposable MySQL configuration whose database contains
+the Stage 6 `stage6_disposable_metadata` marker with `production_target=false`
+and the manifest registry. The bounded entry point processes one raw or derived
+session and supports recovery probes:
+
+```powershell
+java -Xmx512m -cp "target/classes;target/dependency/*;lib/mysql-connector-j-9.6.0.jar" `
+  stockguidance.migration.JavaWriterMain `
+  --manifest ..\..\output\legacy-migration\benchmark\candidates\manifest.json `
+  --dbinfo-file <disposable-dbinfo.id> --workload raw --session <YYYY-MM-DD> `
+  --checkpoint output\legacy-migration\benchmark\candidates\java-raw-checkpoint.json
+```
+
+`--interrupt before_commit` proves rollback, while
+`--interrupt after_commit` leaves durable publication for the next idempotent
+rerun. Checkpoints are rejected when their manifest, workload, session or
+content identity is stale. This candidate is not a production writer and does
+not implement Stage 7b z-scores.
+
 ## Current database contract
 
 Use `stockguidance.database.DatabaseConfiguration.load(Path)` with an explicit
@@ -66,8 +96,8 @@ use SHA-256. The Python reference encoder is
 `5e1fa46e012effbb02606d065b410e61a045f7bfddb3b7489f59205e6854ca05`.
 
 Money uses `BigDecimal` with scale four and `HALF_UP` rounding, matching the
-Python daily-price precision. No provider downloader, live writer, or model
-training port is included in Stage 7.
+Python daily-price precision. The Stage 7a writer is disposable-target-only;
+no provider downloader, production writer, or model training port is included.
 
 ## Stage 8 bounded validator
 

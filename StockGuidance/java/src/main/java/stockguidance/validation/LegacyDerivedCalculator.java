@@ -16,9 +16,9 @@ import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
 
-final class LegacyDerivedCalculator {
+public final class LegacyDerivedCalculator {
     private static final MathContext PYTHON_DECIMAL_CONTEXT = new MathContext(28, RoundingMode.HALF_EVEN);
-    static final List<String> COLUMNS = List.of(
+    public static final List<String> COLUMNS = List.of(
             "open_ratio_to_prior", "high_ratio_to_prior", "low_ratio_to_prior", "close_ratio_to_prior",
             "volume_ratio_to_prior", "vwap_ratio_to_prior", "transactions_ratio_to_prior", "change_in_price_over_day",
             "next_day_change_in_price", "zero_centered_next_day_price_change", "next_day_price_change_to_extremes_0_1",
@@ -28,7 +28,7 @@ final class LegacyDerivedCalculator {
     private LegacyDerivedCalculator() {
     }
 
-    static Map<String, List<Double>> expected(
+    public static Map<String, List<Double>> expected(
             Map<String, ValidationContent.RawBar> prior,
             Map<String, ValidationContent.RawBar> current,
             Map<String, ValidationContent.RawBar> following) {
@@ -76,7 +76,7 @@ final class LegacyDerivedCalculator {
         return result;
     }
 
-    static List<Integer> differingColumns(List<Double> actual, List<Double> expected) {
+    public static List<Integer> differingColumns(List<Double> actual, List<Double> expected) {
         List<Integer> result = new ArrayList<>();
         for (int index = 0; index < COLUMNS.size(); index++) {
             if (!equal(actual.get(index), expected.get(index))) result.add(index);
@@ -84,7 +84,7 @@ final class LegacyDerivedCalculator {
         return result;
     }
 
-    static String studyId(Map<String, List<Double>> rows) {
+    public static String studyId(Map<String, List<Double>> rows) {
         ArrayNode values = JsonNodeFactory.instance.arrayNode();
         rows.keySet().stream().sorted().forEach(ticker -> {
             ArrayNode item = values.addArray();
@@ -97,7 +97,7 @@ final class LegacyDerivedCalculator {
         return CanonicalJson.sha256(values);
     }
 
-    static Map<String, List<Double>> values(Map<String, ValidationContent.DerivedRow> rows) {
+    public static Map<String, List<Double>> values(Map<String, ValidationContent.DerivedRow> rows) {
         Map<String, List<Double>> result = new TreeMap<>();
         rows.forEach((ticker, row) -> result.put(ticker, row.values()));
         return result;
