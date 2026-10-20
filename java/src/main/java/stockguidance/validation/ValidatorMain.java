@@ -1,7 +1,9 @@
 package stockguidance.validation;
 
-import com.fasterxml.jackson.databind.node.JsonNodeFactory;
-import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.apache.fory.json.JsonObject;
+import stockguidance.json.JsonSupport;
+
+
 import stockguidance.database.DatabaseConfiguration;
 import stockguidance.database.MySqlConnectionFactory;
 import stockguidance.database.TableNames;
@@ -24,15 +26,15 @@ public final class ValidatorMain {
             DatabaseConfiguration configuration = DatabaseConfiguration.load(options.get("config"));
             TableNames tableNames = configuration.loadTableNames(options.get("table-names-file"));
             ValidationRequest request = ValidationRequest.read(options.get("request"));
-            ObjectNode report = new StreamingValidator(new MySqlConnectionFactory(), tableNames).validate(configuration, request);
+            JsonObject report = new StreamingValidator(new MySqlConnectionFactory(), tableNames).validate(configuration, request);
             String output = new String(CanonicalJson.bytes(report), StandardCharsets.UTF_8);
             if (options.containsKey("output")) {
                 Files.writeString(options.get("output"), output, StandardCharsets.UTF_8);
             }
             System.out.print(output);
-            System.exit(report.get("exit_code").intValue());
+            System.exit(((Number) report.get("exit_code")).intValue());
         } catch (Exception error) {
-            ObjectNode failure = JsonNodeFactory.instance.objectNode();
+            JsonObject failure = JsonSupport.object();
             failure.put("schema_version", 1);
             failure.put("backend", "java");
             failure.put("complete", false);

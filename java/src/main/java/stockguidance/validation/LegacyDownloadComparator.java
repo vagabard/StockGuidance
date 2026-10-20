@@ -1,6 +1,6 @@
 package stockguidance.validation;
 
-import com.fasterxml.jackson.databind.JsonNode;
+import org.apache.fory.json.JsonObject;
 import stockguidance.database.DatabaseConfiguration;
 import stockguidance.database.ReadOnlyTransaction;
 import stockguidance.database.SqlIdentifiers;
@@ -53,11 +53,11 @@ public final class LegacyDownloadComparator {
         this.configuredTableNames = tableNames;
     }
 
-    public ObjectNodeResult compare(DatabaseConfiguration configuration, Path dataRoot, LocalDate requestedStart, LocalDate requestedEnd) {
+    public ComparisonResult compare(DatabaseConfiguration configuration, Path dataRoot, LocalDate requestedStart, LocalDate requestedEnd) {
         return compare(configuration, dataRoot, requestedStart, requestedEnd, "adjusted");
     }
 
-    public ObjectNodeResult compare(DatabaseConfiguration configuration, Path dataRoot, LocalDate requestedStart, LocalDate requestedEnd, String adjustment) {
+    public ComparisonResult compare(DatabaseConfiguration configuration, Path dataRoot, LocalDate requestedStart, LocalDate requestedEnd, String adjustment) {
         if (configuration == null || dataRoot == null) {
             throw new IllegalArgumentException("Archive comparison requires explicit configuration and data root");
         }
@@ -105,7 +105,7 @@ public final class LegacyDownloadComparator {
         return new Inventory(files);
     }
 
-    private ObjectNodeResult inspect(Connection connection, Inventory inventory, LocalDate requestedStart, LocalDate requestedEnd, String adjustment, TableNames tableNames) throws SQLException {
+    private ComparisonResult inspect(Connection connection, Inventory inventory, LocalDate requestedStart, LocalDate requestedEnd, String adjustment, TableNames tableNames) throws SQLException {
         FindingCollector findings = new FindingCollector();
         if (inventory.files().isEmpty()) {
             findings.add("invalid", "archive", "No legacy NDJSON download files were found in the requested scope", null, null);
@@ -154,7 +154,7 @@ public final class LegacyDownloadComparator {
                 }
             }
         }
-        ObjectNodeResult result = new ObjectNodeResult(requestedStart, requestedEnd, adjustment, inventory.files().size(), findings);
+        ComparisonResult result = new ComparisonResult(requestedStart, requestedEnd, adjustment, inventory.files().size(), findings);
         return result;
     }
 
@@ -242,10 +242,7 @@ public final class LegacyDownloadComparator {
         }
     }
 
-    private static Bar decodeBar(JsonNode value, LocalDate expectedDate) {
-        if (value == null || !value.isObject()) {
-            throw new IllegalArgumentException("Downloaded record must be an object");
-        }
+    private static Bar decodeBar(JsonObject value, LocalDate expectedDate) {
         String ticker = text(value, "T");
         if (ticker.length() > 16 || ticker.chars().anyMatch(Character::isWhitespace)) {
             throw new IllegalArgumentException("Downloaded ticker key is invalid");
@@ -264,35 +261,35 @@ public final class LegacyDownloadComparator {
         return bar;
     }
 
-    private static String text(JsonNode value, String name) {
-        JsonNode field = value.get(name);
-        if (field == null || !field.isTextual() || field.textValue().isBlank()) {
+    private static String text(JsonObject value, String name) {
+        Object field = value.get(name);
+        if (!JsonSupport.isString(field) || JsonSupport.stringValue(field).isBlank()) {
             throw new IllegalArgumentException("Downloaded text field is invalid");
         }
-        return field.textValue();
+        return JsonSupport.stringValue(field);
     }
 
-    private static long integer(JsonNode value, String name) {
-        JsonNode field = value.get(name);
-        if (field == null || !field.isIntegralNumber() || field.isBoolean() || field.longValue() < 0) {
+    private static long integer(JsonObject value, String name) {
+        Object field = value.get(name);
+        if (!JsonSupport.isIntegralNumber(field) || JsonSupport.isBoolean(field) || JsonSupport.longIntegerValue(field) < 0) {
             throw new IllegalArgumentException("Downloaded integer field is invalid");
         }
-        return field.longValue();
+        return JsonSupport.longIntegerValue(field);
     }
 
-    private static BigDecimal decimal(JsonNode value, String name) {
-        JsonNode field = value.get(name);
-        if (field == null || (!field.isNumber() && !field.isTextual())) {
+    private static BigDecimal decimal(JsonObject value, String name) {
+        Object field = value.get(name);
+        if (!JsonSupport.isNumber(field) && !JsonSupport.isString(field)) {
             throw new IllegalArgumentException("Downloaded decimal field is invalid");
         }
-        BigDecimal result = new BigDecimal(field.asText());
+        BigDecimal result = new BigDecimal(JsonSupport.stringOrEmpty(field));
         if (result.signum() < 0 || !result.abs().equals(result)) {
             throw new IllegalArgumentException("Downloaded decimal field is invalid");
         }
         return result.stripTrailingZeros();
     }
 
-    private static BigDecimal price(JsonNode value, String name) {
+    private static BigDecimal price(JsonObject value, String name) {
         BigDecimal result = nullablePrice(value, name);
         if (result == null) {
             throw new IllegalArgumentException("Downloaded price field is missing");
@@ -300,24 +297,24 @@ public final class LegacyDownloadComparator {
         return result;
     }
 
-    private static BigDecimal nullablePrice(JsonNode value, String name) {
-        JsonNode field = value.get(name);
-        if (field == null || field.isNull()) {
+    private static BigDecimal nullablePrice(JsonObject value, String name) {
+        Object field = value.get(name);
+        if (field == null) {
             return null;
         }
-        if (!field.isNumber() && !field.isTextual()) {
+        if (!JsonSupport.isNumber(field) && !JsonSupport.isString(field)) {
             throw new IllegalArgumentException("Downloaded price field is invalid");
         }
-        BigDecimal result = new BigDecimal(field.asText()).setScale(4, RoundingMode.HALF_UP);
+        BigDecimal result = new BigDecimal(JsonSupport.stringOrEmpty(field)).setScale(4, RoundingMode.HALF_UP);
         if (result.signum() <= 0 || result.compareTo(PRICE_LIMIT) >= 0) {
             throw new IllegalArgumentException("Downloaded price is outside the supported range");
         }
         return result;
     }
 
-    private static Long nullableInteger(JsonNode value, String name) {
-        JsonNode field = value.get(name);
-        if (field == null || field.isNull()) {
+    private static Long nullableInteger(JsonObject value, String name) {
+        Object field = value.get(name);
+        if (field == null) {
             return null;
         }
         return integer(value, name);
@@ -387,14 +384,14 @@ public final class LegacyDownloadComparator {
 
     private record Finding(String category, String check, String detail, LocalDate date, String ticker) { }
 
-    public static final class ObjectNodeResult {
+    public static final class ComparisonResult {
         private final LocalDate start;
         private final LocalDate end;
         private final String adjustment;
         private final int fileCount;
         private final FindingCollector collector;
 
-        private ObjectNodeResult(LocalDate start, LocalDate end, String adjustment, int fileCount, FindingCollector collector) {
+        private ComparisonResult(LocalDate start, LocalDate end, String adjustment, int fileCount, FindingCollector collector) {
             this.start = start;
             this.end = end;
             this.adjustment = adjustment;
@@ -402,8 +399,8 @@ public final class LegacyDownloadComparator {
             this.collector = collector;
         }
 
-        public com.fasterxml.jackson.databind.node.ObjectNode report() {
-            var report = com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.objectNode();
+        public JsonObject report() {
+            JsonObject report = JsonSupport.object();
             report.put("schema_version", 1);
             report.put("backend", "java");
             report.put("operation", "compare_database_downloads");
@@ -411,20 +408,20 @@ public final class LegacyDownloadComparator {
             report.put("complete", collector.findings.isEmpty());
             report.put("failed", false);
             report.put("exit_code", collector.findings.isEmpty() ? 0 : 2);
-            var scope = report.putObject("scope");
-            if (start == null) scope.putNull("start"); else scope.put("start", start.toString());
-            if (end == null) scope.putNull("end"); else scope.put("end", end.toString());
+            JsonObject scope = JsonSupport.putObject(report, "scope");
+            scope.put("start", start == null ? null : start.toString());
+            scope.put("end", end == null ? null : end.toString());
             report.put("download_file_count", fileCount);
             report.put("finding_count", collector.findings.size());
             report.put("omitted_finding_count", collector.omitted);
-            var findings = report.putArray("findings");
+            var findings = JsonSupport.putArray(report, "findings");
             collector.findings.stream().sorted(Comparator.comparing((Finding item) -> item.date() == null ? "" : item.date().toString()).thenComparing(Finding::check).thenComparing(item -> item.ticker() == null ? "" : item.ticker())).forEach(item -> {
-                var finding = findings.addObject();
+                JsonObject finding = JsonSupport.addObject(findings);
                 finding.put("category", item.category());
                 finding.put("check", item.check());
                 finding.put("detail", item.detail());
-                if (item.date() == null) finding.putNull("session_date"); else finding.put("session_date", item.date().toString());
-                if (item.ticker() == null) finding.putNull("ticker"); else finding.put("ticker", item.ticker());
+                finding.put("session_date", item.date() == null ? null : item.date().toString());
+                finding.put("ticker", item.ticker());
             });
             return report;
         }

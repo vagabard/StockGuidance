@@ -1,6 +1,7 @@
 package stockguidance.validation;
 
-import com.fasterxml.jackson.databind.JsonNode;
+import org.apache.fory.json.JsonArray;
+import org.apache.fory.json.JsonObject;
 import stockguidance.json.CanonicalJson;
 import stockguidance.json.ContractException;
 import stockguidance.json.JsonSupport;
@@ -25,8 +26,8 @@ public final class ValidationRequest {
     private static final Set<String> EVIDENCE_FIELDS = Set.of("exchange_date", "state", "available_at", "keys", "content_id", "records_id", "record_count");
     private static final Set<String> HISTORY_FIELDS = Set.of("history_start", "history_provenance", "unresolved_limits");
 
-    private final JsonNode source;
-    private final JsonNode history;
+    private final JsonObject source;
+    private final JsonObject history;
     private final String operation;
     private final String calendarId;
     private final String calendarVersion;
@@ -37,7 +38,7 @@ public final class ValidationRequest {
     private final Map<LocalDate, SourceEvidence> sourceEvidence;
     private final int maxRows;
 
-    private ValidationRequest(JsonNode source, JsonNode history, String operation, String calendarId, String calendarVersion,
+    private ValidationRequest(JsonObject source, JsonObject history, String operation, String calendarId, String calendarVersion,
                               List<SessionSpec> sessions, LocalDate start, LocalDate end, Instant asOf,
                               Map<LocalDate, SourceEvidence> sourceEvidence, int maxRows) {
         this.source = source;
@@ -57,7 +58,7 @@ public final class ValidationRequest {
         return decode(JsonSupport.read(path));
     }
 
-    public static ValidationRequest decode(JsonNode root) {
+    public static ValidationRequest decode(JsonObject root) {
         fields(root, ROOT_FIELDS);
         if (integer(root, "schema_version") != 1) {
             throw new ContractException("Unsupported validation request version");
@@ -66,14 +67,14 @@ public final class ValidationRequest {
         if (!operation.equals("raw_derived_reconciliation")) {
             throw new ContractException("Unsupported validation operation");
         }
-        JsonNode source = object(root, "source");
+        JsonObject source = object(root, "source");
         fields(source, SOURCE_FIELDS);
-        JsonNode calendar = object(root, "calendar");
+        JsonObject calendar = object(root, "calendar");
         fields(calendar, CALENDAR_FIELDS);
         String calendarId = requiredText(calendar, "id");
         String calendarVersion = requiredText(calendar, "version");
         List<SessionSpec> sessions = sessions(array(calendar, "sessions"), calendarId);
-        JsonNode scope = object(root, "scope");
+        JsonObject scope = object(root, "scope");
         fields(scope, SCOPE_FIELDS);
         LocalDate start = date(scope, "start");
         LocalDate end = date(scope, "end");
@@ -82,24 +83,24 @@ public final class ValidationRequest {
         }
         Instant asOf = instant(scope, "as_of");
         Map<LocalDate, SourceEvidence> evidence = evidence(array(root, "source_evidence"));
-        JsonNode history = object(root, "history");
+        JsonObject history = object(root, "history");
         fields(history, HISTORY_FIELDS);
-        int maxRows = root.has("max_rows") ? integer(root, "max_rows") : 100_000;
+        int maxRows = root.containsKey("max_rows") ? integer(root, "max_rows") : 100_000;
         if (maxRows < 1 || maxRows > 1_000_000) {
             throw new ContractException("Validation row bound is outside the supported range");
         }
         if (sessions.stream().noneMatch(item -> !item.exchangeDate().isBefore(start) && !item.exchangeDate().isAfter(end))) {
             throw new ContractException("Validation scope has no calendar sessions");
         }
-        return new ValidationRequest(source.deepCopy(), history.deepCopy(), operation, calendarId, calendarVersion, sessions, start, end, asOf, evidence, maxRows);
+        return new ValidationRequest((JsonObject) JsonSupport.deepCopy(source), (JsonObject) JsonSupport.deepCopy(history), operation, calendarId, calendarVersion, sessions, start, end, asOf, evidence, maxRows);
     }
 
-    public JsonNode source() {
-        return source.deepCopy();
+    public JsonObject source() {
+        return (JsonObject) JsonSupport.deepCopy(source);
     }
 
-    public JsonNode history() {
-        return history.deepCopy();
+    public JsonObject history() {
+        return (JsonObject) JsonSupport.deepCopy(history);
     }
 
     public String operation() {
@@ -166,11 +167,12 @@ public final class ValidationRequest {
         }
     }
 
-    private static List<SessionSpec> sessions(JsonNode value, String calendarId) {
+    private static List<SessionSpec> sessions(JsonArray value, String calendarId) {
         List<SessionSpec> result = new ArrayList<>();
         LocalDate previousDate = null;
         int previousSequence = Integer.MIN_VALUE;
-        for (JsonNode item : value) {
+        for (Object rawItem : value) {
+            if (!(rawItem instanceof JsonObject item)) throw new ContractException("Validation session must be an object");
             fields(item, SESSION_FIELDS);
             LocalDate exchangeDate = date(item, "exchange_date");
             int sequence = integer(item, "sequence");
@@ -187,9 +189,10 @@ public final class ValidationRequest {
         return result;
     }
 
-    private static Map<LocalDate, SourceEvidence> evidence(JsonNode value) {
+    private static Map<LocalDate, SourceEvidence> evidence(JsonArray value) {
         Map<LocalDate, SourceEvidence> result = new LinkedHashMap<>();
-        for (JsonNode item : value) {
+        for (Object rawItem : value) {
+            if (!(rawItem instanceof JsonObject item)) throw new ContractException("Validation source evidence must be an object");
             fields(item, EVIDENCE_FIELDS);
             LocalDate date = date(item, "exchange_date");
             if (result.containsKey(date)) {
@@ -200,64 +203,61 @@ public final class ValidationRequest {
         return result;
     }
 
-    private static List<String> texts(JsonNode value) {
+    private static List<String> texts(JsonArray value) {
         List<String> result = new ArrayList<>();
-        for (JsonNode item : value) {
-            if (!item.isTextual() || item.textValue().isBlank()) {
+        for (Object item : value) {
+            if (!JsonSupport.isString(item) || JsonSupport.stringValue(item).isBlank()) {
                 throw new ContractException("Expected nonempty text array");
             }
-            result.add(item.textValue());
+            result.add(JsonSupport.stringValue(item));
         }
         return result;
     }
 
-    private static void fields(JsonNode value, Set<String> expected) {
-        if (value == null || !value.isObject()) {
+    private static void fields(JsonObject value, Set<String> expected) {
+        if (value == null) {
             throw new ContractException("Validation object is required");
         }
         Set<String> actual = new HashSet<>();
-        Iterator<String> names = value.fieldNames();
-        while (names.hasNext()) {
-            actual.add(names.next());
-        }
+        actual.addAll(value.keySet());
         if (!actual.equals(expected)) {
             throw new ContractException("Incomplete or unsupported validation fields");
         }
     }
 
-    private static JsonNode object(JsonNode root, String name) {
-        JsonNode value = root.get(name);
-        if (value == null || !value.isObject()) {
+    private static JsonObject object(JsonObject root, String name) {
+        Object value = root.get(name);
+        if (!(value instanceof JsonObject object)) {
             throw new ContractException("Expected validation object");
         }
-        return value;
+        return object;
     }
 
-    private static JsonNode array(JsonNode root, String name) {
-        JsonNode value = root.get(name);
-        if (value == null || !value.isArray()) {
+    private static JsonArray array(JsonObject root, String name) {
+        Object value = root.get(name);
+        if (!(value instanceof JsonArray array)) {
             throw new ContractException("Expected validation array");
         }
-        return value;
+        return array;
     }
 
-    private static int integer(JsonNode root, String name) {
-        JsonNode value = root.get(name);
-        if (value == null || !value.isIntegralNumber() || !value.canConvertToInt()) {
+    private static int integer(JsonObject root, String name) {
+        Object value = root.get(name);
+        if (!JsonSupport.isIntegralNumber(value) || !JsonSupport.fitsInt(value)) {
             throw new ContractException("Expected validation integer");
         }
-        return value.intValue();
+        return JsonSupport.integerValue(value);
     }
 
-    private static String requiredText(JsonNode root, String name) {
-        JsonNode value = root.get(name);
-        if (value == null || !value.isTextual() || value.textValue().isBlank()) {
+    private static String requiredText(JsonObject root, String name) {
+        Object value = root.get(name);
+        if (!JsonSupport.isString(value) || JsonSupport.stringValue(value).isBlank()) {
             throw new ContractException("Expected validation text");
         }
-        return value.textValue();
+        return JsonSupport.stringValue(value);
     }
 
-    private static LocalDate date(JsonNode root, String name) {
+    private static LocalDate date(JsonObject root, String name) {
         try {
             return LocalDate.parse(requiredText(root, name));
         } catch (DateTimeParseException error) {
@@ -265,7 +265,7 @@ public final class ValidationRequest {
         }
     }
 
-    private static Instant instant(JsonNode root, String name) {
+    private static Instant instant(JsonObject root, String name) {
         String value = requiredText(root, name);
         if (!value.endsWith("Z")) {
             throw new ContractException("Validation timestamps must use UTC Z serialization");

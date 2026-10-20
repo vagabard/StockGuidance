@@ -1,6 +1,10 @@
 package stockguidance.validation;
 
-import com.fasterxml.jackson.databind.JsonNode;
+import org.apache.fory.json.JsonObject;
+import org.apache.fory.json.JsonArray;
+import stockguidance.json.JsonSupport;
+
+
 import org.junit.jupiter.api.Test;
 import stockguidance.database.ConnectionFactory;
 import stockguidance.database.DatabaseConfiguration;
@@ -28,18 +32,19 @@ class LegacyDownloadComparatorTest {
     void exactDownloadAndDatabaseRowsAreComplete() throws Exception {
         Path root = Files.createTempDirectory("legacy-download");
         writeDownload(root, "2024-07-01", "10.0000");
-        JsonNode report = new LegacyDownloadComparator(new FixtureDatabase(false)).compare(configuration(), root, null, null).report();
-        assertEquals(0, report.get("exit_code").intValue());
-        assertEquals(0, report.get("finding_count").intValue());
+        JsonObject report = new LegacyDownloadComparator(new FixtureDatabase(false)).compare(configuration(), root, null, null).report();
+        assertEquals(0, ((Number) report.get("exit_code")).intValue());
+        assertEquals(0, ((Number) report.get("finding_count")).intValue());
     }
 
     @Test
     void valueDifferenceIsReportedWithoutAWrite() throws Exception {
         Path root = Files.createTempDirectory("legacy-download");
         writeDownload(root, "2024-07-01", "12.0000");
-        JsonNode report = new LegacyDownloadComparator(new FixtureDatabase(false)).compare(configuration(), root, null, null).report();
-        assertEquals(2, report.get("exit_code").intValue());
-        assertEquals("value", report.get("findings").get(0).get("check").textValue());
+        JsonObject report = new LegacyDownloadComparator(new FixtureDatabase(false)).compare(configuration(), root, null, null).report();
+        assertEquals(2, ((Number) report.get("exit_code")).intValue());
+        JsonObject finding = (JsonObject) ((JsonArray) report.get("findings")).get(0);
+        assertEquals("value", finding.get("check"));
     }
 
     @Test
@@ -48,9 +53,10 @@ class LegacyDownloadComparatorTest {
         Path directory = root.resolve("market_summary").resolve("2024");
         Files.createDirectories(directory);
         Files.writeString(directory.resolve("2024-07-01.ndjson"), "{\"T\":\"AAA\"}\n");
-        JsonNode report = new LegacyDownloadComparator(new FixtureDatabase(true)).compare(configuration(), root, null, null).report();
-        assertEquals(2, report.get("exit_code").intValue());
-        assertEquals("invalid", report.get("findings").get(0).get("category").textValue());
+        JsonObject report = new LegacyDownloadComparator(new FixtureDatabase(true)).compare(configuration(), root, null, null).report();
+        assertEquals(2, ((Number) report.get("exit_code")).intValue());
+        JsonObject finding = (JsonObject) ((JsonArray) report.get("findings")).get(0);
+        assertEquals("invalid", finding.get("category"));
     }
 
     @Test
@@ -65,10 +71,10 @@ class LegacyDownloadComparatorTest {
                 "\"zscore_templates\":{\"price\":\"custom_price_{window}\",\"price_delta\":\"custom_delta_{window}\"}}"));
         FixtureDatabase database = new FixtureDatabase(names, false);
 
-        JsonNode report = new LegacyDownloadComparator(database, names).compare(configuration(), root, null, null).report();
+        JsonObject report = new LegacyDownloadComparator(database, names).compare(configuration(), root, null, null).report();
 
-        assertEquals(0, report.get("exit_code").intValue());
-        assertEquals(0, report.get("finding_count").intValue());
+        assertEquals(0, ((Number) report.get("exit_code")).intValue());
+        assertEquals(0, ((Number) report.get("finding_count")).intValue());
         assertEquals(true, database.statements.stream().anyMatch(item -> item.contains("custom_prices")));
         assertEquals(true, database.statements.stream().anyMatch(item -> item.contains("custom_sessions")));
     }

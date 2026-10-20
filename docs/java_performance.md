@@ -99,7 +99,7 @@ decoded session maps before considering a port.
 ## Stage 7/8 current status
 
 Stage 7 is the supported Java foundation. It uses the explicit JSON database
-configuration, typed Jackson decoding, the versioned Python/Java interchange
+configuration, typed Fory decoding, the versioned Python/Java interchange
 contract, prepared SQL parameters, allowlisted identifiers, and read-only
 repeatable-read transactions. Run its offline checks from
 `java` with `mvn -o test` and `mvn -o -DskipTests package`.

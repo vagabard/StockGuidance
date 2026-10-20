@@ -32,7 +32,7 @@ index, provider, or database change was made.
 
 Stage 7 is complete as a typed Java foundation under
 [`StockGuidance/java/README.md`](../StockGuidance/java/README.md). The Maven
-build targets Java 21, uses Jackson 2.15.2 and JUnit Jupiter 5.13.4, and pins
+build targets Java 21, uses Apache Fory JSON and JUnit Jupiter 5.13.4, and pins
 the bundled MySQL Connector/J 9.6.0. The current source tree is separate from
 the historical prototypes, which are excluded from the build and remain
 unsupported legacy readers.

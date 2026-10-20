@@ -1,7 +1,9 @@
 package stockguidance.migration;
 
-import com.fasterxml.jackson.databind.node.JsonNodeFactory;
-import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.apache.fory.json.JsonObject;
+import stockguidance.json.JsonSupport;
+
+
 import stockguidance.database.DatabaseConfiguration;
 import stockguidance.database.MySqlConnectionFactory;
 import stockguidance.json.CanonicalJson;
@@ -19,7 +21,7 @@ public final class JavaWriterMain {
 
     public static void main(String[] arguments) {
         try {
-            ObjectNode report = run(parse(arguments));
+            JsonObject report = run(parse(arguments));
             System.out.print(new String(CanonicalJson.bytes(report), StandardCharsets.UTF_8));
         } catch (Exception error) {
             System.out.print("{\"failed\":true,\"error\":\"Java writer failed\",\"failure_type\":\""
@@ -28,7 +30,7 @@ public final class JavaWriterMain {
         }
     }
 
-    static ObjectNode run(Map<String, String> arguments) throws Exception {
+    static JsonObject run(Map<String, String> arguments) throws Exception {
         JavaWriterManifest manifest = JavaWriterManifest.read(Path.of(required(arguments, "manifest")));
         DatabaseConfiguration configuration = DatabaseConfiguration.load(Path.of(required(arguments, "dbinfo-file")));
         String schema = required(arguments, "disposable-schema");
@@ -53,7 +55,7 @@ public final class JavaWriterMain {
                     ? candidate.writeRaw(connection, session, checkpoint, interruption)
                     : candidate.writeDerived(connection, session, checkpoint, interruption);
         }
-        ObjectNode report = JsonNodeFactory.instance.objectNode();
+        JsonObject report = JsonSupport.object();
         report.put("schema_version", 1);
         report.put("backend", "java");
         report.put("candidate", "jdbc-writer");
@@ -63,7 +65,7 @@ public final class JavaWriterMain {
         report.put("status", result.status());
         report.put("committed", result.committed());
         report.put("changed_rows", result.changedRows());
-        if (result.contentDigest() == null) report.putNull("content_digest"); else report.put("content_digest", result.contentDigest());
+        report.put("content_digest", result.contentDigest());
         report.put("production_access", false);
         return report;
     }

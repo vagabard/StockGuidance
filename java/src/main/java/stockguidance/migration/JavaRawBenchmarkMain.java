@@ -1,8 +1,10 @@
 package stockguidance.migration;
 
-import com.fasterxml.jackson.databind.node.ArrayNode;
-import com.fasterxml.jackson.databind.node.JsonNodeFactory;
-import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.apache.fory.json.JsonArray;
+import org.apache.fory.json.JsonObject;
+import stockguidance.json.JsonSupport;
+
+
 import stockguidance.database.DatabaseConfiguration;
 import stockguidance.database.MySqlConnectionFactory;
 import stockguidance.json.CanonicalJson;
@@ -36,7 +38,7 @@ public final class JavaRawBenchmarkMain {
         }
     }
 
-    static ObjectNode run(Map<String, String> arguments) throws Exception {
+    static JsonObject run(Map<String, String> arguments) throws Exception {
         JavaWriterManifest manifest = JavaWriterManifest.read(Path.of(required(arguments, "manifest")));
         DatabaseConfiguration configuration = DatabaseConfiguration.load(Path.of(required(arguments, "dbinfo-file")));
         String schema = required(arguments, "disposable-schema");
@@ -58,7 +60,7 @@ public final class JavaRawBenchmarkMain {
         ExecutorService executor = Executors.newFixedThreadPool(preparers);
         ArrayDeque<PendingArchive> pending = new ArrayDeque<>();
         Iterator<LocalDate> remaining = sessions.iterator();
-        ArrayNode results = JsonNodeFactory.instance.arrayNode();
+        JsonArray results = JsonSupport.array();
         long rows = 0;
         long changedRows = 0;
         long preparationStarted = System.nanoTime();
@@ -81,7 +83,7 @@ public final class JavaRawBenchmarkMain {
                 writingFinished = System.nanoTime();
                 rows += archive.bars().size();
                 changedRows += result.changedRows();
-                ObjectNode item = results.addObject();
+                JsonObject item = JsonSupport.addObject(results);
                 item.put("session", next.session().toString());
                 item.put("rows", archive.bars().size());
                 item.put("changed_rows", result.changedRows());
@@ -90,7 +92,7 @@ public final class JavaRawBenchmarkMain {
         } finally {
             executor.shutdownNow();
         }
-        ObjectNode report = JsonNodeFactory.instance.objectNode();
+        JsonObject report = JsonSupport.object();
         report.put("schema_version", 1);
         report.put("backend", "java");
         report.put("preparers", preparers);
@@ -102,7 +104,7 @@ public final class JavaRawBenchmarkMain {
         report.put("write_wall_seconds", writingStarted == 0 ? 0 : (writingFinished - writingStarted) / 1_000_000_000.0);
         report.put("query_count", "unavailable: JDBC statement counter is not exposed by the candidate");
         report.put("transaction_unit", "one session");
-        report.set("sessions", results);
+        report.put("sessions", results);
         return report;
     }
 

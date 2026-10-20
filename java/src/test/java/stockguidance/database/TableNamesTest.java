@@ -1,6 +1,5 @@
 package stockguidance.database;
 
-import com.fasterxml.jackson.databind.JsonNode;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import stockguidance.json.ContractException;
@@ -44,6 +43,7 @@ class TableNamesTest {
         assertThrows(RuntimeException.class, () -> TableNames.decode(JsonSupport.parse(valid.replace("\"custom_price_{window}\"", "\"custom_price_{other}\""))));
         assertThrows(RuntimeException.class, () -> TableNames.decode(JsonSupport.parse(valid.replace("\"custom_imports\"", "\"custom_sessions\""))));
         assertThrows(ContractException.class, () -> JsonSupport.parse(valid.replace("\"schema_version\":1", "\"schema_version\":1,\"schema_version\":1")));
+        assertThrows(ContractException.class, () -> JsonSupport.parse("{\"tables\":{\"source\":\"one\",\"source\":\"two\"}}"));
     }
 
     @Test

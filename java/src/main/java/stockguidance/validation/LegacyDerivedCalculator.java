@@ -1,7 +1,9 @@
 package stockguidance.validation;
 
-import com.fasterxml.jackson.databind.node.ArrayNode;
-import com.fasterxml.jackson.databind.node.JsonNodeFactory;
+import org.apache.fory.json.JsonArray;
+import stockguidance.json.JsonSupport;
+
+
 import stockguidance.json.CanonicalJson;
 
 import java.math.BigDecimal;
@@ -85,12 +87,12 @@ public final class LegacyDerivedCalculator {
     }
 
     public static String studyId(Map<String, List<Double>> rows) {
-        ArrayNode values = JsonNodeFactory.instance.arrayNode();
+        JsonArray values = JsonSupport.array();
         rows.keySet().stream().sorted().forEach(ticker -> {
-            ArrayNode item = values.addArray();
+            JsonArray item = JsonSupport.addArray(values);
             item.add(ticker);
             for (Double value : rows.get(ticker)) {
-                if (value == null) item.addNull();
+                if (value == null) item.add(null);
                 else item.add(canonical(value));
             }
         });

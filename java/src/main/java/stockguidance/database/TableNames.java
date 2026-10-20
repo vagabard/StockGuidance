@@ -1,6 +1,7 @@
 package stockguidance.database;
 
-import com.fasterxml.jackson.databind.JsonNode;
+import org.apache.fory.json.JsonArray;
+import org.apache.fory.json.JsonObject;
 import stockguidance.json.ContractException;
 import stockguidance.json.JsonSupport;
 
@@ -76,7 +77,7 @@ public final class TableNames {
             if (input == null) {
                 throw new ContractException("The packaged table-names resource is missing");
             }
-            return decode(JsonSupport.readTree(input));
+            return decode(JsonSupport.readObject(input));
         } catch (IOException | RuntimeException error) {
             if (error instanceof ContractException contractException) {
                 throw contractException;
@@ -85,14 +86,14 @@ public final class TableNames {
         }
     }
 
-    public static TableNames decode(JsonNode root) {
+    public static TableNames decode(JsonObject root) {
         requireObject(root, "Table-names JSON");
         requireFields(root, Set.of("schema_version", "tables", "zscore_templates"));
-        JsonNode version = root.get("schema_version");
-        if (version == null || !version.isIntegralNumber() || !version.canConvertToInt() || version.intValue() != 1) {
+        Object version = root.get("schema_version");
+        if (!JsonSupport.isIntegralNumber(version) || !JsonSupport.fitsInt(version) || JsonSupport.integerValue(version) != 1) {
             throw new ContractException("Unsupported table-names schema version");
         }
-        JsonNode tableValues = object(root, "tables");
+        JsonObject tableValues = object(root, "tables");
         Set<String> tableFields = new HashSet<>();
         for (Role role : Role.values()) {
             tableFields.add(role.key());
@@ -102,7 +103,7 @@ public final class TableNames {
         for (Role role : Role.values()) {
             tables.put(role, validateIdentifier(text(tableValues, role.key()), role.key() + " table name"));
         }
-        JsonNode templateValues = object(root, "zscore_templates");
+        JsonObject templateValues = object(root, "zscore_templates");
         requireFields(templateValues, Set.of("price", "price_delta"));
         return new TableNames(tables, text(templateValues, "price"), text(templateValues, "price_delta"));
     }
@@ -226,29 +227,28 @@ public final class TableNames {
         return value.toLowerCase(Locale.ROOT);
     }
 
-    private static JsonNode object(JsonNode root, String name) {
-        JsonNode value = root.get(name);
+    private static JsonObject object(JsonObject root, String name) {
+        Object value = root.get(name);
         requireObject(value, name);
-        return value;
+        return (JsonObject) value;
     }
 
-    private static String text(JsonNode root, String name) {
-        JsonNode value = root.get(name);
-        if (value == null || !value.isTextual() || value.textValue().isEmpty()) {
+    private static String text(JsonObject root, String name) {
+        Object value = root.get(name);
+        if (!JsonSupport.isString(value) || JsonSupport.stringValue(value).isEmpty()) {
             throw new ContractException("Expected text for table-names field");
         }
-        return value.textValue();
+        return JsonSupport.stringValue(value);
     }
 
-    private static void requireObject(JsonNode value, String name) {
-        if (value == null || !value.isObject()) {
+    private static void requireObject(Object value, String name) {
+        if (!JsonSupport.isObject(value)) {
             throw new ContractException(name + " must be an object");
         }
     }
 
-    private static void requireFields(JsonNode value, Set<String> expected) {
-        Set<String> actual = new HashSet<>();
-        value.fieldNames().forEachRemaining(actual::add);
+    private static void requireFields(JsonObject value, Set<String> expected) {
+        Set<String> actual = new HashSet<>(value.keySet());
         if (!actual.equals(expected)) {
             throw new ContractException("Incomplete or unsupported table-names fields");
         }

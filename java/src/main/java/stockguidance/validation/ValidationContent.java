@@ -1,8 +1,10 @@
 package stockguidance.validation;
 
-import com.fasterxml.jackson.databind.node.ArrayNode;
-import com.fasterxml.jackson.databind.node.JsonNodeFactory;
-import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.apache.fory.json.JsonArray;
+import org.apache.fory.json.JsonObject;
+import stockguidance.json.JsonSupport;
+
+
 import stockguidance.json.CanonicalJson;
 
 import java.math.BigDecimal;
@@ -17,9 +19,9 @@ public final class ValidationContent {
     }
 
     public static String rawId(Map<String, RawBar> bars) {
-        ArrayNode rows = JsonNodeFactory.instance.arrayNode();
+        JsonArray rows = JsonSupport.array();
         bars.values().stream().sorted(Comparator.comparing(RawBar::ticker)).forEach(bar -> {
-            ObjectNode value = JsonNodeFactory.instance.objectNode();
+            JsonObject value = JsonSupport.object();
             value.put("T", bar.ticker());
             value.put("o", bar.open().toPlainString());
             value.put("h", bar.high().toPlainString());
@@ -27,12 +29,12 @@ public final class ValidationContent {
             value.put("c", bar.close().toPlainString());
             value.put("v", bar.volume().stripTrailingZeros().toPlainString());
             if (bar.vwap() == null) {
-                value.putNull("vw");
+                value.put("vw", null);
             } else {
                 value.put("vw", bar.vwap().toPlainString());
             }
             if (bar.transactions() == null) {
-                value.putNull("n");
+                value.put("n", null);
             } else {
                 value.put("n", bar.transactions());
             }
@@ -42,13 +44,13 @@ public final class ValidationContent {
     }
 
     public static String derivedId(Map<String, DerivedRow> rows) {
-        ArrayNode values = JsonNodeFactory.instance.arrayNode();
+        JsonArray values = JsonSupport.array();
         rows.values().stream().sorted(Comparator.comparing(DerivedRow::ticker)).forEach(row -> {
-            ArrayNode item = values.addArray();
+            JsonArray item = JsonSupport.addArray(values);
             item.add(row.ticker());
             for (Double value : row.values()) {
                 if (value == null) {
-                    item.addNull();
+                    item.add(null);
                 } else {
                     item.add(value);
                 }
@@ -58,7 +60,7 @@ public final class ValidationContent {
     }
 
     public static String dependencyId(String priorRawId, String currentRawId, String followingRawId) {
-        ArrayNode values = JsonNodeFactory.instance.arrayNode();
+        JsonArray values = JsonSupport.array();
         values.add("legacy-open-to-close-v1");
         values.add(priorRawId);
         values.add(currentRawId);

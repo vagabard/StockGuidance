@@ -1,6 +1,7 @@
 package stockguidance.validation;
 
-import com.fasterxml.jackson.databind.JsonNode;
+import org.apache.fory.json.JsonArray;
+import org.apache.fory.json.JsonObject;
 import org.junit.jupiter.api.Test;
 import stockguidance.database.DatabaseConfiguration;
 import stockguidance.database.TableNames;
@@ -29,11 +30,12 @@ class StreamingValidatorTest {
     @Test
     void cleanBoundedReconciliationUsesCalendarChronologyAndRollsBack() {
         Fixture fixture = new Fixture();
-        JsonNode report = fixture.validator().validate(fixture.configuration(), fixture.request);
+        JsonObject report = fixture.validator().validate(fixture.configuration(), fixture.request);
 
-        assertTrue(report.get("complete").booleanValue());
-        assertEquals(0, report.get("exit_code").intValue());
-        assertEquals(List.of("AAA"), textValues(report.get("sessions").get(0).get("raw_valid_keys")));
+        assertTrue((Boolean) report.get("complete"));
+        assertEquals(0, ((Number) report.get("exit_code")).intValue());
+        JsonObject firstSession = (JsonObject) ((JsonArray) report.get("sessions")).get(0);
+        assertEquals(List.of("AAA"), textValues((JsonArray) firstSession.get("raw_valid_keys")));
         assertEquals(1, fixture.database.rollbackCount);
         assertEquals(0, fixture.database.commitCount);
         assertTrue(fixture.database.statements.stream().allMatch(item -> item.startsWith("SELECT")));
@@ -42,10 +44,10 @@ class StreamingValidatorTest {
     @Test
     void nullableValuesRemainNullableAndDoNotBecomeZero() {
         Fixture fixture = new Fixture();
-        JsonNode report = fixture.validator().validate(fixture.configuration(), fixture.request);
+        JsonObject report = fixture.validator().validate(fixture.configuration(), fixture.request);
 
-        assertTrue(report.get("complete").booleanValue());
-        assertEquals(0, report.get("findings").size());
+        assertTrue((Boolean) report.get("complete"));
+        assertEquals(0, ((JsonArray) report.get("findings")).size());
     }
 
     @Test
@@ -53,24 +55,25 @@ class StreamingValidatorTest {
         Fixture fixture = new Fixture();
         fixture.rawRows.add(fixture.rawRow(10, 1, LocalDate.of(2024, 7, 2), "AAA"));
         fixture.rawRows.add(fixture.rawRow(999, 1, null, "AAA"));
-        JsonNode report = fixture.validator().validate(fixture.configuration(), fixture.request);
+        JsonObject report = fixture.validator().validate(fixture.configuration(), fixture.request);
 
-        assertFalse(report.get("complete").booleanValue());
+        assertFalse((Boolean) report.get("complete"));
         assertTrue(hasCheck(report, "duplicate"));
         assertTrue(hasCheck(report, "orphan"));
-        assertEquals(2, report.get("sessions").get(0).get("raw_count").intValue());
+        JsonObject session = (JsonObject) ((JsonArray) report.get("sessions")).get(0);
+        assertEquals(2, ((Number) session.get("raw_count")).intValue());
     }
 
     @Test
     void lateReceiptAndMissingMappingDoNotReadFutureOrUseIdsAsChronology() {
         Fixture late = new Fixture();
         late.receiptRows.set(1, late.receiptRow(LocalDate.of(2024, 7, 2), late.rawIds.get(LocalDate.of(2024, 7, 2)), "2024-07-06T21:00:00Z", late.dependencyId, late.derivedId));
-        JsonNode lateReport = late.validator().validate(late.configuration(), late.request);
-        assertEquals("not_yet_available", lateReport.get("sessions").get(0).get("state").textValue());
+        JsonObject lateReport = late.validator().validate(late.configuration(), late.request);
+        assertEquals("not_yet_available", ((JsonObject) ((JsonArray) lateReport.get("sessions")).get(0)).get("state"));
 
         Fixture gap = new Fixture();
         gap.dateRows.removeIf(row -> row[1].equals(java.sql.Date.valueOf("2024-07-02")));
-        JsonNode gapReport = gap.validator().validate(gap.configuration(), gap.request);
+        JsonObject gapReport = gap.validator().validate(gap.configuration(), gap.request);
         assertTrue(hasCategory(gapReport, "missing"));
         assertTrue(hasCheck(gapReport, "session"));
     }
@@ -80,11 +83,13 @@ class StreamingValidatorTest {
         Fixture fixture = new Fixture();
         Object[] row = fixture.derivedRows.get(0);
         row[5] = 9.0;
-        JsonNode report = fixture.validator().validate(fixture.configuration(), fixture.request);
+        JsonObject report = fixture.validator().validate(fixture.configuration(), fixture.request);
 
-        assertFalse(report.get("complete").booleanValue());
+        assertFalse((Boolean) report.get("complete"));
         assertTrue(hasCheck(report, "legacy_derived"));
-        assertEquals("rebuild_legacy_derived", report.get("repair_plan").get("items").get(0).get("action").textValue());
+        JsonObject plan = (JsonObject) report.get("repair_plan");
+        JsonObject item = (JsonObject) ((JsonArray) plan.get("items")).get(0);
+        assertEquals("rebuild_legacy_derived", item.get("action"));
     }
 
     @Test
@@ -97,9 +102,9 @@ class StreamingValidatorTest {
                 "\"zscore_templates\":{\"price\":\"sg_price_{window}\",\"price_delta\":\"sg_delta_{window}\"}}"));
         Fixture fixture = new Fixture(names);
 
-        JsonNode report = fixture.validator().validate(fixture.configuration(), fixture.request);
+        JsonObject report = fixture.validator().validate(fixture.configuration(), fixture.request);
 
-        assertTrue(report.get("complete").booleanValue());
+        assertTrue((Boolean) report.get("complete"));
         assertTrue(fixture.database.statements.stream().anyMatch(item -> item.contains("sg_source")));
         assertTrue(fixture.database.statements.stream().anyMatch(item -> item.contains("sg_sessions")));
         assertTrue(fixture.database.statements.stream().anyMatch(item -> item.contains("sg_prices")));
@@ -107,25 +112,32 @@ class StreamingValidatorTest {
         assertTrue(fixture.database.statements.stream().anyMatch(item -> item.contains("sg_imports")));
     }
 
-    private static boolean hasCheck(JsonNode report, String check) {
-        for (JsonNode finding : report.get("findings")) {
-            if (finding.get("check").textValue().equals(check)) return true;
+    private static boolean hasCheck(JsonObject report, String check) {
+        for (Object rawFinding : (JsonArray) report.get("findings")) {
+            JsonObject finding = (JsonObject) rawFinding;
+            if (check.equals(finding.get("check"))) return true;
         }
         return false;
     }
 
-    private static boolean hasCategory(JsonNode report, String category) {
-        for (JsonNode finding : report.get("findings")) {
-            if (finding.get("category").textValue().equals(category)) return true;
+    private static boolean hasCategory(JsonObject report, String category) {
+        for (Object rawFinding : (JsonArray) report.get("findings")) {
+            JsonObject finding = (JsonObject) rawFinding;
+            if (category.equals(finding.get("category"))) return true;
         }
         return false;
     }
 
-    private static List<String> textValues(JsonNode values) {
+    private static List<String> textValues(JsonObject object) {
+        return textValues((JsonArray) object.get("raw_valid_keys"));
+    }
+
+    private static List<String> textValues(JsonArray values) {
         List<String> result = new ArrayList<>();
-        for (JsonNode value : values) result.add(value.textValue());
+        for (Object value : values) result.add((String) value);
         return result;
     }
+
 
     private static final class Fixture {
         private final TableNames tableNames;

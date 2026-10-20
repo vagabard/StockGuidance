@@ -3,7 +3,15 @@
   <component name="Black">
     <option name="sdkName" value="Python 3.14 (StockGuidance)" />
   </component>
-  <component name="ProjectRootManager" version="2" languageLevel="JDK_27" project-jdk-name="~\AppData\Local\Python\bin\python.exe" project-jdk-type="Python SDK" />
+  <component name="ExternalStorageConfigurationManager" enabled="true" />
+  <component name="MavenProjectsManager">
+    <option name="originalFiles">
+      <list>
+        <option value="$PROJECT_DIR$/java/pom.xml" />
+      </list>
+    </option>
+  </component>
+  <component name="ProjectRootManager" version="2" languageLevel="JDK_26" project-jdk-name="26" project-jdk-type="JavaSDK" />
   <component name="PythonCompatibilityInspectionAdvertiser">
     <option name="version" value="3" />
   </component>

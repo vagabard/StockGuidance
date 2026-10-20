@@ -2,6 +2,8 @@ package stockguidance.validation;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.apache.fory.json.JsonArray;
+import org.apache.fory.json.JsonObject;
 import stockguidance.json.JsonSupport;
 
 import java.nio.file.Files;
@@ -20,13 +22,16 @@ class ArchiveStudyTest {
     void serialAndParallelProduceTheSameDigest() throws Exception {
         Path file = directory.resolve("2024-07-01.ndjson");
         Files.writeString(file, "{\"T\":\"AAA\",\"o\":10,\"h\":12,\"l\":9,\"c\":11,\"v\":100,\"t\":1719864000000}\n");
-        var request = com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.objectNode();
-        request.putArray("paths").add(file.toString());
-        request.put("mode", "files").put("workers", 1).put("repeats", 2);
+        var request = JsonSupport.object();
+        JsonArray paths = JsonSupport.putArray(request, "paths");
+        paths.add(file.toString());
+        request.put("mode", "files"); request.put("workers", 1); request.put("repeats", 2);
         var serial = ArchiveStudyMain.run(request);
         request.put("workers", 3);
         var parallel = ArchiveStudyMain.run(request);
-        assertEquals(serial.path("measurements").get(0).path("digest"), parallel.path("measurements").get(1).path("digest"));
+        JsonArray serialMeasurements = (JsonArray) serial.get("measurements");
+        JsonArray parallelMeasurements = (JsonArray) parallel.get("measurements");
+        assertEquals(((JsonObject) serialMeasurements.get(0)).get("digest"), ((JsonObject) parallelMeasurements.get(1)).get("digest"));
     }
 
     @Test
@@ -34,9 +39,9 @@ class ArchiveStudyTest {
         assertThrows(IllegalArgumentException.class, () -> ArchiveStudyMain.run(JsonSupport.parse("{\"workers\":4,\"mode\":\"files\"}")));
         Path file = directory.resolve("2024-07-01.ndjson");
         Files.writeString(file, "{\"T\":\"AAA\",\"o\":10,\"h\":12,\"l\":9,\"c\":11,\"v\":100,\"t\":1719864000000,\"n\":9223372036854775808}\n");
-        var request = com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.objectNode();
-        request.putArray("paths").add(file.toString());
-        request.put("mode", "files").put("workers", 1).put("repeats", 1);
+        var request = JsonSupport.object();
+        JsonSupport.putArray(request, "paths").add(file.toString());
+        request.put("mode", "files"); request.put("workers", 1); request.put("repeats", 1);
         assertThrows(java.util.concurrent.ExecutionException.class, () -> ArchiveStudyMain.run(request));
     }
 

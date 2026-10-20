@@ -1,6 +1,7 @@
 package stockguidance.json;
 
-import com.fasterxml.jackson.databind.JsonNode;
+import org.apache.fory.json.JsonArray;
+import org.apache.fory.json.JsonObject;
 
 import java.math.BigDecimal;
 import java.math.BigInteger;
@@ -9,87 +10,74 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.Iterator;
 import java.util.List;
-import java.util.Map;
 
 public final class CanonicalJson {
     private CanonicalJson() {
     }
 
-    public static byte[] bytes(JsonNode value) {
-        if (value == null) {
-            throw new ContractException("Cannot hash a null JSON node");
-        }
+    public static byte[] bytes(Object value) {
+        if (value == null) throw new ContractException("Cannot hash a null JSON value");
         StringBuilder output = new StringBuilder();
         append(value, output);
         output.append('\n');
         return output.toString().getBytes(StandardCharsets.UTF_8);
     }
 
-    public static String sha256(JsonNode value) {
+    public static String sha256(Object value) {
         try {
             byte[] digest = MessageDigest.getInstance("SHA-256").digest(bytes(value));
             StringBuilder result = new StringBuilder(digest.length * 2);
-            for (byte item : digest) {
-                result.append(String.format("%02x", item & 0xff));
-            }
+            for (byte item : digest) result.append(String.format("%02x", item & 0xff));
             return result.toString();
         } catch (NoSuchAlgorithmException error) {
             throw new IllegalStateException("SHA-256 is unavailable", error);
         }
     }
 
-    private static void append(JsonNode value, StringBuilder output) {
-        if (value.isObject()) {
+    private static void append(Object value, StringBuilder output) {
+        if (value instanceof JsonObject object) {
             output.append('{');
-            List<String> names = new ArrayList<>();
-            value.fieldNames().forEachRemaining(names::add);
+            List<String> names = new ArrayList<>(object.keySet());
             Collections.sort(names);
             for (int index = 0; index < names.size(); index++) {
-                if (index > 0) {
-                    output.append(',');
-                }
+                if (index > 0) output.append(',');
                 String name = names.get(index);
                 appendString(name, output);
                 output.append(':');
-                append(value.get(name), output);
+                append(object.get(name), output);
             }
             output.append('}');
             return;
         }
-        if (value.isArray()) {
+        if (value instanceof JsonArray array) {
             output.append('[');
-            Iterator<JsonNode> values = value.elements();
-            boolean first = true;
-            while (values.hasNext()) {
-                if (!first) {
-                    output.append(',');
-                }
-                append(values.next(), output);
-                first = false;
+            for (int index = 0; index < array.size(); index++) {
+                if (index > 0) output.append(',');
+                append(array.get(index), output);
             }
             output.append(']');
             return;
         }
-        if (value.isTextual()) {
-            appendString(value.textValue(), output);
+        if (value instanceof String text) {
+            appendString(text, output);
             return;
         }
-        if (value.isNull()) {
+        if (value == null) {
             output.append("null");
             return;
         }
-        if (value.isBoolean()) {
-            output.append(value.booleanValue() ? "true" : "false");
+        if (value instanceof Boolean booleanValue) {
+            output.append(booleanValue ? "true" : "false");
             return;
         }
-        if (value.isIntegralNumber()) {
-            output.append(new BigInteger(value.asText()).toString());
+        if (value instanceof Byte || value instanceof Short || value instanceof Integer
+                || value instanceof Long || value instanceof BigInteger) {
+            output.append(new BigInteger(String.valueOf(value)));
             return;
         }
-        if (value.isFloatingPointNumber()) {
-            BigDecimal number = value.decimalValue().stripTrailingZeros();
+        if (value instanceof Float || value instanceof Double || value instanceof BigDecimal) {
+            BigDecimal number = JsonSupport.decimalValue(value).stripTrailingZeros();
             output.append(number.signum() == 0 ? "0" : number.toPlainString());
             return;
         }
@@ -109,11 +97,8 @@ public final class CanonicalJson {
                 case '\r' -> output.append("\\r");
                 case '\t' -> output.append("\\t");
                 default -> {
-                    if (character < 0x20 || character > 0x7e) {
-                        output.append(String.format("\\u%04x", (int) character));
-                    } else {
-                        output.append(character);
-                    }
+                    if (character < 0x20 || character > 0x7e) output.append(String.format("\\u%04x", (int) character));
+                    else output.append(character);
                 }
             }
         }

@@ -17,7 +17,7 @@ mvn -o test
 mvn -o -DskipTests package
 ```
 
-The build pins Jackson Databind 2.15.2, Apache Fory JSON 1.7.4, JUnit Jupiter 5.13.4,
+The build pins Apache Fory JSON 1.7.7 and JUnit Jupiter 5.13.4,
 Maven Compiler 3.13.0, and Maven Surefire 3.5.3. MySQL Connector/J 9.6.0 is
 the bundled jar in `lib`; it is a local system dependency rather than a
 downloaded Maven artifact. A dependent project must provide its own JDBC

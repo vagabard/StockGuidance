@@ -1,7 +1,9 @@
 package stockguidance.migration;
 
-import com.fasterxml.jackson.databind.node.JsonNodeFactory;
-import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.apache.fory.json.JsonObject;
+import stockguidance.json.JsonSupport;
+
+
 import stockguidance.database.DatabaseConfiguration;
 import stockguidance.database.MySqlConnectionFactory;
 import stockguidance.json.CanonicalJson;
@@ -19,7 +21,7 @@ public final class JavaZScoreMain {
 
     public static void main(String[] arguments) {
         try {
-            ObjectNode report = run(parse(arguments));
+            JsonObject report = run(parse(arguments));
             System.out.print(new String(CanonicalJson.bytes(report), StandardCharsets.UTF_8));
         } catch (Exception error) {
             System.out.print("{\"failed\":true,\"error\":\"Java z-score candidate failed\",\"failure_type\":\""
@@ -28,7 +30,7 @@ public final class JavaZScoreMain {
         }
     }
 
-    static ObjectNode run(Map<String, String> arguments) throws Exception {
+    static JsonObject run(Map<String, String> arguments) throws Exception {
         JavaWriterManifest manifest = JavaWriterManifest.read(Path.of(required(arguments, "manifest")));
         DatabaseConfiguration configuration = DatabaseConfiguration.load(Path.of(required(arguments, "dbinfo-file")));
         String schema = required(arguments, "disposable-schema");
@@ -52,7 +54,7 @@ public final class JavaZScoreMain {
         try (Connection connection = new MySqlConnectionFactory().open(configuration)) {
             result = candidate.write(connection, session, family, window, checkpoint, interruption);
         }
-        ObjectNode report = JsonNodeFactory.instance.objectNode();
+        JsonObject report = JsonSupport.object();
         report.put("schema_version", 1);
         report.put("backend", "java");
         report.put("candidate", "jdbc-zscores");

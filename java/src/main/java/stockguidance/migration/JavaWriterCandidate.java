@@ -1,9 +1,9 @@
 package stockguidance.migration;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.node.ArrayNode;
-import com.fasterxml.jackson.databind.node.JsonNodeFactory;
-import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.apache.fory.json.JsonArray;
+import org.apache.fory.json.JsonObject;
+
+
 import stockguidance.database.SqlIdentifiers;
 import stockguidance.database.TableNames;
 import stockguidance.json.CanonicalJson;
@@ -198,12 +198,12 @@ public final class JavaWriterCandidate {
                 }
             }
         }
-        ArrayNode definitions = JsonNodeFactory.instance.arrayNode();
+        JsonArray definitions = JsonSupport.array();
         for (String tableName : tableNames) {
             try (PreparedStatement statement = connection.prepareStatement("SHOW CREATE TABLE " + SqlIdentifiers.quote(tableName, tableName));
                  ResultSet rows = statement.executeQuery()) {
                 if (!rows.next()) throw new IllegalArgumentException("Missing disposable DDL");
-                ArrayNode definition = definitions.addArray();
+                JsonArray definition = JsonSupport.addArray(definitions);
                 definition.add(tableName);
                 definition.add(rows.getString(2).replaceAll(" AUTO_INCREMENT=\\d+", ""));
             }
@@ -211,21 +211,21 @@ public final class JavaWriterCandidate {
         if (!CanonicalJson.sha256(definitions).equals(metadata.get("actual_schema_hash"))) {
             throw new IllegalArgumentException("Disposable MySQL DDL changed");
         }
-        ArrayNode objects = JsonNodeFactory.instance.arrayNode();
+        JsonArray objects = JsonSupport.array();
         String[] inventories = {
                 "SELECT TRIGGER_NAME, EVENT_OBJECT_TABLE, ACTION_TIMING, EVENT_MANIPULATION, ACTION_STATEMENT FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = ? ORDER BY TRIGGER_NAME",
                 "SELECT ROUTINE_NAME, ROUTINE_DEFINITION FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA = ? ORDER BY ROUTINE_NAME"
         };
         for (String inventory : inventories) {
-            ArrayNode entries = objects.addArray();
+            JsonArray entries = JsonSupport.addArray(objects);
             try (PreparedStatement statement = connection.prepareStatement(inventory)) {
                 statement.setString(1, schema);
                 try (ResultSet rows = statement.executeQuery()) {
                     while (rows.next()) {
-                        ArrayNode entry = entries.addArray();
+                        JsonArray entry = JsonSupport.addArray(entries);
                         for (int index = 1; index <= rows.getMetaData().getColumnCount(); index++) {
                             String value = rows.getString(index);
-                            if (value == null) entry.addNull(); else entry.add(value);
+                            entry.add(value);
                         }
                     }
                 }
@@ -248,14 +248,13 @@ public final class JavaWriterCandidate {
     }
 
     private boolean registryMatches(String registry) {
-        JsonNode value = JsonSupport.parse(registry);
-        if (!value.isObject()) return false;
+        JsonObject value = JsonSupport.parse(registry);
         Map<String, String> expected = names.tables();
         Set<String> fields = new HashSet<>();
-        value.fieldNames().forEachRemaining(fields::add);
+        fields.addAll(value.keySet());
         if (!fields.equals(expected.keySet())) return false;
         for (Map.Entry<String, String> entry : expected.entrySet()) {
-            if (!entry.getValue().equals(value.path(entry.getKey()).asText())) return false;
+            if (!entry.getValue().equals(JsonSupport.stringOrEmpty(value.get(entry.getKey())))) return false;
         }
         return true;
     }
@@ -528,10 +527,10 @@ public final class JavaWriterCandidate {
 
     private static String dependencyDigest(ArchiveCandidateReader.SessionArchive prior,
                                            ArchiveCandidateReader.SessionArchive following) {
-        ObjectNode value = JsonNodeFactory.instance.objectNode();
+        JsonObject value = JsonSupport.object();
         value.put("prior", prior.session().toString());
         value.put("following", following.session().toString());
-        ArrayNode raw = value.putArray("raw");
+        JsonArray raw = JsonSupport.putArray(value, "raw");
         raw.add(prior.recordsId());
         raw.add(following.recordsId());
         return CanonicalJson.sha256(value);
@@ -541,7 +540,7 @@ public final class JavaWriterCandidate {
         StringBuilder payload = new StringBuilder("[");
         rows.values().stream().sorted(java.util.Comparator.comparing(ValidationContent.DerivedRow::ticker)).forEach(row -> {
             if (payload.length() > 1) payload.append(',');
-            String ticker = new String(CanonicalJson.bytes(JsonNodeFactory.instance.textNode(row.ticker())), java.nio.charset.StandardCharsets.UTF_8);
+            String ticker = new String(CanonicalJson.bytes(row.ticker()), java.nio.charset.StandardCharsets.UTF_8);
             payload.append('[').append(ticker, 0, ticker.length() - 1).append(",[");
             for (int index = 0; index < row.values().size(); index++) {
                 if (index > 0) payload.append(',');
@@ -574,21 +573,21 @@ public final class JavaWriterCandidate {
 
     private void validateCheckpoint(Path checkpoint, String workload, LocalDate session, String digest) {
         if (checkpoint == null || !Files.exists(checkpoint)) return;
-        JsonNode value = JsonSupport.read(checkpoint);
-        if (!value.isObject() || value.path("schema_version").asInt(-1) != 1
-                || !workload.equals(value.path("workload").asText())
-                || !session.toString().equals(value.path("session").asText())
-                || !digest.equals(value.path("content_digest").asText())) {
+        JsonObject value = JsonSupport.read(checkpoint);
+        if (JsonSupport.integerOrDefault(value.get("schema_version"), -1) != 1
+                || !workload.equals(JsonSupport.stringOrEmpty(value.get("workload")))
+                || !session.toString().equals(JsonSupport.stringOrEmpty(value.get("session")))
+                || !digest.equals(JsonSupport.stringOrEmpty(value.get("content_digest")))) {
             throw new IllegalArgumentException("Stale or incompatible Java writer checkpoint");
         }
-        if (!manifest.manifestId().equals(value.path("manifest_id").asText())) {
+        if (!manifest.manifestId().equals(JsonSupport.stringOrEmpty(value.get("manifest_id")))) {
             throw new IllegalArgumentException("Java writer checkpoint manifest is not current");
         }
     }
 
     private void writeCheckpoint(Path checkpoint, String workload, LocalDate session, String digest) {
         if (checkpoint == null) return;
-        ObjectNode value = JsonNodeFactory.instance.objectNode();
+        JsonObject value = JsonSupport.object();
         value.put("schema_version", 1);
         value.put("manifest_id", manifest.manifestId());
         value.put("workload", workload);

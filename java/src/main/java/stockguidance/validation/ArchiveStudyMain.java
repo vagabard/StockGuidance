@@ -1,9 +1,7 @@
 package stockguidance.validation;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.node.ArrayNode;
-import com.fasterxml.jackson.databind.node.JsonNodeFactory;
-import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.apache.fory.json.JsonArray;
+import org.apache.fory.json.JsonObject;
 import stockguidance.database.DatabaseConfiguration;
 import stockguidance.database.MySqlConnectionFactory;
 import stockguidance.database.ReadOnlyTransaction;
@@ -51,56 +49,58 @@ public final class ArchiveStudyMain {
         }
     }
 
-    static ObjectNode run(JsonNode request) throws Exception {
-        int workers = request.path("workers").asInt();
-        int repeats = request.path("repeats").asInt(4);
-        String mode = request.path("mode").asText();
+    static JsonObject run(JsonObject request) throws Exception {
+        int workers = JsonSupport.integerOrDefault(request.get("workers"));
+        int repeats = JsonSupport.integerOrDefault(request.get("repeats"), 4);
+        String mode = JsonSupport.stringOrEmpty(request.get("mode"));
         if (workers < 1 || workers > 3 || repeats < 1 || repeats > 10 || !List.of("files", "database", "reconcile", "derived").contains(mode)) {
             throw new IllegalArgumentException("Invalid study settings");
         }
         List<Path> paths = new ArrayList<>();
-        for (JsonNode item : request.path("paths")) paths.add(Path.of(item.asText()));
+        JsonArray pathValues = JsonSupport.requireArray(request.get("paths"), "Study paths are required");
+        for (Object item : pathValues) paths.add(Path.of(JsonSupport.stringOrEmpty(item)));
         if (paths.isEmpty() || paths.stream().distinct().count() != paths.size()) throw new IllegalArgumentException("Distinct paths required");
-        DatabaseConfiguration configuration = mode.equals("files") ? null : DatabaseConfiguration.load(Path.of(request.path("dbinfo_file").asText()));
+        DatabaseConfiguration configuration = mode.equals("files") ? null : DatabaseConfiguration.load(Path.of(JsonSupport.stringOrEmpty(request.get("dbinfo_file"))));
         if (mode.equals("derived")) return runDerived(request, configuration);
-        ObjectNode report = JsonNodeFactory.instance.objectNode();
-        report.put("schema_version", 1).put("backend", "java").put("workers", workers).put("mode", mode);
-        ArrayNode measurements = report.putArray("measurements");
+        JsonObject report = JsonSupport.object();
+        report.put("schema_version", 1); report.put("backend", "java"); report.put("workers", workers); report.put("mode", mode);
+        JsonArray measurements = JsonSupport.putArray(report, "measurements");
         try (var executor = Executors.newFixedThreadPool(workers)) {
             for (int repeat = 0; repeat < repeats; repeat++) {
                 long started = System.nanoTime();
                 long cpuStarted = processCpu();
-                List<Callable<List<ObjectNode>>> tasks = new ArrayList<>();
+                List<Callable<List<JsonObject>>> tasks = new ArrayList<>();
                 for (int worker = 0; worker < workers; worker++) {
                     List<Path> chunk = new ArrayList<>();
                     for (int index = worker; index < paths.size(); index += workers) chunk.add(paths.get(index));
                     if (!chunk.isEmpty()) tasks.add(() -> configuration == null ? inspect(chunk, mode, null, null) :
                             new ReadOnlyTransaction(new MySqlConnectionFactory(), configuration).execute(connection -> inspect(chunk, mode, connection, configuration)));
                 }
-                List<ObjectNode> results = new ArrayList<>();
+                List<JsonObject> results = new ArrayList<>();
                 for (var future : executor.invokeAll(tasks)) results.addAll(future.get());
-                results.sort(Comparator.comparing(item -> item.path("session").asText()));
-                ArrayNode sessions = JsonNodeFactory.instance.arrayNode();
+                results.sort(Comparator.comparing(item -> JsonSupport.stringOrEmpty(item.get("session"))));
+                JsonArray sessions = JsonSupport.array();
                 results.forEach(sessions::add);
-                ObjectNode measurement = measurements.addObject();
+                JsonObject measurement = JsonSupport.addObject(measurements);
                 measurement.put("seconds", (System.nanoTime() - started) / 1e9);
                 measurement.put("cpu_seconds", (processCpu() - cpuStarted) / 1e9);
                 measurement.put("digest", CanonicalJson.sha256(sessions));
-                measurement.set("sessions", sessions);
+                measurement.put("sessions", sessions);
             }
         }
         return report;
     }
 
-    private static ObjectNode runDerived(JsonNode request, DatabaseConfiguration configuration) throws Exception {
-        int workers = request.path("workers").asInt();
-        int repeats = request.path("repeats").asInt(4);
+    private static JsonObject runDerived(JsonObject request, DatabaseConfiguration configuration) throws Exception {
+        int workers = JsonSupport.integerOrDefault(request.get("workers"));
+        int repeats = JsonSupport.integerOrDefault(request.get("repeats"), 4);
         List<String> paths = new ArrayList<>();
-        for (JsonNode item : request.path("paths")) paths.add(item.asText());
+        JsonArray pathValues = JsonSupport.requireArray(request.get("paths"), "Study paths are required");
+        for (Object item : pathValues) paths.add(JsonSupport.stringOrEmpty(item));
         Map<String, List<String>> neighbors = neighbors(request, paths);
-        ObjectNode report = JsonNodeFactory.instance.objectNode();
-        report.put("schema_version", 1).put("backend", "java").put("workers", workers).put("mode", "derived");
-        ArrayNode measurements = report.putArray("measurements");
+        JsonObject report = JsonSupport.object();
+        report.put("schema_version", 1); report.put("backend", "java"); report.put("workers", workers); report.put("mode", "derived");
+        JsonArray measurements = JsonSupport.putArray(report, "measurements");
         try (var executor = Executors.newFixedThreadPool(workers)) {
             for (int repeat = 0; repeat < repeats; repeat++) {
                 long started = System.nanoTime();
@@ -114,7 +114,7 @@ public final class ArchiveStudyMain {
                                 .execute(connection -> inspectDerived(chunk, neighbors, connection, configuration)));
                     }
                 }
-                List<ObjectNode> results = new ArrayList<>();
+                List<JsonObject> results = new ArrayList<>();
                 int queryCount = 0;
                 int dataQueryCount = 0;
                 int rawRows = 0;
@@ -127,10 +127,10 @@ public final class ArchiveStudyMain {
                     rawRows += chunk.rawRows();
                     derivedRows += chunk.derivedRows();
                 }
-                results.sort(Comparator.comparing(item -> item.path("session").asText()));
-                ArrayNode sessions = JsonNodeFactory.instance.arrayNode();
+                results.sort(Comparator.comparing(item -> JsonSupport.stringOrEmpty(item.get("session"))));
+                JsonArray sessions = JsonSupport.array();
                 results.forEach(sessions::add);
-                ObjectNode measurement = measurements.addObject();
+                JsonObject measurement = JsonSupport.addObject(measurements);
                 measurement.put("seconds", (System.nanoTime() - started) / 1e9);
                 measurement.put("cpu_seconds", (processCpu() - cpuStarted) / 1e9);
                 measurement.put("query_count", queryCount);
@@ -138,21 +138,20 @@ public final class ArchiveStudyMain {
                 measurement.put("raw_rows", rawRows);
                 measurement.put("derived_rows", derivedRows);
                 measurement.put("digest", CanonicalJson.sha256(sessions));
-                measurement.set("sessions", sessions);
+                measurement.put("sessions", sessions);
             }
         }
         return report;
     }
 
-    private static Map<String, List<String>> neighbors(JsonNode request, List<String> paths) {
-        JsonNode value = request.get("neighbors");
-        if (value == null || !value.isObject()) throw new IllegalArgumentException("Derived neighbors are required");
+    private static Map<String, List<String>> neighbors(JsonObject request, List<String> paths) {
+        Object value = request.get("neighbors");
+        if (!(value instanceof JsonObject neighbors)) throw new IllegalArgumentException("Derived neighbors are required");
         Map<String, List<String>> result = new HashMap<>();
-        var fields = value.fields();
-        while (fields.hasNext()) {
-            var item = fields.next();
+        for (Map.Entry<String, Object> item : neighbors.entrySet()) {
             List<String> triple = new ArrayList<>();
-            for (JsonNode path : item.getValue()) triple.add(path.asText());
+            if (!(item.getValue() instanceof JsonArray values)) throw new IllegalArgumentException("Invalid derived neighbor triple");
+            for (Object path : values) triple.add(JsonSupport.stringOrEmpty(path));
             if (triple.size() != 3 || !triple.get(1).equals(item.getKey()) || triple.stream().distinct().count() != 3) {
                 throw new IllegalArgumentException("Invalid derived neighbor triple");
             }
@@ -163,7 +162,7 @@ public final class ArchiveStudyMain {
     }
 
     private static DerivedChunk inspectDerived(List<String> targetPaths, Map<String, List<String>> neighbors, Connection connection, DatabaseConfiguration configuration) throws SQLException {
-        List<ObjectNode> sessions = new ArrayList<>();
+        List<JsonObject> sessions = new ArrayList<>();
         int queryCount = 0;
         int rawRows = 0;
         int derivedRows = 0;
@@ -263,31 +262,31 @@ public final class ArchiveStudyMain {
         return new DerivedScope(raw, derived, queryCount, rawRows, derivedRows);
     }
 
-    private static ObjectNode derivedResult(LocalDate prior, LocalDate central, LocalDate following,
+    private static JsonObject derivedResult(LocalDate prior, LocalDate central, LocalDate following,
                                             Map<LocalDate, Map<String, ValidationContent.RawBar>> raw,
                                             Map<LocalDate, Map<String, ValidationContent.DerivedRow>> stored) {
         Map<String, ValidationContent.RawBar> previous = raw.getOrDefault(prior, Map.of());
         Map<String, ValidationContent.RawBar> current = raw.getOrDefault(central, Map.of());
         Map<String, ValidationContent.RawBar> next = raw.getOrDefault(following, Map.of());
         Map<String, ValidationContent.DerivedRow> actual = stored.getOrDefault(central, Map.of());
-        ObjectNode result = JsonNodeFactory.instance.objectNode();
+        JsonObject result = JsonSupport.object();
         result.put("session", central.toString());
         result.put("prior_session", prior.toString());
         result.put("following_session", following.toString());
-        ObjectNode counts = result.putObject("raw_counts");
-        counts.put("prior", previous.size()).put("current", current.size()).put("following", next.size());
+        JsonObject counts = JsonSupport.putObject(result, "raw_counts");
+        counts.put("prior", previous.size()); counts.put("current", current.size()); counts.put("following", next.size());
         result.put("derived_count", actual.size());
         result.put("expected_count", 0);
-        ArrayNode missing = result.putArray("missing_derived_keys");
-        ArrayNode extra = result.putArray("extra_derived_keys");
-        ObjectNode differences = result.putObject("column_difference_counts");
+        JsonArray missing = JsonSupport.putArray(result, "missing_derived_keys");
+        JsonArray extra = JsonSupport.putArray(result, "extra_derived_keys");
+        JsonObject differences = JsonSupport.putObject(result, "column_difference_counts");
         LegacyDerivedCalculator.COLUMNS.forEach(column -> differences.put(column, 0));
-        ObjectNode ids = result.putObject("raw_ids");
-        if (previous.isEmpty()) ids.putNull("prior"); else ids.put("prior", ValidationContent.rawId(previous));
-        if (current.isEmpty()) ids.putNull("current"); else ids.put("current", ValidationContent.rawId(current));
-        if (next.isEmpty()) ids.putNull("following"); else ids.put("following", ValidationContent.rawId(next));
-        result.putNull("expected_derived_id");
-        result.putNull("stored_derived_id");
+        JsonObject ids = JsonSupport.putObject(result, "raw_ids");
+        ids.put("prior", previous.isEmpty() ? null : ValidationContent.rawId(previous));
+        ids.put("current", current.isEmpty() ? null : ValidationContent.rawId(current));
+        ids.put("following", next.isEmpty() ? null : ValidationContent.rawId(next));
+        result.put("expected_derived_id", null);
+        result.put("stored_derived_id", null);
         result.put("state", "unavailable");
         result.put("reason", (current.isEmpty() || previous.isEmpty() || next.isEmpty()) ? "missing_raw_context" : null);
         result.put("matches", false);
@@ -304,16 +303,16 @@ public final class ArchiveStudyMain {
             if (row == null) continue;
             for (int index : LegacyDerivedCalculator.differingColumns(row.values(), expected.get(ticker))) {
                 String column = LegacyDerivedCalculator.COLUMNS.get(index);
-                differences.put(column, differences.get(column).intValue() + 1);
+                differences.put(column, ((Number) differences.get(column)).intValue() + 1);
             }
         }
         result.put("expected_count", expected.size());
         result.put("expected_derived_id", LegacyDerivedCalculator.studyId(expected));
         result.put("stored_derived_id", LegacyDerivedCalculator.studyId(LegacyDerivedCalculator.values(actual)));
         result.put("state", "complete");
-        result.putNull("reason");
+        result.put("reason", null);
         boolean matches = missingKeys.isEmpty() && extraKeys.isEmpty();
-        for (String column : LegacyDerivedCalculator.COLUMNS) matches &= differences.get(column).intValue() == 0;
+        for (String column : LegacyDerivedCalculator.COLUMNS) matches &= ((Number) differences.get(column)).intValue() == 0;
         result.put("matches", matches);
         return result;
     }
@@ -379,7 +378,7 @@ public final class ArchiveStudyMain {
         for (int index = 0; index < ids.size(); index++) statement.setInt(index + 1, ids.get(index));
     }
 
-    private record DerivedChunk(List<ObjectNode> sessions, int queryCount, int dataQueryCount, int rawRows, int derivedRows) {
+    private record DerivedChunk(List<JsonObject> sessions, int queryCount, int dataQueryCount, int rawRows, int derivedRows) {
     }
 
     private record DerivedScope(Map<LocalDate, Map<String, ValidationContent.RawBar>> raw,
@@ -391,12 +390,12 @@ public final class ArchiveStudyMain {
         return ((com.sun.management.OperatingSystemMXBean) ManagementFactory.getOperatingSystemMXBean()).getProcessCpuTime();
     }
 
-    private static List<ObjectNode> inspect(List<Path> paths, String mode, Connection connection, DatabaseConfiguration configuration) {
+    private static List<JsonObject> inspect(List<Path> paths, String mode, Connection connection, DatabaseConfiguration configuration) {
         try {
-            List<ObjectNode> results = new ArrayList<>();
+            List<JsonObject> results = new ArrayList<>();
             for (Path path : paths) {
                 LocalDate session = LocalDate.parse(path.getFileName().toString().replace(".ndjson", ""));
-                ObjectNode result = JsonNodeFactory.instance.objectNode().put("session", session.toString());
+                JsonObject result = JsonSupport.object(); result.put("session", session.toString());
                 if (!mode.equals("database")) {
                     TreeMap<String, StudyBar> bars = new TreeMap<>();
                     MessageDigest digest = MessageDigest.getInstance("SHA-256");
@@ -418,12 +417,12 @@ public final class ArchiveStudyMain {
                     result.put("database_id", CanonicalJson.sha256(payload(bars)));
                     result.put("database_count", bars.size());
                 }
-                if (mode.equals("reconcile")) result.put("matches", result.path("archive_id").equals(result.path("database_id")));
+                if (mode.equals("reconcile")) result.put("matches", java.util.Objects.equals(result.get("archive_id"), result.get("database_id")));
                 results.add(result);
             }
             return results;
         } catch (Exception error) {
-            throw new IllegalStateException("Archive study inspection failed");
+            throw new IllegalStateException("Archive study inspection failed", error);
         }
     }
 
@@ -446,14 +445,14 @@ public final class ArchiveStudyMain {
             statement.setFetchSize(1000);
             try (var rows = statement.executeQuery()) {
                 while (rows.next()) {
-                    ObjectNode row = JsonNodeFactory.instance.objectNode().put("T", rows.getString(1));
+                    JsonObject row = JsonSupport.object(); row.put("T", rows.getString(1));
                     String[] prices = {"o", "h", "l", "c"};
                     for (int index = 0; index < prices.length; index++) row.put(prices[index], rows.getBigDecimal(index + 2));
                     row.put("v", rows.getBigDecimal(6));
                     BigDecimal vwap = rows.getBigDecimal(7);
-                    if (vwap == null) row.putNull("vw"); else row.put("vw", vwap);
+                    row.put("vw", vwap);
                     long transactions = rows.getLong(8);
-                    if (rows.wasNull()) row.putNull("n"); else row.put("n", transactions);
+                    row.put("n", rows.wasNull() ? null : transactions);
                     row.put("t", session.atTime(12, 0).atZone(java.time.ZoneId.of("America/New_York")).toInstant().toEpochMilli());
                     bars.add(decode(row, session));
                 }
@@ -466,39 +465,40 @@ public final class ArchiveStudyMain {
 
     private record StudyBar(String ticker, BigDecimal open, BigDecimal high, BigDecimal low, BigDecimal close, BigDecimal volume, BigDecimal vwap, Long transactions) { }
 
-    private static BigDecimal price(JsonNode row, String field) {
-        JsonNode value = row.get(field);
-        if (value == null || (!value.isNumber() && !value.isTextual())) throw new IllegalArgumentException("Invalid archive price");
-        BigDecimal original = new BigDecimal(value.asText());
+    private static BigDecimal price(JsonObject row, String field) {
+        Object value = row.get(field);
+        if (!JsonSupport.isNumber(value) && !JsonSupport.isString(value)) throw new IllegalArgumentException("Invalid archive price");
+        BigDecimal original = new BigDecimal(JsonSupport.stringOrEmpty(value));
         BigDecimal result = original.setScale(4, java.math.RoundingMode.HALF_UP);
         if (original.signum() <= 0 || original.compareTo(new BigDecimal("1e60")) >= 0 || result.signum() <= 0) throw new IllegalArgumentException("Invalid archive price");
         return result;
     }
 
-    private static StudyBar decode(JsonNode row, LocalDate session) {
-        JsonNode value = row.get("v");
-        if (value == null || !value.isNumber()) throw new IllegalArgumentException("Invalid archive volume");
-        BigDecimal volume = value.decimalValue();
+    private static StudyBar decode(JsonObject row, LocalDate session) {
+        Object value = row.get("v");
+        if (!JsonSupport.isNumber(value)) throw new IllegalArgumentException("Invalid archive volume");
+        BigDecimal volume = JsonSupport.decimalValue(value);
         if (volume.signum() < 0 || volume.compareTo(BigDecimal.valueOf(Long.MAX_VALUE)) > 0) throw new IllegalArgumentException("Invalid archive volume");
-        JsonNode ticker = row.get("T");
-        if (ticker == null || !ticker.isTextual() || ticker.asText().isEmpty() || ticker.asText().length() > 16 || ticker.asText().codePoints().anyMatch(Character::isWhitespace)) throw new IllegalArgumentException("Invalid archive ticker");
-        JsonNode timestamp = row.get("t");
-        if (timestamp == null || !timestamp.isIntegralNumber() || !timestamp.canConvertToLong() || timestamp.longValue() < 0 || !java.time.Instant.ofEpochMilli(timestamp.longValue()).atZone(java.time.ZoneId.of("America/New_York")).toLocalDate().equals(session)) throw new IllegalArgumentException("Invalid archive timestamp");
-        JsonNode transactions = row.get("n");
-        if (transactions != null && !transactions.isNull() && (!transactions.isIntegralNumber() || !transactions.canConvertToLong() || transactions.longValue() < 0)) throw new IllegalArgumentException("Invalid transactions");
-        StudyBar bar = new StudyBar(ticker.asText(), price(row, "o"), price(row, "h"), price(row, "l"), price(row, "c"), volume, row.path("vw").isMissingNode() || row.path("vw").isNull() ? null : price(row, "vw"), transactions == null || transactions.isNull() ? null : transactions.longValue());
+        Object ticker = row.get("T");
+        if (!JsonSupport.isString(ticker) || JsonSupport.stringOrEmpty(ticker).isEmpty() || JsonSupport.stringOrEmpty(ticker).length() > 16 || JsonSupport.stringOrEmpty(ticker).codePoints().anyMatch(Character::isWhitespace)) throw new IllegalArgumentException("Invalid archive ticker");
+        Object timestamp = row.get("t");
+        if (!JsonSupport.isIntegralNumber(timestamp) || !JsonSupport.fitsLong(timestamp) || JsonSupport.longIntegerValue(timestamp) < 0 || !java.time.Instant.ofEpochMilli(JsonSupport.longIntegerValue(timestamp)).atZone(java.time.ZoneId.of("America/New_York")).toLocalDate().equals(session)) throw new IllegalArgumentException("Invalid archive timestamp");
+        Object transactions = row.get("n");
+        if (transactions != null && (!JsonSupport.isIntegralNumber(transactions) || !JsonSupport.fitsLong(transactions) || JsonSupport.longIntegerValue(transactions) < 0)) throw new IllegalArgumentException("Invalid transactions");
+        Object vwap = row.get("vw");
+        StudyBar bar = new StudyBar(JsonSupport.stringOrEmpty(ticker), price(row, "o"), price(row, "h"), price(row, "l"), price(row, "c"), volume, vwap == null ? null : price(row, "vw"), transactions == null ? null : JsonSupport.longIntegerValue(transactions));
         if (bar.low().compareTo(bar.open().min(bar.close())) > 0 || bar.high().compareTo(bar.open().max(bar.close())) < 0 || bar.low().compareTo(bar.high()) > 0) throw new IllegalArgumentException("Inconsistent archive OHLC");
         return bar;
     }
 
-    private static ArrayNode payload(List<StudyBar> bars) {
-        ArrayNode result = JsonNodeFactory.instance.arrayNode();
+    private static JsonArray payload(List<StudyBar> bars) {
+        JsonArray result = JsonSupport.array();
         for (var item : bars) {
             var bar = item;
-            ObjectNode row = result.addObject();
-            row.put("T", bar.ticker()).put("o", bar.open().toPlainString()).put("h", bar.high().toPlainString()).put("l", bar.low().toPlainString()).put("c", bar.close().toPlainString()).put("v", item.volume().stripTrailingZeros().toPlainString());
-            if (bar.vwap() == null) row.putNull("vw"); else row.put("vw", bar.vwap().toPlainString());
-            if (bar.transactions() == null) row.putNull("n"); else row.put("n", bar.transactions());
+            JsonObject row = JsonSupport.addObject(result);
+            row.put("T", bar.ticker()); row.put("o", bar.open().toPlainString()); row.put("h", bar.high().toPlainString()); row.put("l", bar.low().toPlainString()); row.put("c", bar.close().toPlainString()); row.put("v", item.volume().stripTrailingZeros().toPlainString());
+            row.put("vw", bar.vwap() == null ? null : bar.vwap().toPlainString());
+            row.put("n", bar.transactions());
         }
         return result;
     }

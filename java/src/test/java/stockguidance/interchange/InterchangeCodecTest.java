@@ -1,6 +1,8 @@
 package stockguidance.interchange;
 
-import com.fasterxml.jackson.databind.JsonNode;
+import org.apache.fory.json.JsonObject;
+
+
 import org.junit.jupiter.api.Test;
 import stockguidance.json.CanonicalJson;
 import stockguidance.json.ContractException;
@@ -22,7 +24,7 @@ class InterchangeCodecTest {
         try (InputStream input = getClass().getResourceAsStream("/interchange-v1.json")) {
             fixture = new String(input.readAllBytes(), StandardCharsets.UTF_8);
         }
-        JsonNode root = JsonSupport.parse(fixture);
+        JsonObject root = JsonSupport.parse(fixture);
         InterchangeDocument document = InterchangeCodec.decode(root);
 
         assertEquals(1, document.schemaVersion());
@@ -38,7 +40,7 @@ class InterchangeCodecTest {
 
     @Test
     void canonicalizesEscapedUnicodeNegativeExponentNullAndSortedKeys() {
-        JsonNode root = JsonSupport.parse("{\"z\":null,\"n\":-1.25e2,\"a\":\"caf\\u00e9\"}");
+        JsonObject root = JsonSupport.parse("{\"z\":null,\"n\":-1.25e2,\"a\":\"caf\\u00e9\"}");
         String canonical = new String(CanonicalJson.bytes(root), StandardCharsets.UTF_8);
 
         assertEquals("{\"a\":\"caf\\u00e9\",\"n\":-125,\"z\":null}\n", canonical);

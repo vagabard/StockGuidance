@@ -1,8 +1,10 @@
 package stockguidance.validation;
 
-import com.fasterxml.jackson.databind.node.ArrayNode;
-import com.fasterxml.jackson.databind.node.JsonNodeFactory;
-import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.apache.fory.json.JsonArray;
+import org.apache.fory.json.JsonObject;
+import stockguidance.json.JsonSupport;
+
+
 import stockguidance.database.ConnectionFactory;
 import stockguidance.database.DatabaseConfiguration;
 import stockguidance.database.ReadOnlyTransaction;
@@ -46,7 +48,7 @@ public final class StreamingValidator {
         this.configuredTableNames = tableNames;
     }
 
-    public ObjectNode validate(DatabaseConfiguration configuration, ValidationRequest request) {
+    public JsonObject validate(DatabaseConfiguration configuration, ValidationRequest request) {
         if (configuration == null || request == null) {
             throw new IllegalArgumentException("Validator requires explicit configuration and request");
         }
@@ -54,7 +56,7 @@ public final class StreamingValidator {
         return new ReadOnlyTransaction(connectionFactory, configuration).execute(connection -> inspect(connection, request, tableNames));
     }
 
-    private ObjectNode inspect(Connection connection, ValidationRequest request, TableNames tableNames) throws SQLException {
+    private JsonObject inspect(Connection connection, ValidationRequest request, TableNames tableNames) throws SQLException {
         Inspection inspection = new Inspection(request);
         inspectSchema(connection, request, inspection, tableNames);
         if (!inspection.schemaUsable) {
@@ -341,8 +343,8 @@ public final class StreamingValidator {
         return Double.isFinite(observed) && Math.abs(observed - required) <= Math.max(1e-12, 1e-10 * Math.max(Math.abs(observed), Math.abs(required)));
     }
 
-    private static ObjectNode report(ValidationRequest request, Inspection inspection) {
-        ObjectNode result = JsonNodeFactory.instance.objectNode();
+    private static JsonObject report(ValidationRequest request, Inspection inspection) {
+        JsonObject result = JsonSupport.object();
         result.put("schema_version", 1);
         result.put("operation", request.operation());
         result.put("backend", "java");
@@ -351,22 +353,22 @@ public final class StreamingValidator {
         result.put("complete", complete);
         result.put("failed", failed);
         result.put("exit_code", failed ? 1 : complete ? 0 : 2);
-        result.set("source", request.source());
-        ObjectNode calendar = result.putObject("calendar");
+        result.put("source", request.source());
+        JsonObject calendar = JsonSupport.putObject(result, "calendar");
         calendar.put("id", request.calendarId());
         calendar.put("version", request.calendarVersion());
-        ObjectNode scope = result.putObject("scope");
+        JsonObject scope = JsonSupport.putObject(result, "scope");
         scope.put("start", request.start().toString());
         scope.put("end", request.end().toString());
         scope.put("as_of", request.asOf().toString());
-        result.set("history", request.history());
-        ArrayNode unsupported = result.putArray("unsupported_checks");
-        ArrayNode sessions = result.putArray("sessions");
+        result.put("history", request.history());
+        JsonArray unsupported = JsonSupport.putArray(result, "unsupported_checks");
+        JsonArray sessions = JsonSupport.putArray(result, "sessions");
         inspection.sessions.values().stream().filter(item -> item.requested).forEach(item -> appendSession(sessions, item, request, inspection));
-        ArrayNode findings = result.putArray("findings");
+        JsonArray findings = JsonSupport.putArray(result, "findings");
         inspection.findings.stream().sorted(Comparator.comparing((ValidationFinding item) -> item.sessionDate() == null ? "" : item.sessionDate().toString()).thenComparing(ValidationFinding::check).thenComparing(ValidationFinding::detail)).forEach(item -> appendFinding(findings, item));
-        result.set("repair_plan", repairPlan(request, inspection));
-        ObjectNode metrics = result.putObject("metrics");
+        result.put("repair_plan", repairPlan(request, inspection));
+        JsonObject metrics = JsonSupport.putObject(result, "metrics");
         metrics.put("sql_queries", inspection.sqlQueries);
         metrics.put("raw_rows", inspection.rawRows);
         metrics.put("derived_rows", inspection.derivedRows);
@@ -375,11 +377,11 @@ public final class StreamingValidator {
         return result;
     }
 
-    private static void appendSession(ArrayNode output, SessionData session, ValidationRequest request, Inspection inspection) {
-        ObjectNode item = output.addObject();
+    private static void appendSession(JsonArray output, SessionData session, ValidationRequest request, Inspection inspection) {
+        JsonObject item = JsonSupport.addObject(output);
         item.put("date", session.date.toString());
         item.put("state", sessionState(session.date, inspection));
-        ArrayNode checks = item.putArray("checks");
+        JsonArray checks = JsonSupport.putArray(item, "checks");
         List<ValidationFinding> findings = inspection.findings.stream().filter(value -> session.date.equals(value.sessionDate())).toList();
         checks.add("session");
         if (!findings.stream().anyMatch(value -> value.check().equals("session") && value.category().equals("not_yet_available"))) {
@@ -394,21 +396,21 @@ public final class StreamingValidator {
                 checks.add("raw_keys");
             }
         }
-        ArrayNode sourceKeys = item.putArray("source_keys");
+        JsonArray sourceKeys = JsonSupport.putArray(item, "source_keys");
         ValidationRequest.SourceEvidence evidence = request.sourceEvidence().get(session.date);
         if (evidence != null && available(evidence.availableAt(), request.asOf())) {
             evidence.keys().stream().sorted().forEach(sourceKeys::add);
         }
-        ArrayNode rawKeys = item.putArray("raw_valid_keys");
+        JsonArray rawKeys = JsonSupport.putArray(item, "raw_valid_keys");
         if (available(session.receipt == null ? null : session.receipt.availableAt, request.asOf())) {
             session.raw.keySet().stream().sorted().forEach(rawKeys::add);
         }
-        ArrayNode derivedKeys = item.putArray("derived_valid_keys");
+        JsonArray derivedKeys = JsonSupport.putArray(item, "derived_valid_keys");
         if (available(session.receipt == null ? null : session.receipt.availableAt, request.asOf())) {
             session.derived.keySet().stream().sorted().forEach(derivedKeys::add);
         }
         if (evidence == null || !available(evidence.availableAt(), request.asOf())) {
-            item.putNull("source_count");
+            item.put("source_count", null);
         } else {
             item.put("source_count", evidence.recordCount());
         }
@@ -418,39 +420,39 @@ public final class StreamingValidator {
         item.put("available_at", evidence == null ? null : evidence.availableAt().toString());
     }
 
-    private static void appendFinding(ArrayNode output, ValidationFinding finding) {
-        ObjectNode item = output.addObject();
+    private static void appendFinding(JsonArray output, ValidationFinding finding) {
+        JsonObject item = JsonSupport.addObject(output);
         item.put("category", finding.category());
         item.put("check", finding.check());
         item.put("detail", finding.detail());
-        if (finding.sessionDate() == null) item.putNull("session_date"); else item.put("session_date", finding.sessionDate().toString());
-        if (finding.dependencySessionDate() == null) item.putNull("dependency_session_date"); else item.put("dependency_session_date", finding.dependencySessionDate().toString());
-        ArrayNode tickers = item.putArray("tickers");
+        item.put("session_date", finding.sessionDate() == null ? null : finding.sessionDate().toString());
+        item.put("dependency_session_date", finding.dependencySessionDate() == null ? null : finding.dependencySessionDate().toString());
+        JsonArray tickers = JsonSupport.putArray(item, "tickers");
         finding.tickers().stream().sorted().forEach(tickers::add);
-        ArrayNode ids = item.putArray("record_ids");
+        JsonArray ids = JsonSupport.putArray(item, "record_ids");
         finding.recordIds().stream().sorted().forEach(ids::add);
         item.put("blocking", finding.blocking());
     }
 
-    private static ObjectNode repairPlan(ValidationRequest request, Inspection inspection) {
-        ObjectNode plan = JsonNodeFactory.instance.objectNode();
+    private static JsonObject repairPlan(ValidationRequest request, Inspection inspection) {
+        JsonObject plan = JsonSupport.object();
         plan.put("schema_version", 1);
-        plan.set("source", request.source());
+        plan.put("source", request.source());
         plan.put("start", request.start().toString());
         plan.put("end", request.end().toString());
         plan.put("as_of", request.asOf().toString());
-        ArrayNode items = plan.putArray("items");
+        JsonArray items = JsonSupport.putArray(plan, "items");
         Set<String> seen = new HashSet<>();
         for (ValidationFinding finding : inspection.findings) {
             if (!finding.blocking()) continue;
             String action = repairAction(finding.check());
             String key = action + "|" + finding.sessionDate() + "|" + finding.check() + "|" + finding.tickers();
             if (!seen.add(key)) continue;
-            ObjectNode item = items.addObject();
+            JsonObject item = JsonSupport.addObject(items);
             item.put("action", action);
-            if (finding.sessionDate() == null) item.putNull("session_date"); else item.put("session_date", finding.sessionDate().toString());
+            item.put("session_date", finding.sessionDate() == null ? null : finding.sessionDate().toString());
             item.put("check", finding.check());
-            ArrayNode tickers = item.putArray("tickers");
+            JsonArray tickers = JsonSupport.putArray(item, "tickers");
             finding.tickers().stream().sorted().forEach(tickers::add);
         }
         return plan;
@@ -482,8 +484,8 @@ public final class StreamingValidator {
         return value != null && !value.isAfter(cutoff);
     }
 
-    private static boolean hasUnresolvedHistory(com.fasterxml.jackson.databind.JsonNode history) {
-        return history.get("unresolved_limits") != null && history.get("unresolved_limits").isArray() && history.get("unresolved_limits").size() > 0;
+    private static boolean hasUnresolvedHistory(JsonObject history) {
+        return history.get("unresolved_limits") instanceof JsonArray limits && !limits.isEmpty();
     }
 
     private static Set<String> difference(Set<String> left, Set<String> right) {

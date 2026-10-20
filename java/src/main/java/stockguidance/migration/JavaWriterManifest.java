@@ -1,8 +1,7 @@
 package stockguidance.migration;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.node.JsonNodeFactory;
-import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.apache.fory.json.JsonArray;
+import org.apache.fory.json.JsonObject;
 import stockguidance.database.TableNames;
 import stockguidance.json.CanonicalJson;
 import stockguidance.json.JsonSupport;
@@ -21,7 +20,7 @@ import java.util.Map;
 
 public final class JavaWriterManifest {
     private final Path manifestPath;
-    private final JsonNode root;
+    private final JsonObject root;
     private final TableNames tableNames;
     private final String manifestId;
     private final String sourceKey;
@@ -30,7 +29,7 @@ public final class JavaWriterManifest {
     private final Map<LocalDate, FileEntry> files;
     private final Map<LocalDate, TargetEntry> targets;
 
-    private JavaWriterManifest(Path manifestPath, JsonNode root, TableNames tableNames, String manifestId,
+    private JavaWriterManifest(Path manifestPath, JsonObject root, TableNames tableNames, String manifestId,
                                String sourceKey, String correctedSchemaHash, Path dataRoot,
                                Map<LocalDate, FileEntry> files, Map<LocalDate, TargetEntry> targets) {
         this.manifestPath = manifestPath;
@@ -46,37 +45,39 @@ public final class JavaWriterManifest {
 
     public static JavaWriterManifest read(Path path) {
         if (path == null) throw new IllegalArgumentException("Manifest path is required");
-        JsonNode root = JsonSupport.read(path);
-        if (!root.isObject() || root.path("schema_version").asInt(-1) != 1 || root.path("stage").asInt(-1) != 6) {
+        JsonObject root = JsonSupport.read(path);
+        if (JsonSupport.integerOrDefault(root.get("schema_version"), -1) != 1 || JsonSupport.integerOrDefault(root.get("stage"), -1) != 6) {
             throw new IllegalArgumentException("Unsupported Stage 6 manifest");
         }
         String manifestId = requiredText(root, "manifest_id");
-        ObjectNode unsigned = (ObjectNode) root.deepCopy();
+        JsonObject unsigned = (JsonObject) JsonSupport.deepCopy(root);
         unsigned.remove("manifest_id");
         if (!manifestId.equals(CanonicalJson.sha256(unsigned))) {
             throw new IllegalArgumentException("Stage 6 manifest identity changed");
         }
-        ObjectNode registry = JsonNodeFactory.instance.objectNode();
+        JsonObject registry = JsonSupport.object();
         registry.put("schema_version", 1);
-        JsonNode sourceRegistry = root.path("authoritative_registry");
-        if (!sourceRegistry.isObject() || !sourceRegistry.path("tables").isObject() || !sourceRegistry.path("zscore_templates").isObject()) {
+        Object sourceRegistryValue = root.get("authoritative_registry");
+        if (!(sourceRegistryValue instanceof JsonObject sourceRegistry)
+                || !(sourceRegistry.get("tables") instanceof JsonObject tables)
+                || !(sourceRegistry.get("zscore_templates") instanceof JsonObject zscoreTemplates)) {
             throw new IllegalArgumentException("Manifest registry is incomplete");
         }
-        registry.set("tables", sourceRegistry.path("tables").deepCopy());
-        registry.set("zscore_templates", sourceRegistry.path("zscore_templates").deepCopy());
+        registry.put("tables", JsonSupport.deepCopy(tables));
+        registry.put("zscore_templates", JsonSupport.deepCopy(zscoreTemplates));
         TableNames names = TableNames.decode(registry);
         String correctedSchemaHash = requiredText(root, "corrected_schema_hash");
-        JsonNode inputs = object(root, "inputs");
+        JsonObject inputs = object(root, "inputs");
         Path dataRoot = absolutePath(requiredText(inputs, "data_root"), path);
         Path auditReport = absolutePath(requiredText(inputs, "audit_report"), path);
-        JsonNode snapshot = object(root, "snapshot_identity");
+        JsonObject snapshot = object(root, "snapshot_identity");
         String auditHash = requiredText(snapshot, "audit_sha256");
         if (!auditHash.equals(hash(auditReport))) {
             throw new IllegalArgumentException("Stage 5 audit identity changed");
         }
-        String sourceKey = snapshot.path("source_key").isNull() ? null : optionalText(snapshot, "source_key");
-        Map<LocalDate, FileEntry> files = readFiles(root.path("files"), path);
-        Map<LocalDate, TargetEntry> targets = readTargets(root.path("targets"));
+        String sourceKey = snapshot.get("source_key") == null ? null : optionalText(snapshot, "source_key");
+        Map<LocalDate, FileEntry> files = readFiles(array(root, "files"), path);
+        Map<LocalDate, TargetEntry> targets = readTargets(array(root, "targets"));
         if (files.isEmpty() || targets.isEmpty()) throw new IllegalArgumentException("Manifest has no candidate sessions");
         return new JavaWriterManifest(path.toAbsolutePath().normalize(), root, names, manifestId, sourceKey,
                 correctedSchemaHash, dataRoot, files, targets);
@@ -86,8 +87,8 @@ public final class JavaWriterManifest {
         return manifestPath;
     }
 
-    public JsonNode root() {
-        return root.deepCopy();
+    public JsonObject root() {
+        return (JsonObject) JsonSupport.deepCopy(root);
     }
 
     public TableNames tableNames() {
@@ -107,7 +108,8 @@ public final class JavaWriterManifest {
     }
 
     public String sourceScope() {
-        return CanonicalJson.sha256(root.path("source").path("archive_source"));
+        JsonObject source = object(root, "source");
+        return CanonicalJson.sha256(object(source, "archive_source"));
     }
 
     public String calendarId() {
@@ -115,14 +117,18 @@ public final class JavaWriterManifest {
     }
 
     public Map<Long, String> tickerMappings() {
-        JsonNode values = root.path("mappings").path("ticker_mappings");
-        if (!values.isArray()) throw new IllegalArgumentException("Manifest ticker mappings are required");
+        JsonObject mappings = object(root, "mappings");
+        Object valuesValue = mappings.get("ticker_mappings");
+        if (!(valuesValue instanceof JsonArray values)) throw new IllegalArgumentException("Manifest ticker mappings are required");
         Map<Long, String> result = new LinkedHashMap<>();
-        for (JsonNode value : values) {
-            if (!value.path("id").canConvertToLong() || value.path("id").longValue() < 1 || !value.path("label").isTextual()) {
+        for (Object rawValue : values) {
+            if (!(rawValue instanceof JsonObject value)) throw new IllegalArgumentException("Manifest ticker mapping must be an object");
+            Object id = value.get("id");
+            Object label = value.get("label");
+            if (!JsonSupport.fitsLong(id) || JsonSupport.longIntegerValue(id) < 1 || !JsonSupport.isString(label)) {
                 throw new IllegalArgumentException("Invalid manifest ticker mapping");
             }
-            if (result.putIfAbsent(value.path("id").longValue(), value.path("label").textValue()) != null) {
+            if (result.putIfAbsent(JsonSupport.longIntegerValue(id), JsonSupport.stringValue(label)) != null) {
                 throw new IllegalArgumentException("Duplicate manifest ticker mapping");
             }
         }
@@ -172,68 +178,75 @@ public final class JavaWriterManifest {
         return file(session).valid();
     }
 
-    private static Map<LocalDate, FileEntry> readFiles(JsonNode value, Path manifestPath) {
-        if (!value.isArray()) throw new IllegalArgumentException("Manifest files are required");
+    private static Map<LocalDate, FileEntry> readFiles(JsonArray value, Path manifestPath) {
         Map<LocalDate, FileEntry> result = new HashMap<>();
-        for (JsonNode item : value) {
+        for (Object rawItem : value) {
+            if (!(rawItem instanceof JsonObject item)) throw new IllegalArgumentException("Manifest file must be an object");
             LocalDate session = date(item, "session");
             if (result.containsKey(session)) throw new IllegalArgumentException("Duplicate manifest session file");
-            String rawPath = item.path("path").isNull() ? null : optionalText(item, "path");
+            String rawPath = item.get("path") == null ? null : optionalText(item, "path");
             Path archivePath = rawPath == null ? null : absolutePath(rawPath, manifestPath);
             String hash = optionalText(item, "file_sha256");
             String recordsId = optionalText(item, "records_id");
-            if (item.path("valid").asBoolean(false) && (archivePath == null || hash == null || recordsId == null)) {
+            boolean valid = JsonSupport.booleanOrDefault(item.get("valid"), false);
+            if (valid && (archivePath == null || hash == null || recordsId == null)) {
                 throw new IllegalArgumentException("Valid manifest source lacks an identity");
             }
-            result.put(session, new FileEntry(session, archivePath, item.path("valid").asBoolean(false), hash, recordsId));
+            result.put(session, new FileEntry(session, archivePath, valid, hash, recordsId));
         }
         return result;
     }
 
-    private static Map<LocalDate, TargetEntry> readTargets(JsonNode value) {
-        if (!value.isArray()) throw new IllegalArgumentException("Manifest targets are required");
+    private static Map<LocalDate, TargetEntry> readTargets(JsonArray value) {
         Map<LocalDate, TargetEntry> result = new HashMap<>();
-        for (JsonNode item : value) {
+        for (Object rawItem : value) {
+            if (!(rawItem instanceof JsonObject item)) throw new IllegalArgumentException("Manifest target must be an object");
             LocalDate session = date(item, "session");
             if (result.containsKey(session)) throw new IllegalArgumentException("Duplicate manifest target");
             List<LocalDate> dependencies = new ArrayList<>();
-            JsonNode values = item.path("derived_dependencies");
-            if (!values.isArray()) throw new IllegalArgumentException("Derived dependencies are required");
-            for (JsonNode dependency : values) dependencies.add(LocalDate.parse(requiredText(dependency)));
+            Object valuesValue = item.get("derived_dependencies");
+            if (!(valuesValue instanceof JsonArray values)) throw new IllegalArgumentException("Derived dependencies are required");
+            for (Object dependency : values) dependencies.add(LocalDate.parse(requiredText(dependency)));
             List<LocalDate> zScoreDependencies = new ArrayList<>();
-            JsonNode zScoreValues = item.path("zscore_dependencies");
-            if (zScoreValues.isArray()) {
-                for (JsonNode dependency : zScoreValues) zScoreDependencies.add(LocalDate.parse(requiredText(dependency)));
+            Object zScoreValuesValue = item.get("zscore_dependencies");
+            if (zScoreValuesValue instanceof JsonArray zScoreValues) {
+                for (Object dependency : zScoreValues) zScoreDependencies.add(LocalDate.parse(requiredText(dependency)));
             }
             result.put(session, new TargetEntry(session, List.copyOf(dependencies), List.copyOf(zScoreDependencies)));
         }
         return result;
     }
 
-    private static JsonNode object(JsonNode root, String name) {
-        JsonNode value = root.get(name);
-        if (value == null || !value.isObject()) throw new IllegalArgumentException("Manifest object is missing: " + name);
-        return value;
+    private static JsonObject object(JsonObject root, String name) {
+        Object value = root.get(name);
+        if (!(value instanceof JsonObject object)) throw new IllegalArgumentException("Manifest object is missing: " + name);
+        return object;
     }
 
-    private static String requiredText(JsonNode root, String name) {
+    private static String requiredText(JsonObject root, String name) {
         return requiredText(root.get(name));
     }
 
-    private static String requiredText(JsonNode value) {
-        if (value == null || !value.isTextual() || value.textValue().isBlank()) {
+    private static String requiredText(Object value) {
+        if (!JsonSupport.isString(value) || JsonSupport.stringValue(value).isBlank()) {
             throw new IllegalArgumentException("Manifest text is missing");
         }
-        return value.textValue();
+        return JsonSupport.stringValue(value);
     }
 
-    private static String optionalText(JsonNode root, String name) {
-        JsonNode value = root.get(name);
-        return value == null || value.isNull() ? null : requiredText(value);
+    private static String optionalText(JsonObject root, String name) {
+        Object value = root.get(name);
+        return value == null ? null : requiredText(value);
     }
 
-    private static LocalDate date(JsonNode root, String name) {
+    private static LocalDate date(JsonObject root, String name) {
         return LocalDate.parse(requiredText(root, name));
+    }
+
+    private static JsonArray array(JsonObject root, String name) {
+        Object value = root.get(name);
+        if (!(value instanceof JsonArray array)) throw new IllegalArgumentException("Manifest array is missing: " + name);
+        return array;
     }
 
     private static Path absolutePath(String value, Path relativeTo) {

@@ -1,8 +1,8 @@
 package stockguidance.database;
 
-import com.fasterxml.jackson.databind.JsonNode;
 import stockguidance.json.ContractException;
 import stockguidance.json.JsonSupport;
+import org.apache.fory.json.JsonObject;
 
 import java.nio.file.Path;
 import java.util.HashSet;
@@ -45,19 +45,16 @@ public final class DatabaseConfiguration {
         }
     }
 
-    public static DatabaseConfiguration decode(JsonNode root) {
+    public static DatabaseConfiguration decode(JsonObject root) {
         return decode(root, null);
     }
 
-    private static DatabaseConfiguration decode(JsonNode root, Path configurationPath) {
-        if (root == null || !root.isObject()) {
+    private static DatabaseConfiguration decode(JsonObject root, Path configurationPath) {
+        if (root == null) {
             throw new ContractException("Database configuration must be a JSON object");
         }
         Set<String> fields = new HashSet<>();
-        Iterator<String> names = root.fieldNames();
-        while (names.hasNext()) {
-            fields.add(names.next());
-        }
+        fields.addAll(root.keySet());
         if (!ALLOWED_FIELDS.containsAll(fields)) {
             throw new ContractException("Unknown database configuration fields");
         }
@@ -67,11 +64,11 @@ public final class DatabaseConfiguration {
             throw new ContractException("Conflicting database names");
         }
         String effectiveDatabase = database == null ? schema : database;
-        String host = root.has("host") ? requiredText(root, "host") : "localhost";
+        String host = root.containsKey("host") ? requiredText(root, "host") : "localhost";
         String user = requiredText(root, "user");
-        String password = root.has("password") ? requiredText(root, "password") : "";
-        int port = root.has("port") ? requiredInt(root, "port") : 3306;
-        String driverText = root.has("driver") ? requiredText(root, "driver") : DatabaseDriver.AUTO.value();
+        String password = root.containsKey("password") ? requiredText(root, "password") : "";
+        int port = root.containsKey("port") ? requiredInt(root, "port") : 3306;
+        String driverText = root.containsKey("driver") ? requiredText(root, "driver") : DatabaseDriver.AUTO.value();
         Path tableNamesFile = configurationPath == null ? null : resolveTableNamesFile(configurationPath, root);
         if (effectiveDatabase == null) {
             throw new ContractException("Database name is required");
@@ -134,31 +131,31 @@ public final class DatabaseConfiguration {
                 '}';
     }
 
-    private static String optionalText(JsonNode root, String name) {
-        if (!root.has(name)) {
+    private static String optionalText(JsonObject root, String name) {
+        if (!root.containsKey(name)) {
             return null;
         }
         return requiredText(root, name);
     }
 
-    private static String requiredText(JsonNode root, String name) {
-        JsonNode value = root.get(name);
-        if (value == null || !value.isTextual()) {
+    private static String requiredText(JsonObject root, String name) {
+        Object value = root.get(name);
+        if (!JsonSupport.isString(value)) {
             throw new ContractException("Expected text for database configuration field");
         }
-        return value.textValue();
+        return JsonSupport.stringValue(value);
     }
 
-    private static int requiredInt(JsonNode root, String name) {
-        JsonNode value = root.get(name);
-        if (value == null || !value.isIntegralNumber() || !value.canConvertToInt()) {
+    private static int requiredInt(JsonObject root, String name) {
+        Object value = root.get(name);
+        if (!JsonSupport.isIntegralNumber(value) || !JsonSupport.fitsInt(value)) {
             throw new ContractException("Expected integer for database configuration field");
         }
-        return value.intValue();
+        return JsonSupport.integerValue(value);
     }
 
-    private static Path resolveTableNamesFile(Path configurationPath, JsonNode root) {
-        if (!root.has("table_names_file") || root.get("table_names_file").isNull()) {
+    private static Path resolveTableNamesFile(Path configurationPath, JsonObject root) {
+        if (!root.containsKey("table_names_file") || JsonSupport.isNull(root.get("table_names_file"))) {
             return null;
         }
         String selected = requiredText(root, "table_names_file");

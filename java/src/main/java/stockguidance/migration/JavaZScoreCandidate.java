@@ -1,8 +1,10 @@
 package stockguidance.migration;
 
-import com.fasterxml.jackson.databind.node.ArrayNode;
-import com.fasterxml.jackson.databind.node.JsonNodeFactory;
-import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.apache.fory.json.JsonArray;
+import org.apache.fory.json.JsonObject;
+import stockguidance.json.JsonSupport;
+
+
 import stockguidance.database.SqlIdentifiers;
 import stockguidance.database.TableNames;
 import stockguidance.json.CanonicalJson;
@@ -308,7 +310,7 @@ public final class JavaZScoreCandidate {
     }
 
     private String ensureSeries(Connection connection, Family family, int window) throws SQLException {
-        ObjectNode definition = definition(family, window);
+        JsonObject definition = definition(family, window);
         String key = CanonicalJson.sha256(definition);
         String table = SqlIdentifiers.quote(names.zscoreSeries(), "z-score series");
         String select = "SELECT schema_version, source_scope, calendar_id, family, `window`, calculation_version, delta_definition, `precision`, missing_value_policy FROM " + table + " WHERE series_key = ? FOR UPDATE";
@@ -370,8 +372,8 @@ public final class JavaZScoreCandidate {
         }
     }
 
-    private ObjectNode definition(Family family, int window) {
-        ObjectNode value = JsonNodeFactory.instance.objectNode();
+    private JsonObject definition(Family family, int window) {
+        JsonObject value = JsonSupport.object();
         value.put("schema_version", 1); value.put("source_scope", manifest.sourceScope()); value.put("calendar_id", manifest.calendarId());
         value.put("family", family.value); value.put("window", window); value.put("calculation_version", CALCULATION_VERSION);
         value.put("delta_definition", deltaDefinition(family)); value.put("precision", PRECISION); value.put("missing_value_policy", MISSING_VALUE_POLICY);
@@ -379,10 +381,10 @@ public final class JavaZScoreCandidate {
     }
 
     private static String rowsContentId(List<ScoreRow> rows, LocalDate session) {
-        ArrayNode values = JsonNodeFactory.instance.arrayNode();
+        JsonArray values = JsonSupport.array();
         for (ScoreRow row : rows) {
-            ArrayNode item = values.addArray(); item.add(session.toString()); item.add(row.tickerId);
-            if (row.score == null) item.addNull(); else item.add(row.score);
+            JsonArray item = JsonSupport.addArray(values); item.add(session.toString()); item.add(row.tickerId);
+            item.add(row.score);
             item.add(row.status.code);
         }
         return CanonicalJson.sha256(values);
@@ -499,13 +501,13 @@ public final class JavaZScoreCandidate {
     private void validateCheckpoint(Path checkpoint, LocalDate session, Family family, int window, String digest) {
         if (checkpoint == null || !Files.exists(checkpoint)) return;
         try {
-            com.fasterxml.jackson.databind.JsonNode value = stockguidance.json.JsonSupport.read(checkpoint);
-            if (!value.isObject() || value.path("schema_version").asInt(-1) != 1
-                    || !manifest.manifestId().equals(value.path("manifest_id").asText())
-                    || !"zscores".equals(value.path("workload").asText())
-                    || !family.value.equals(value.path("family").asText()) || value.path("window").asInt(-1) != window
-                    || !session.toString().equals(value.path("session").asText())
-                    || !digest.equals(value.path("content_digest").asText()) || !value.path("after_commit").asBoolean(false)) {
+            JsonObject value = JsonSupport.read(checkpoint);
+            if (JsonSupport.integerOrDefault(value.get("schema_version"), -1) != 1
+                    || !manifest.manifestId().equals(JsonSupport.stringOrEmpty(value.get("manifest_id")))
+                    || !"zscores".equals(JsonSupport.stringOrEmpty(value.get("workload")))
+                    || !family.value.equals(JsonSupport.stringOrEmpty(value.get("family"))) || JsonSupport.integerOrDefault(value.get("window"), -1) != window
+                    || !session.toString().equals(JsonSupport.stringOrEmpty(value.get("session")))
+                    || !digest.equals(JsonSupport.stringOrEmpty(value.get("content_digest"))) || !JsonSupport.booleanOrDefault(value.get("after_commit"), false)) {
                 throw new IllegalArgumentException("Stale or incompatible Java z-score checkpoint");
             }
         } catch (RuntimeException error) {
@@ -516,7 +518,7 @@ public final class JavaZScoreCandidate {
 
     private void writeCheckpoint(Path checkpoint, LocalDate session, Family family, int window, String digest) {
         if (checkpoint == null) return;
-        ObjectNode value = JsonNodeFactory.instance.objectNode(); value.put("schema_version", 1);
+        JsonObject value = JsonSupport.object(); value.put("schema_version", 1);
         value.put("manifest_id", manifest.manifestId()); value.put("workload", "zscores"); value.put("family", family.value);
         value.put("window", window); value.put("session", session.toString()); value.put("content_digest", digest);
         value.put("after_commit", true); value.put("committed_at", TRIAL_RECEIPT);

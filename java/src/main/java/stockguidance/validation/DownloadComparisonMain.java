@@ -1,5 +1,8 @@
 package stockguidance.validation;
 
+import stockguidance.json.JsonSupport;
+
+
 import stockguidance.database.DatabaseConfiguration;
 import stockguidance.database.MySqlConnectionFactory;
 import stockguidance.database.TableNames;
@@ -30,9 +33,9 @@ public final class DownloadComparisonMain {
             var result = new LegacyDownloadComparator(new MySqlConnectionFactory(), tableNames).compare(configuration, dataRoot, start, end, adjustment);
             String output = new String(stockguidance.json.CanonicalJson.bytes(result.report()), StandardCharsets.UTF_8);
             System.out.print(output);
-            System.exit(result.report().get("exit_code").intValue());
+            System.exit(((Number) result.report().get("exit_code")).intValue());
         } catch (Exception error) {
-            var failure = com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.objectNode();
+            var failure = JsonSupport.object();
             failure.put("schema_version", 1);
             failure.put("backend", "java");
             failure.put("operation", "compare_database_downloads");

@@ -2,7 +2,7 @@
 
 This guide covers the supported Java checks and benchmarks for the current
 archive migration implementation. `ArchiveCandidateReader` uses Apache Fory
-JSON for archive decoding; Jackson is not an archive parser option.
+JSON for archive decoding; the archive path has no alternate parser.
 
 Run commands from `C:\Projects\StockGuidance` unless noted otherwise. Use a
 distinct disposable MySQL schema for every writer trial. Never use the
@@ -154,6 +154,6 @@ Get-FileHash `
   -Algorithm SHA256
 ```
 
-The retired parser-only Jackson/Fory A/B harness is not a supported current
-benchmark. Its historical measurements exclude database publication and must
+The retired parser-only A/B harness is not a supported current benchmark. Its
+historical measurements exclude database publication and must
 not be compared directly with Stage 9a end-to-end timings.
