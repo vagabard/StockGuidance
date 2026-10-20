@@ -14,7 +14,9 @@ substage separately, not its entire parent stage in one conversation. A stage
 is complete only when its acceptance criteria and handoff exist. Do not interpret
 completed scaffolding as a completed production migration.
 
-**Resume here: Stage 5c, Luna high.** Stages 1–4 and their historical handoffs
+**Resume here: Stage 6, Luna high.** Stage 5c's complete read-only audit passed
+its readiness gate on 2026-10-20; documented data gaps remain (see the latest
+handoff). Stages 1–4 and their historical handoffs
 are preserved below. Their passing reader/derived measurements remain evidence
 for those workloads, but the expanded comparison is incomplete. Stage 2c reviewed
 prerequisites and skipped timing; it did not evaluate a Java writer. SQL has not
@@ -850,3 +852,91 @@ the independent semantic reference, not only the selected backend's own formulas
 - Python focused validation passed: 32 Stage 5/archive contract tests; the
   existing Stage 3/4 workflow set passed 65 tests. Offline Java validation
   passed all 32 tests. Production DDL/repairs were not applied.
+
+### Stage 5c audit recovery completed — 2026-10-20
+
+- Database connectivity is healthy. The first failing stored row is `TTE` on
+  2005-12-16 with zero OHLC; the original archive also contains these zeros and
+  the file was already quarantined by Stage 5a. The audit incorrectly required
+  every stored row to satisfy the adoption contract, aborting instead of
+  reporting defects. Cursor cleanup then masked the cause with `Unread result
+  found`. Invalid stored values now remain explicit per-session findings, and
+  failure cleanup closes the connection without hiding the original exception.
+- Comparisons now use exact archive decimals rather than the historical
+  four-place reader. All selected file hashes and valid-file record identities
+  are rechecked; supplied typed evidence must match. Changed files, corrupt
+  inventories/evidence and conflicting source bindings prevent completion.
+  Case-distinct keys, duplicate database keys and database-only dates remain
+  explicit. Global orphan queries check both session and ticker mappings once
+  per table. The snapshot records the actual schema hash and source binding.
+- The unnecessary secondary ticker ordering forced MySQL to sort the entire
+  history. Ordering by session alone uses the existing session/date indexes;
+  the live `EXPLAIN` confirms that the global sort is eliminated. No index or
+  production schema changes were needed. New snapshots recompare every session
+  rather than trusting database comparisons from an older checkpoint.
+- Run `scripts/test_stage5c_readiness.py --verbose` directly in PyCharm. Paths
+  default to this checkout independently of the working directory. The script
+  prints progress, full exception chains and bounded examples of invalid rows.
+  `--probe-only` tests connectivity without running the full audit and does not
+  establish Stage 6 readiness. Configuration contents are not printed.
+- Validation: the complete Python suite passed 818 tests; 14 focused Stage 5
+  and Stage 8 checks passed after the query-plan adjustment.
+- The final live command was `scripts/test_stage5c_readiness.py --verbose`,
+  using PyCharm's configured Python. It completed in 4,299.04 seconds and exited
+  0. `output/legacy-migration/audit.json` records `database_available: true`
+  and `complete: true` across all 5,130 retained sessions (2005-12-16 through
+  2026-05-07), including 44,199,460 stored raw rows. All 4,898 valid files passed
+  fresh hash, exact records identity and typed evidence checks; 232 unadoptable
+  files remain explicitly quarantined. There are 230 invalid stored rows,
+  zero duplicate database keys, zero database-only dates and zero global
+  raw/derived orphans against either session or ticker mappings.
+- `matches: false` is expected and preserved. Among valid archive sessions,
+  the audit found 1,945,736 missing keys, 1,896,456 extra keys and 4,145,887
+  shared rows with differing fields, including 3,823,262 volume differences.
+  These findings and the existing unresolved ticker alias remain inputs to the
+  later gated repair stages; audit completion does not certify clean data or
+  continuous verified coverage. No production schema, rows, receipts, source
+  bindings or original files were changed.
+- Evidence: `output/legacy-migration/audit.json`, `audit-checkpoint.json`,
+  `audit-summary.json` and `stage5c-readiness.log`. The summary binds the full
+  report SHA-256 `04708b2a2ba212c9d3a42915dc7defee7b023b9622ff197fe023323b4d17d60a`;
+  the actual read-only database schema hash is
+  `54ef733f88da618d05913e329956907c5936d6c4de54a37af6d1932baa45e15c`.
+- This result supersedes the timeout blocker above. All Stage 5 handoffs now
+  exist; Stage 6 may proceed with explicit gaps and isolated disposable targets.
+  Next prompt: **Read docs/legacy_migration_prompts.md and execute revised
+  Stage 6 only.** Stage 6 was not started by this audit recovery.
+
+### Revised Stage 6 disposable candidates completed — 2026-10-20
+
+- Added `stockguidance.performance.candidates` and the
+  `legacy_migration_benchmark` CLI. The harness refuses source/configuration
+  targets, uses the authoritative registry, records corrected schema/registry
+  identity, and creates only isolated SQLite disposable schemas with equivalent
+  raw/derived/z-score tables, date indexes, constraints and explicit empty
+  trigger/routine inventories. Production DDL/DML flags remain false.
+- `output/legacy-migration/benchmark/candidates/manifest.json` binds the exact
+  25 Stage 2 paths and hashes, 1,416 required dependency files, preceding and
+  following derived context, 60-session z-score context, the chronological
+  20-session block ending 2026-04-29, 36,866 retained ticker IDs, database
+  mappings, source/snapshot identity and corrected schema hash
+  `00d2f5da9dbc1e0353a7fbf9da8fb9fd78aa1d0fb57ac63d2caecf3def7f6101`.
+- Python reference trials completed with four sequential invocations per
+  workload (first plus three warm repeats): raw adoption/repair/rerun in
+  `python-raw.json`, exact-decimal legacy-derived persistence in
+  `python-derived.json` (217,734 rows across 25 sessions), and dense price/
+  price-delta z-scores for windows 20/60 in `python-zscores.json` (2,949,280
+  rows across all 36,866 ticker IDs and 20 target sessions). The aggregate
+  `study.json` marks Python complete and Java/SQL pending. Z-score preparation
+  streams one ticker at a time; statuses and NULL policy are retained.
+- Correctness fixtures cover the disposable-target guard, registry-resolved
+  schema, exact fractional volume, exact-case `AAP`/`AAp`, nullable derived
+  inputs, rollback/checkpoint behavior and unchanged rerun idempotency. The
+  focused command is `python -m pytest tests/stage6/test_legacy_candidates.py`.
+- Reproduction commands from the checkout are:
+  `PYTHONPATH=src <configured-python> -m stockguidance.cli.legacy_migration_benchmark --build-manifest`
+  and `PYTHONPATH=src <configured-python> -m stockguidance.cli.legacy_migration_benchmark --run-python --manifest output/legacy-migration/benchmark/candidates/manifest.json --workloads raw,derived,zscores`.
+  Aggregate with `--aggregate --report output/legacy-migration/benchmark/candidates/python-raw.json --report output/legacy-migration/benchmark/candidates/python-derived.json --report output/legacy-migration/benchmark/candidates/python-zscores.json`.
+  Java and SQL timings remain pending Stage 7/8; no production schema, rows,
+  receipts, source bindings or source files were changed. Next prompt: Stage 7a
+  only.
