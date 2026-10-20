@@ -1059,3 +1059,34 @@ parity/recovery handoff that follows.
   provenance/status and atomic publication contracts on this MySQL harness.
   Next prompt: **Read docs/legacy_migration_prompts.md and execute revised
   Stage 7b only.** Stage 7b was not started in this correction.
+
+### Revised Stage 7b Java z-score candidate completed — 2026-10-20
+
+- Added `JavaZScoreCandidate` and `JavaZScoreMain` for guarded disposable MySQL
+  publication of price and price-delta z-scores at windows 20 and 60. The
+  candidate uses the frozen Stage 6 manifest and registry, dense manifest ticker
+  scope, consecutive dependency sessions, population variance, stable float64
+  calculation and float32 storage.
+- Stored `close_ratio_to_prior` values are read and checked against stored raw
+  closes. Status precedence, missing/unverified/invalid inputs, insufficient
+  history, zero variance, exact-case mappings and chunked ticker loading are
+  explicit. Series/session metadata records source scope, dependency and
+  availability digests, status counts and content identity; each series/session
+  publishes atomically with its rows and supports post-commit checkpoints.
+- Added shared Java parity fixtures for fractional/extreme values, `AAP`/`AAp`,
+  constant/nearly constant behavior, missing/unverified inputs and float32
+  quantization. `mvn -o test` passed 40 tests; focused Python candidate tests
+  passed 11 tests.
+- The final disposable MySQL trial used server 9.5.0/InnoDB schema
+  `stockguidance_disposable_s7b_20261020h`, 61 dependency sessions and all
+  36,866 manifest ticker IDs. Python parity passed for all four series: price
+  ready rows 10,951/10,513 and price-delta ready rows 10,917/10,503 for
+  windows 20/60. Recovery checks passed for rollback, durable post-commit
+  restart, stale checkpoints and changed source input. Artifact:
+  `output/legacy-migration/benchmark/candidates/java-zscores-mysql.json`.
+  Report SHA-256:
+  `267bd4e31a1d9e8faedf6bebd54d7c784630ffe71a3e30f2abb5848e50022663`.
+- No production DDL/DML, receipts, source bindings or retained source files
+  changed. This is correctness evidence only; Stage 9 still owns comparable
+  startup-inclusive MySQL measurements. Next prompt: **Read
+  docs/legacy_migration_prompts.md and execute revised Stage 8a only.**

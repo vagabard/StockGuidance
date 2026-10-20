@@ -15,6 +15,7 @@ import java.security.NoSuchAlgorithmException;
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -105,6 +106,29 @@ public final class JavaWriterManifest {
         return correctedSchemaHash;
     }
 
+    public String sourceScope() {
+        return CanonicalJson.sha256(root.path("source").path("archive_source"));
+    }
+
+    public String calendarId() {
+        return "XNYS";
+    }
+
+    public Map<Long, String> tickerMappings() {
+        JsonNode values = root.path("mappings").path("ticker_mappings");
+        if (!values.isArray()) throw new IllegalArgumentException("Manifest ticker mappings are required");
+        Map<Long, String> result = new LinkedHashMap<>();
+        for (JsonNode value : values) {
+            if (!value.path("id").canConvertToLong() || value.path("id").longValue() < 1 || !value.path("label").isTextual()) {
+                throw new IllegalArgumentException("Invalid manifest ticker mapping");
+            }
+            if (result.putIfAbsent(value.path("id").longValue(), value.path("label").textValue()) != null) {
+                throw new IllegalArgumentException("Duplicate manifest ticker mapping");
+            }
+        }
+        return Map.copyOf(result);
+    }
+
     public Path dataRoot() {
         return dataRoot;
     }
@@ -167,7 +191,12 @@ public final class JavaWriterManifest {
             JsonNode values = item.path("derived_dependencies");
             if (!values.isArray()) throw new IllegalArgumentException("Derived dependencies are required");
             for (JsonNode dependency : values) dependencies.add(LocalDate.parse(requiredText(dependency)));
-            result.put(session, new TargetEntry(session, List.copyOf(dependencies)));
+            List<LocalDate> zScoreDependencies = new ArrayList<>();
+            JsonNode zScoreValues = item.path("zscore_dependencies");
+            if (zScoreValues.isArray()) {
+                for (JsonNode dependency : zScoreValues) zScoreDependencies.add(LocalDate.parse(requiredText(dependency)));
+            }
+            result.put(session, new TargetEntry(session, List.copyOf(dependencies), List.copyOf(zScoreDependencies)));
         }
         return result;
     }
@@ -227,7 +256,7 @@ public final class JavaWriterManifest {
     public record FileEntry(LocalDate session, Path path, boolean valid, String fileSha256, String recordsId) {
     }
 
-    public record TargetEntry(LocalDate session, List<LocalDate> derivedDependencies) {
+    public record TargetEntry(LocalDate session, List<LocalDate> derivedDependencies, List<LocalDate> zscoreDependencies) {
     }
 
     public static final class InvalidSourceException extends IllegalArgumentException {
