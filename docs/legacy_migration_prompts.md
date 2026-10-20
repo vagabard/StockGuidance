@@ -1131,3 +1131,41 @@ parity/recovery handoff that follows.
   correctness is complete; Stage 9 still owns comparable startup-inclusive
   timings. Next prompt: **Read docs/legacy_migration_prompts.md and execute
   revised Stage 8b only.**
+
+### Revised Stage 8b SQL derived candidate completed — 2026-10-20
+
+- Implemented the guarded SQL derived candidate in
+  `src/stockguidance/performance/sql_derived_candidate.py` and added the
+  `--run-sql-derived-trial` CLI entry point. The candidate reuses Stage 8a's
+  registry-bound raw target, stages one target/dependency identity per session,
+  and invokes `stage8b_populate_derived`, a MySQL set-based procedure using
+  bounded date-ID joins, `ROW_NUMBER()` ranking with label tie-breaks, and
+  NULL/zero-denominator rules matching `legacy-open-to-close-v1`. It uses an
+  approximate numeric operand for float64-equivalent division precision.
+- The routine publishes all 16 derived columns, dependency/content receipts
+  and `stage6_completion` in the caller's one-session transaction. It has no
+  internal commit and rejects missing session mappings, mismatched raw receipt
+  identities and incomplete current populations. Client work is limited to
+  validated archive/raw dependency checks, reference tolerance checks,
+  checkpoint handling and metadata staging; it does not loop over rows to
+  publish derived values.
+- The final disposable MySQL 9.5.0/InnoDB trial used
+  `stockguidance_disposable_s8b_20261020h`, the unchanged Stage 6 manifest
+  `e5d9446e8bae97244edf17824be680eda6e8990bf1b80a2e6629809896022a14`, and
+  all 25 fixed sessions. It matched 217,734 derived rows and passed the
+  fixture/reference parity, bounded EXPLAIN, exact receipt identity,
+  before-commit rollback, durable post-commit restart, idempotent rerun, stale
+  checkpoint, changed input, stored dependency corruption and missing
+  dependency checks. Schema hash:
+  `e8e96f2fc30cf7c68fef49865d371b685e378644f995a1659603b11e0ffe0e7f`;
+  object hash:
+  `82ac39c5d35c0d20d46f82f60ebdd72ba29ab614e92e98b7c34580e506949463`;
+  `stage8b_populate_derived` definition hash:
+  `d0f6cef39af9aa504db84b8f84d05cf59fdfe88c93ce695e044b55220d0cb0ae`.
+- Artifact: `output/legacy-migration/benchmark/candidates/sql-derived-mysql.json`;
+  SHA-256:
+  `49e04e0b84a3fc3ca462e0b9825832ce603b9784e0be5c5fbb4d052281f48d3`. Focused SQL/MySQL
+  tests passed 15 tests. Production DDL/DML, receipts, source bindings,
+  retained source files and production rows were unchanged. Stage 9 still owns
+  comparable startup-inclusive timings; no backend is selected. Next prompt:
+  **Read docs/legacy_migration_prompts.md and execute revised Stage 8c only.**
