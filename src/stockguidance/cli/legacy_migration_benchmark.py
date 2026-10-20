@@ -25,6 +25,7 @@ def parser() -> argparse.ArgumentParser:
 	mode.add_argument("--run-java-zscore-trial", action="store_true")
 	mode.add_argument("--run-sql-raw-trial", action="store_true")
 	mode.add_argument("--run-sql-derived-trial", action="store_true")
+	mode.add_argument("--run-sql-zscore-trial", action="store_true")
 	arguments.add_argument("--data-root", type=_path, default=Path("data"))
 	arguments.add_argument("--dbinfo-file", type=_path, default=Path("dbinfo.id"))
 	arguments.add_argument("--evaluation-plan", type=_path, default=Path("output/legacy-migration/evaluation-plan.json"))
@@ -90,6 +91,18 @@ def main(argv: Sequence[str] | None = None) -> int:
 			report = run_trial(_resolve(arguments.manifest), _resolve(arguments.dbinfo_file), arguments.disposable_schema, _resolve(arguments.output))
 		except Exception:
 			print(json.dumps({"successful": False, "error": "Stage 8b SQL derived trial failed"}))
+			return 1
+		print(json.dumps({"successful": report["status"] == "complete", "report": str(_resolve(arguments.output)), "status": report["status"]}))
+		return 0 if report["status"] == "complete" else 1
+	if arguments.run_sql_zscore_trial:
+		from stockguidance.performance.sql_zscore_candidate import run_trial
+
+		if not arguments.disposable_schema:
+			parser().error("--run-sql-zscore-trial requires --disposable-schema")
+		try:
+			report = run_trial(_resolve(arguments.manifest), _resolve(arguments.dbinfo_file), arguments.disposable_schema, _resolve(arguments.output))
+		except Exception:
+			print(json.dumps({"successful": False, "error": "Stage 8c SQL z-score trial failed"}))
 			return 1
 		print(json.dumps({"successful": report["status"] == "complete", "report": str(_resolve(arguments.output)), "status": report["status"]}))
 		return 0 if report["status"] == "complete" else 1

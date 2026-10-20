@@ -1169,3 +1169,38 @@ parity/recovery handoff that follows.
   retained source files and production rows were unchanged. Stage 9 still owns
   comparable startup-inclusive timings; no backend is selected. Next prompt:
   **Read docs/legacy_migration_prompts.md and execute revised Stage 8c only.**
+
+### Revised Stage 8c SQL z-score candidate completed — 2026-10-20
+
+- Implemented the guarded set-based SQL z-score candidate in
+  `src/stockguidance/performance/sql_zscore_candidate.py` and added the
+  `--run-sql-zscore-trial` CLI entry point. Dependency sessions are staged with
+  explicit ordinals and expected raw identities; the SQL procedures use the
+  retained manifest ticker scope, verified stored `close_ratio_to_prior`
+  inputs, bounded consecutive-session windows, `STDDEV_POP`, status precedence,
+  zero-variance classification and float32 publication. SQL aggregates cannot
+  make an incomplete or NULL-containing window ready.
+- Publication is registry-bound and atomic in the caller transaction. The
+  candidate records series/session metadata, dependency and availability
+  digests, status counts, `stage6_completion`, and checkpoint identities. Client
+  work is limited to validated source checks, input hashing, reference parity
+  checks and disposable raw/delta seeding; z-score rows and metadata are
+  published by `INSERT ... SELECT` procedures without a client row loop.
+- Focused SQL candidate coverage passed 10 tests, including registry/staging
+  collision guards, set-based routine structure, shared series identity and
+  no internal commits. The final disposable MySQL trial used version 9.5.0,
+  InnoDB, schema `stockguidance_disposable_s8c_20261020g`, target
+  `2026-04-29`, 61 dependency sessions and all 36,866 retained ticker IDs.
+  Python reference parity passed for all four series: price ready rows
+  10,951/10,513 and price-delta ready rows 10,917/10,503 for windows 20/60.
+  Recovery checks passed for before-commit rollback, durable post-commit
+  restart, idempotent rerun, stale checkpoint rejection and changed input.
+- Artifact:
+  `output/legacy-migration/benchmark/candidates/sql-zscores-mysql.json`;
+  SHA-256 `745feb7f472505093d40309bf1232c4f3645fbea4dee0bc90b7daa9ebd381320`.
+  The report is `complete`, comparison-eligible, records MySQL/schema/routine
+  identity and reports client hashing separately. No production DDL/DML,
+  receipts, source bindings, retained source files or production rows changed.
+  Stage 9 still owns comparable startup-inclusive timings; no backend is
+  selected. Next prompt: **Read docs/legacy_migration_prompts.md and execute
+  revised Stage 9a only.**
