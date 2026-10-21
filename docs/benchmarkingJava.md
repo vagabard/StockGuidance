@@ -51,42 +51,46 @@ The schema must be distinct from the configured production database and must
 match the manifest, table registry, corrected schema and validation-object
 identities.
 
+`stockguidance_disposable_java_benchmark` is a MySQL database name, not a
+folder in this checkout. The command above creates it (and the temporary
+`stockguidance_disposable_java_benchmark_fx` fixture database) when the writer
+trial completes. The direct Java benchmark does not create a schema; it only
+validates and uses an existing one. This checkout's completed trial used
+`stockguidance_disposable_s7a_20261020d`, as recorded in
+`output/legacy-migration/benchmark/candidates/java-writer-mysql.json`.
+
 ## Direct Java benchmark
+
+The JDBC connection enables `rewriteBatchedStatements`; raw ticker INSERTs,
+price INSERTs and price UPDATEs execute in batches of at most 1,000 rows while
+retaining one transaction per session. Archive reads hash original bytes in
+64 KiB blocks, preserving exact file and records identities.
+
+The benchmark uses `JavaWriterCandidate.openExclusiveRawWriteSession(connection)`
+to reuse ticker mappings and the next ID across its sessions. This API requires
+exclusive use of the connection and ticker table for the scope of the run;
+do not modify ticker mappings through another connection or writer during it.
+New mappings enter the cache after commit, and a failed write invalidates the
+cache before retry. Closing the scope clears the cache without closing the
+connection. Standalone `writeRaw` calls continue to load current mappings for
+each transaction. A scope cannot be reused after closing or changing its catalog.
 
 `JavaRawBenchmarkMain` measures archive preparation plus MySQL raw publication
 for the supplied sessions. Its JSON report separates preparation and write
-time, but the process wall clock below also includes JVM startup and shutdown.
+time. The command writes the JSON report to standard output so the class can be
+run directly from IntelliJ IDEA for profiling.
 
 The schema must first contain the disposable candidate marker; the correctness
 trial above is one way to provision and validate it.
 
 ```powershell
 Set-Location C:\Projects\StockGuidance\java
-$manifest = '..\..\output\legacy-migration\benchmark\candidates\manifest.json'
-$sessions = ((Get-Content $manifest -Raw | ConvertFrom-Json).fixed_targets -join ',')
-$report = '..\..\output\legacy-migration\benchmark\candidates\java-raw-manual-p3.json'
-$checkpoint = '..\..\output\legacy-migration\benchmark\candidates\java-raw-manual-p3-checkpoints'
-
-$javaArgs = @(
-  '-Xmx512m', '-XX:ActiveProcessorCount=3', '-XX:+UseSerialGC',
-  '-cp', 'target/classes;target/dependency/*;lib/mysql-connector-j-9.6.0.jar',
-  'stockguidance.migration.JavaRawBenchmarkMain',
-  '--manifest', $manifest,
-  '--dbinfo-file', '..\..\dbinfo.id',
-  '--disposable-schema', 'stockguidance_disposable_java_benchmark',
-  '--preparers', '3',
-  '--sessions', $sessions,
-  '--checkpoint-directory', $checkpoint
-)
-
-$wall = Measure-Command { & java @javaArgs | Set-Content -Path $report -Encoding utf8 }
-Write-Output ("Process wall seconds: " + $wall.TotalSeconds)
-Get-Content $report
+java -Xmx512m -XX:ActiveProcessorCount=3 -XX:+UseSerialGC -cp "target/classes;target/dependency/*;lib/mysql-connector-j-9.6.0.jar" stockguidance.migration.JavaRawBenchmarkMain --manifest ..\output\legacy-migration\benchmark\candidates\manifest.json --dbinfo-file ..\dbinfo.id --disposable-schema stockguidance_disposable_java_benchmark --preparers 3 --sessions "2006-12-08,2007-09-11,2008-05-07,2008-08-04,2009-10-14,2010-05-10,2010-10-04,2011-11-03,2012-10-17,2012-12-24,2013-11-15,2014-12-04,2015-08-06,2017-03-13,2018-08-02,2018-08-29,2020-03-09,2020-03-12,2021-10-04,2021-12-09,2022-02-11,2023-02-17,2024-01-31,2024-10-14,2026-04-29" --checkpoint-directory ..\output\legacy-migration\benchmark\candidates\java-raw-manual-p3-checkpoints
 ```
 
-Run the same command with `--preparers 1` and separate report/checkpoint paths
-to compare one versus three Java preparation threads. The internal
-`workload_seconds` excludes JVM startup; `Measure-Command` includes it.
+Run the same command with `--preparers 1` and a separate checkpoint directory
+to compare one versus three Java preparation threads. Redirect standard output
+to a file if you want to retain the JSON report.
 
 ## Stage 9a comparison
 

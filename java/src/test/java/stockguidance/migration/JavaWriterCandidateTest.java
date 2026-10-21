@@ -6,9 +6,12 @@ import stockguidance.validation.LegacyDerivedCalculator;
 import stockguidance.validation.ValidationContent;
 
 import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.MessageDigest;
 import java.time.LocalDate;
+import java.util.HexFormat;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -56,6 +59,39 @@ class JavaWriterCandidateTest {
 
         assertNotEquals(original.fileSha256(), changed.fileSha256());
         assertNotEquals(original.recordsId(), changed.recordsId());
+    }
+
+    @Test
+    void blockReaderPreservesHashesAcrossBoundariesAndLineEndings() throws Exception {
+        String record = "{\"T\":\"AAP\",\"o\":10,\"h\":12,\"l\":9,\"c\":11,\"v\":100.4,\"t\":1719864000000}";
+        String second = record.replace("AAP", "AAp");
+        String recordsId = null;
+        for (int boundary : new int[]{65535, 65536, 65537, 131073}) {
+            for (String ending : new String[]{"\n", "\r\n"}) {
+                for (boolean finalNewline : new boolean[]{false, true}) {
+                    String content = " ".repeat(boundary - record.length()) + record + ending
+                            + second + (finalNewline ? ending : "");
+                    Path file = directory.resolve("boundary.ndjson");
+                    byte[] bytes = content.getBytes(StandardCharsets.UTF_8);
+                    Files.write(file, bytes);
+                    ArchiveCandidateReader.SessionArchive archive = ArchiveCandidateReader.read(file, LocalDate.of(2024, 7, 1));
+                    assertEquals(2, archive.bars().size());
+                    assertEquals(HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes)), archive.fileSha256());
+                    if (recordsId == null) recordsId = archive.recordsId();
+                    assertEquals(recordsId, archive.recordsId());
+                }
+            }
+        }
+    }
+
+    @Test
+    void blockReaderRejectsEmptyLinesAndDuplicateTickers() throws Exception {
+        String record = "{\"T\":\"AAP\",\"o\":10,\"h\":12,\"l\":9,\"c\":11,\"v\":100,\"t\":1719864000000}";
+        Path file = directory.resolve("invalid.ndjson");
+        for (String content : new String[]{"", "\n", "\r\n", record + "\n\n", record + "\n" + record}) {
+            Files.writeString(file, content);
+            assertThrows(IllegalArgumentException.class, () -> ArchiveCandidateReader.read(file, LocalDate.of(2024, 7, 1)));
+        }
     }
 
     @Test

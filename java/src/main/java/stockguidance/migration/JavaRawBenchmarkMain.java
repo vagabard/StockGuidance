@@ -67,7 +67,8 @@ public final class JavaRawBenchmarkMain {
         long preparationFinished = preparationStarted;
         long writingStarted = 0;
         long writingFinished = 0;
-        try (Connection connection = new MySqlConnectionFactory().open(configuration)) {
+        try (Connection connection = new MySqlConnectionFactory().open(configuration);
+             JavaWriterCandidate.RawWriteSession writer = candidate.openExclusiveRawWriteSession(connection)) {
             candidate.validateTarget(connection);
             while (remaining.hasNext() || !pending.isEmpty()) {
                 while (remaining.hasNext() && pending.size() < 3) {
@@ -78,7 +79,7 @@ public final class JavaRawBenchmarkMain {
                 ArchiveCandidateReader.SessionArchive archive = next.future().get();
                 preparationFinished = System.nanoTime();
                 if (writingStarted == 0) writingStarted = System.nanoTime();
-                JavaWriterCandidate.WriteResult result = candidate.writeRaw(connection, archive,
+                JavaWriterCandidate.WriteResult result = writer.writeRaw(archive,
                         checkpointDirectory.resolve(next.session() + ".json"), JavaWriterCandidate.InterruptPoint.NONE);
                 writingFinished = System.nanoTime();
                 rows += archive.bars().size();

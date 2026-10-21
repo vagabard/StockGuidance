@@ -34,6 +34,7 @@ public final class JavaWriterCandidate {
     private static final String METADATA_TABLE = "stage6_disposable_metadata";
     private static final String RAW_SERIES = "raw";
     private static final String DERIVED_SERIES = "legacy-open-to-close-v1";
+    private static final int BATCH_SIZE = 1000;
 
     private final JavaWriterManifest manifest;
     private final TableNames names;
@@ -56,6 +57,15 @@ public final class JavaWriterCandidate {
 
     public WriteResult writeRaw(Connection connection, ArchiveCandidateReader.SessionArchive archive,
                                 Path checkpoint, InterruptPoint interruption) throws SQLException {
+        return writeRaw(connection, archive, checkpoint, interruption, new TickerState());
+    }
+
+    public RawWriteSession openExclusiveRawWriteSession(Connection connection) throws SQLException {
+        return new RawWriteSession(connection);
+    }
+
+    private WriteResult writeRaw(Connection connection, ArchiveCandidateReader.SessionArchive archive,
+                                 Path checkpoint, InterruptPoint interruption, TickerState tickers) throws SQLException {
         LocalDate session = archive.session();
         validateCheckpoint(checkpoint, RAW_SERIES, session, archive.recordsId());
         validateTarget(connection);
@@ -65,17 +75,19 @@ public final class JavaWriterCandidate {
             connection.setAutoCommit(false);
             writeMetadata(connection);
             long dateId = ensureSession(connection, session);
-            Map<String, Long> tickerIds = readTickerIds(connection);
-            long nextTickerId = nextTickerId(tickerIds);
+            if (tickers.ids == null) {
+                tickers.ids = readTickerIds(connection);
+                tickers.nextId = nextTickerId(tickers.ids);
+            }
+            long nextTickerId = tickers.nextId;
             Map<String, StoredBar> existing = readStoredBars(connection, dateId);
             List<NewTicker> newTickers = new ArrayList<>();
             List<RawWrite> inserts = new ArrayList<>();
             List<RawWrite> updates = new ArrayList<>();
             for (ValidationContent.RawBar bar : archive.bars().values()) {
-                Long tickerId = tickerIds.get(bar.ticker());
+                Long tickerId = tickers.ids.get(bar.ticker());
                 if (tickerId == null) {
                     tickerId = nextTickerId++;
-                    tickerIds.put(bar.ticker(), tickerId);
                     newTickers.add(new NewTicker(tickerId, bar.ticker()));
                 }
                 RawWrite write = new RawWrite(tickerId, dateId, bar);
@@ -92,10 +104,13 @@ public final class JavaWriterCandidate {
             applyInterruption(interruption, InterruptPoint.BEFORE_COMMIT);
             connection.commit();
             committed = true;
+            for (NewTicker ticker : newTickers) tickers.ids.put(ticker.label(), ticker.id());
+            tickers.nextId = nextTickerId;
             applyInterruption(interruption, InterruptPoint.AFTER_COMMIT);
             writeCheckpoint(checkpoint, RAW_SERIES, session, archive.recordsId());
             return new WriteResult("raw", session, "complete", true, inserts.size() + updates.size(), archive.recordsId());
         } catch (RuntimeException | SQLException error) {
+            tickers.ids = null;
             if (!committed) rollback(connection);
             throw error;
         } finally {
@@ -342,12 +357,17 @@ public final class JavaWriterCandidate {
         if (rows.isEmpty()) return;
         String sql = "INSERT INTO " + SqlIdentifiers.quote(names.tickers(), "tickers") + " (id, label) VALUES (?, ?)";
         try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            int pending = 0;
             for (NewTicker row : rows) {
                 statement.setLong(1, row.id());
                 statement.setString(2, row.label());
                 statement.addBatch();
+                if (++pending == BATCH_SIZE) {
+                    executeBatch(statement);
+                    pending = 0;
+                }
             }
-            statement.executeBatch();
+            if (pending > 0) executeBatch(statement);
         }
     }
 
@@ -355,11 +375,16 @@ public final class JavaWriterCandidate {
         if (rows.isEmpty()) return;
         String sql = "INSERT INTO " + SqlIdentifiers.quote(names.prices(), "prices") + " (ticker_id, date_id, open, high, low, close, volume, vwap, transactions) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)";
         try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            int pending = 0;
             for (RawWrite row : rows) {
                 bindRaw(statement, row);
                 statement.addBatch();
+                if (++pending == BATCH_SIZE) {
+                    executeBatch(statement);
+                    pending = 0;
+                }
             }
-            statement.executeBatch();
+            if (pending > 0) executeBatch(statement);
         }
     }
 
@@ -367,6 +392,7 @@ public final class JavaWriterCandidate {
         if (rows.isEmpty()) return;
         String sql = "UPDATE " + SqlIdentifiers.quote(names.prices(), "prices") + " SET open = ?, high = ?, low = ?, close = ?, volume = ?, vwap = ?, transactions = ? WHERE ticker_id = ? AND date_id = ?";
         try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            int pending = 0;
             for (RawWrite row : rows) {
                 bindDecimal(statement, 1, row.bar().open());
                 bindDecimal(statement, 2, row.bar().high());
@@ -378,9 +404,18 @@ public final class JavaWriterCandidate {
                 statement.setLong(8, row.tickerId());
                 statement.setLong(9, row.dateId());
                 statement.addBatch();
+                if (++pending == BATCH_SIZE) {
+                    executeBatch(statement);
+                    pending = 0;
+                }
             }
-            statement.executeBatch();
+            if (pending > 0) executeBatch(statement);
         }
+    }
+
+    private static void executeBatch(PreparedStatement statement) throws SQLException {
+        statement.executeBatch();
+        statement.clearBatch();
     }
 
     private static void bindRaw(PreparedStatement statement, RawWrite row) throws SQLException {
@@ -626,6 +661,46 @@ public final class JavaWriterCandidate {
         NONE,
         BEFORE_COMMIT,
         AFTER_COMMIT
+    }
+
+    public final class RawWriteSession implements AutoCloseable {
+        private final Connection connection;
+        private final String catalog;
+        private final TickerState tickers = new TickerState();
+        private boolean closed;
+
+        private RawWriteSession(Connection connection) throws SQLException {
+            this.connection = connection;
+            this.catalog = connection.getCatalog();
+            if (catalog == null || !connection.getAutoCommit()) {
+                throw new IllegalArgumentException("Raw write session requires an idle connection with a catalog");
+            }
+        }
+
+        public WriteResult writeRaw(ArchiveCandidateReader.SessionArchive archive, Path checkpoint,
+                                    InterruptPoint interruption) throws SQLException {
+            if (closed || !catalog.equals(connection.getCatalog()) || !connection.getAutoCommit()) {
+                close();
+                throw new IllegalStateException("Raw write session is closed or its connection changed");
+            }
+            try {
+                return JavaWriterCandidate.this.writeRaw(connection, archive, checkpoint, interruption, tickers);
+            } catch (RuntimeException | SQLException error) {
+                tickers.ids = null;
+                throw error;
+            }
+        }
+
+        @Override
+        public void close() {
+            closed = true;
+            tickers.ids = null;
+        }
+    }
+
+    private static final class TickerState {
+        private Map<String, Long> ids;
+        private long nextId;
     }
 
     public record WriteResult(String workload, LocalDate session, String status, boolean committed,

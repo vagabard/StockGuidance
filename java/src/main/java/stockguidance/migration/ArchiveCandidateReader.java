@@ -8,7 +8,6 @@ import org.apache.fory.json.writer.JsonWriter;
 import stockguidance.validation.ValidationContent;
 
 import java.io.ByteArrayOutputStream;
-import java.io.BufferedInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.math.BigDecimal;
@@ -20,10 +19,7 @@ import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneId;
-import java.util.HashSet;
-import java.util.Map;
-import java.util.Set;
-import java.util.TreeMap;
+import java.util.*;
 
 public final class ArchiveCandidateReader {
     private static final BigDecimal MAX_PRICE = new BigDecimal("1e60");
@@ -43,7 +39,7 @@ public final class ArchiveCandidateReader {
         }
         MessageDigest digest = sha256();
         Map<String, ValidationContent.RawBar> bars = new TreeMap<>();
-        try (InputStream input = new BufferedInputStream(Files.newInputStream(path))) {
+        try (InputStream input = Files.newInputStream(path)) {
             LineReader lines = new LineReader(input, digest);
             byte[] line;
             while ((line = lines.next()) != null) {
@@ -300,6 +296,10 @@ public final class ArchiveCandidateReader {
     private static final class LineReader {
         private final InputStream input;
         private final MessageDigest digest;
+        private final byte[] buffer = new byte[64 * 1024];
+        private final ByteArrayOutputStream partial = new ByteArrayOutputStream();
+        private int position;
+        private int limit;
 
         private LineReader(InputStream input, MessageDigest digest) {
             this.input = input;
@@ -307,22 +307,35 @@ public final class ArchiveCandidateReader {
         }
 
         private byte[] next() throws IOException {
-            ByteArrayOutputStream line = new ByteArrayOutputStream();
-            boolean read = false;
-            int value;
-            while ((value = input.read()) >= 0) {
-                read = true;
-                digest.update((byte) value);
-                if (value == '\n') {
-                    byte[] bytes = line.toByteArray();
-                    if (bytes.length > 0 && bytes[bytes.length - 1] == '\r') {
-                        return java.util.Arrays.copyOf(bytes, bytes.length - 1);
-                    }
-                    return bytes;
+            partial.reset();
+            while (true) {
+                if (position == limit) {
+                    int count = input.read(buffer);
+                    if (count < 0) return partial.size() == 0 ? null : partial.toByteArray();
+                    digest.update(buffer, 0, count);
+                    position = 0;
+                    limit = count;
                 }
-                line.write(value);
+                int start = position;
+                while (position < limit && buffer[position] != '\n') position++;
+                if (position < limit) {
+                    byte[] line;
+                    if (partial.size() == 0) {
+                        int end = position;
+                        if (end > start && buffer[end - 1] == '\r') end--;
+                        line = Arrays.copyOfRange(buffer, start, end);
+                    } else {
+                        partial.write(buffer, start, position - start);
+                        line = partial.toByteArray();
+                        if (line.length > 0 && line[line.length - 1] == '\r') {
+                            line = Arrays.copyOf(line, line.length - 1);
+                        }
+                    }
+                    position++;
+                    return line;
+                }
+                partial.write(buffer, start, position - start);
             }
-            return read ? line.toByteArray() : null;
         }
     }
 }
