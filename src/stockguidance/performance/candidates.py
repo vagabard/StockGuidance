@@ -444,9 +444,79 @@ class PythonBaseline:
 		return identifier
 
 	def _checkpoint(self, workload: str, session: str, digest: str) -> None:
-		self.output.parent.mkdir(parents=True, exist_ok=True)
-		checkpoint = self.output.with_name(f"{self.output.stem}-checkpoint.json")
+		self._write_checkpoint(self.output.with_name(f"{self.output.stem}-checkpoint.json"), workload, session, digest)
+
+	def _write_checkpoint(self, checkpoint: Path, workload: str, session: str, digest: str) -> None:
+		checkpoint.parent.mkdir(parents=True, exist_ok=True)
 		checkpoint.write_text(json.dumps({"schema_version": 1, "workload": workload, "session": session, "content_digest": digest, "after_commit": True}, indent=2) + "\n", encoding="utf-8")
+
+	def _derived_session_prepared(
+		self,
+		session: str,
+		prior_dates: tuple[str, str],
+		prior_bars: tuple[ExactArchiveBar, ...],
+		target_bars: tuple[ExactArchiveBar, ...],
+		following_bars: tuple[ExactArchiveBar, ...],
+		*,
+		checkpoint: Path | None = None,
+	) -> dict[str, object]:
+		if len(prior_dates) != 2:
+			return {"session": session, "status": "missing_dependency", "committed": False}
+		rows = _exact_derived_rows(prior_bars, target_bars, following_bars)
+		dependency_id = content_id({
+			"prior": prior_dates[0],
+			"following": prior_dates[1],
+			"raw": [exact_records_id(prior_bars), exact_records_id(following_bars)],
+		})
+		content_digest = derived_id(rows)
+		started, cpu = perf_counter(), process_time()
+		before_queries = self._trace_count
+		connection = self._connect()
+		try:
+			connection.execute("BEGIN")
+			date_id = self._session_id(connection, session)
+			ticker_table, delta_table, imports_table = (_sqlite_name(self.names.table(role)) for role in (TableRole.TICKERS, TableRole.DELTAS, TableRole.IMPORTS))
+			mapping = {str(label): int(identifier) for identifier, label in connection.execute(f"SELECT id, label FROM {ticker_table}").fetchall()}
+			next_identifier = max(mapping.values(), default=0) + 1
+			new_tickers = []
+			payload = []
+			for row in rows:
+				ticker_id = mapping.get(row.ticker)
+				if ticker_id is None:
+					ticker_id = next_identifier
+					next_identifier += 1
+					mapping[row.ticker] = ticker_id
+					new_tickers.append((ticker_id, row.ticker))
+				payload.append((ticker_id, date_id, *row.values))
+			if new_tickers:
+				connection.executemany(f"INSERT INTO {ticker_table}(id, label) VALUES (?, ?)", new_tickers)
+			connection.execute(f"DELETE FROM {delta_table} WHERE date_id = ?", (date_id,))
+			columns = ",".join(DERIVED_COLUMNS)
+			placeholders = ",".join("?" for _ in range(len(DERIVED_COLUMNS) + 2))
+			if payload:
+				connection.executemany(f"INSERT INTO {delta_table}(ticker_id, date_id, {columns}) VALUES ({placeholders})", payload)
+			connection.execute(f"UPDATE {imports_table} SET derived_dependency_id = ?, derived_content_id = ? WHERE session_date = ?", (dependency_id, content_digest, session))
+			connection.execute("INSERT OR REPLACE INTO stage6_completion(workload, session_date, series_key, content_digest, committed_at) VALUES (?,?,?,?,?)", ("derived", session, "legacy-open-to-close-v1", content_digest, TRIAL_RECEIPT))
+			connection.commit()
+			self._write_checkpoint(checkpoint or self.output.with_name(f"{self.output.stem}-checkpoint.json"), "derived", session, content_digest)
+			return {"session": session, "status": "complete", "rows": len(rows), "seconds": perf_counter() - started, "cpu_seconds": process_time() - cpu, "query_count": self._trace_count - before_queries, "committed": True, "content_digest": content_digest}
+		except Exception:
+			connection.rollback()
+			raise
+		finally:
+			connection.close()
+
+	def _derived_session(self, session: str) -> dict[str, object]:
+		target = self._bars(session)
+		if not target:
+			return {"session": session, "status": "missing_dependency"}
+		prior = next((item for item in self.manifest["targets"] if item["session"] == session), None)
+		if prior is None:
+			raise ValueError(f"Unknown derived target: {session}")
+		prior_dates = tuple(prior["derived_dependencies"])
+		if len(prior_dates) != 2:
+			return {"session": session, "status": "missing_dependency"}
+		return self._derived_session_prepared(session, prior_dates, self._bars(prior_dates[0]), target, self._bars(prior_dates[1]))
 
 	def _raw_session(self, session: str, *, seed: bool = False) -> dict[str, object]:
 		bars = self._bars(session)
@@ -498,42 +568,6 @@ class PythonBaseline:
 		for session in sessions:
 			self._raw_session(session, seed=True)
 
-	def _derived_session(self, session: str) -> dict[str, object]:
-		target = self._bars(session)
-		if not target:
-			return {"session": session, "status": "missing_dependency"}
-		calendar_sessions = {item["session"] for item in self.manifest["files"]}
-		prior = next((item for item in self.manifest["targets"] if item["session"] == session), None)
-		if prior is None:
-			raise ValueError(f"Unknown derived target: {session}")
-		prior_dates = prior["derived_dependencies"]
-		prior_bars = self._bars(prior_dates[0]) if prior_dates else ()
-		next_bars = self._bars(prior_dates[1]) if len(prior_dates) > 1 else ()
-		rows = _exact_derived_rows(prior_bars, target, next_bars)
-		started, cpu = perf_counter(), process_time()
-		before_queries = self._trace_count
-		connection = self._connect()
-		try:
-			connection.execute("BEGIN")
-			date_id = self._session_id(connection, session)
-			ticker_table, delta_table, imports_table = (_sqlite_name(self.names.table(role)) for role in (TableRole.TICKERS, TableRole.DELTAS, TableRole.IMPORTS))
-			connection.execute(f"DELETE FROM {delta_table} WHERE date_id = ?", (date_id,))
-			columns = ",".join(DERIVED_COLUMNS)
-			placeholders = ",".join("?" for _ in range(len(DERIVED_COLUMNS) + 2))
-			for row in rows:
-				ticker_id = self._ticker_id(connection, row.ticker)
-				connection.execute(f"INSERT INTO {delta_table}(ticker_id, date_id, {columns}) VALUES ({placeholders})", (ticker_id, date_id, *row.values))
-			dependency_id = content_id({"prior": prior_dates[0] if prior_dates else None, "following": prior_dates[1] if len(prior_dates) > 1 else None, "raw": [exact_records_id(self._bars(value)) for value in prior_dates if self._bars(value)]})
-			connection.execute(f"UPDATE {imports_table} SET derived_dependency_id = ?, derived_content_id = ? WHERE session_date = ?", (dependency_id, derived_id(rows), session))
-			connection.execute("INSERT OR REPLACE INTO stage6_completion(workload, session_date, series_key, content_digest, committed_at) VALUES (?,?,?,?,?)", ("derived", session, "legacy-open-to-close-v1", derived_id(rows), TRIAL_RECEIPT))
-			connection.commit()
-			self._checkpoint("derived", session, derived_id(rows))
-			return {"session": session, "rows": len(rows), "seconds": perf_counter() - started, "cpu_seconds": process_time() - cpu, "query_count": self._trace_count - before_queries, "committed": True}
-		except Exception:
-			connection.rollback()
-			raise
-		finally:
-			connection.close()
 
 	def _zscore_input(self, family: ZScoreFamily, ticker_label: str, sessions: tuple[Any, ...], dependency_dates: set[str], connection: sqlite3.Connection | None = None) -> ZScoreInput:
 		values: list[ZScoreObservation] = []

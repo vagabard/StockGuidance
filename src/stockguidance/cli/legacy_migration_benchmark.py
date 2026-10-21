@@ -27,6 +27,7 @@ def parser() -> argparse.ArgumentParser:
 	mode.add_argument("--run-sql-derived-trial", action="store_true")
 	mode.add_argument("--run-sql-zscore-trial", action="store_true")
 	mode.add_argument("--run-stage9-raw", action="store_true")
+	mode.add_argument("--run-stage9-derived", action="store_true")
 	arguments.add_argument("--data-root", type=_path, default=Path("data"))
 	arguments.add_argument("--dbinfo-file", type=_path, default=Path("dbinfo.id"))
 	arguments.add_argument("--evaluation-plan", type=_path, default=Path("output/legacy-migration/evaluation-plan.json"))
@@ -43,6 +44,7 @@ def parser() -> argparse.ArgumentParser:
 	arguments.add_argument("--report", type=_path, action="append", default=[])
 	arguments.add_argument("--aggregate-output", type=_path, default=Path("output/legacy-migration/benchmark/candidates/study.json"))
 	arguments.add_argument("--stage9-timeout-seconds", type=float, default=3600.0)
+	arguments.add_argument("--stage9a-report", type=_path, default=Path("output/legacy-migration/benchmark/candidates/stage9a-20261021/stage9a-raw.json"))
 	return arguments
 
 
@@ -63,6 +65,19 @@ def main(argv: Sequence[str] | None = None) -> int:
 			return 1
 		print(json.dumps({"successful": raw_report["status"] == "complete", "raw_report": str((_resolve(arguments.output) / "stage9a-raw.json").resolve()), "study": str((_resolve(arguments.output) / "study.json").resolve()), "status": raw_report["status"]}))
 		return 0 if raw_report["status"] == "complete" else 1
+	if arguments.run_stage9_derived:
+		from stockguidance.performance.stage9_derived import aggregate_stage9_study, run_stage9_derived
+
+		try:
+			derived_report = run_stage9_derived(_resolve(arguments.manifest), _resolve(arguments.dbinfo_file), _resolve(arguments.output), timeout_seconds=arguments.stage9_timeout_seconds)
+			raw_path = _resolve(arguments.stage9a_report)
+			raw_report = json.loads(raw_path.read_text(encoding="utf-8"))
+			study = aggregate_stage9_study(raw_report, derived_report, _resolve(arguments.output))
+		except Exception:
+			print(json.dumps({"successful": False, "error": "Stage 9b derived measurement failed"}))
+			return 1
+		print(json.dumps({"successful": derived_report["status"] == "complete", "derived_report": str((_resolve(arguments.output) / "stage9b-derived.json").resolve()), "study": str((_resolve(arguments.output) / "study.json").resolve()), "status": study["status"]}))
+		return 0 if derived_report["status"] == "complete" else 1
 	if arguments.run_java_writer_trial:
 		from stockguidance.performance.java_writer_trial import run_trial
 

@@ -351,8 +351,8 @@ ORDER BY t.label""",
 			):
 				self._assert_raw_rows(cursor, dependency_session, dependency_bars)
 			stage = quote_identifier(STAGE_TABLE)
-			cursor.execute(f"DELETE FROM {stage} WHERE target_date = %s", (session,))
-			cursor.execute(
+			self._execute(cursor, f"DELETE FROM {stage} WHERE target_date = %s", (session,))
+			self._execute(
 				f"""INSERT INTO {stage}
 (target_date, prior_date, following_date, target_raw_id, prior_raw_id, following_raw_id,
  derived_dependency_id, derived_content_id, expected_rows)
@@ -396,6 +396,59 @@ VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
 		finally:
 			cursor.close()
 			connection.close()
+
+	def write_derived_prepared(
+		self,
+		session: str,
+		prior_session: str,
+		following_session: str,
+		target_raw_id: str,
+		prior_raw_id: str,
+		following_raw_id: str,
+		dependency_id: str,
+		content_digest: str,
+		expected_rows: int,
+		*,
+		connection,
+		checkpoint: Path | None = None,
+	) -> dict[str, object]:
+		self._validate_checkpoint(checkpoint, session, content_digest)
+		cursor = connection.cursor()
+		committed = False
+		started = perf_counter()
+		try:
+			connection.autocommit = False
+			stage = quote_identifier(STAGE_TABLE)
+			cursor.execute(f"DELETE FROM {stage} WHERE target_date = %s", (session,))
+			cursor.execute(
+				f"""INSERT INTO {stage}
+(target_date, prior_date, following_date, target_raw_id, prior_raw_id, following_raw_id,
+ derived_dependency_id, derived_content_id, expected_rows)
+VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+				(session, prior_session, following_session, target_raw_id, prior_raw_id, following_raw_id, dependency_id, content_digest, expected_rows),
+			)
+			self._execute(cursor, f"CALL {quote_identifier(ROUTINE_NAME)}(%s)", (session,))
+			connection.commit()
+			committed = True
+			self._write_checkpoint(checkpoint, session, content_digest)
+			connection.autocommit = True
+			return {
+				"session": session,
+				"status": "complete",
+				"rows": expected_rows,
+				"changed_rows": expected_rows,
+				"dependency_id": dependency_id,
+				"content_id": content_digest,
+				"seconds": perf_counter() - started,
+				"committed": True,
+			}
+		except Exception:
+			if not committed:
+				connection.rollback()
+			raise
+		finally:
+			cursor.close()
+			connection.autocommit = True
 
 	def snapshot(self) -> str:
 		values = []

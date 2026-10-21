@@ -138,6 +138,14 @@ public final class JavaWriterCandidate {
         } catch (JavaWriterManifest.InvalidSourceException error) {
             return new WriteResult("derived", session, "missing_dependency", false, 0, null);
         }
+        return writeDerived(connection, session, current, prior, following, checkpoint, interruption);
+    }
+
+    public WriteResult writeDerived(Connection connection, LocalDate session,
+                                    ArchiveCandidateReader.SessionArchive current,
+                                    ArchiveCandidateReader.SessionArchive prior,
+                                    ArchiveCandidateReader.SessionArchive following,
+                                    Path checkpoint, InterruptPoint interruption) throws SQLException {
         Map<String, ValidationContent.RawBar> previousRows = new TreeMap<>(prior.bars());
         Map<String, ValidationContent.RawBar> currentRows = new TreeMap<>(current.bars());
         Map<String, ValidationContent.RawBar> followingRows = new TreeMap<>(following.bars());
@@ -161,9 +169,9 @@ public final class JavaWriterCandidate {
             batchInsertDerived(connection, dateId, rows);
             upsertImport(connection, session, current.recordsId(), dependencyDigest, contentDigest);
             upsertCompletion(connection, "derived", session, DERIVED_SERIES, contentDigest);
-            manifest.archive(session);
-            manifest.archive(dependencies.get(0));
-            manifest.archive(dependencies.get(1));
+            manifest.verifyArchiveIdentity(current);
+            manifest.verifyArchiveIdentity(prior);
+            manifest.verifyArchiveIdentity(following);
             applyInterruption(interruption, InterruptPoint.BEFORE_COMMIT);
             connection.commit();
             committed = true;

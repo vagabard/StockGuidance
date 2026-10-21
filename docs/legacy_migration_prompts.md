@@ -1254,3 +1254,66 @@ parity/recovery handoff that follows.
   Stage 9a is complete; preserve this rerun and the 2026-10-20 report as
   separate evidence. Next prompt: **Read docs/legacy_migration_prompts.md and
   execute revised Stage 9b only.**
+
+### Revised Stage 9b derived comparison completed — 2026-10-21
+
+- Implemented `src/stockguidance/performance/stage9_derived.py` and exposed
+  `--run-stage9-derived`. The runner uses fresh guarded MySQL schemas, one
+  writer, one or three Python/Java archive preparers, one SQL database writer,
+  at most three queued sessions, four candidate-order rotations, and separate
+  fixed-25 and chronological-20 target blocks. It saves partial per-trial and
+  per-configuration reports, process-tree RSS/CPU, startup/handoff time,
+  preparation/write phases, SQL database-resident time, checkpoints and
+  correctness audits outside the timed boundary.
+- Python now has a prepared exact-derived MySQL publication path. Java adds
+  `JavaDerivedBenchmarkMain` and a prepared-archive writer path using one JDBC
+  writer connection. SQL uses the existing Stage 8b set-based routine through
+  a prepared staging identity; its source decoding/content identity phase is
+  reported separately from database-resident publication. All candidates use
+  `legacy-open-to-close-v1`, exact-case keys, existing derived tolerances and
+  atomic session publication.
+- The complete paired rerun used the unchanged Stage 6 manifest ID
+  `e5d9446e8bae97244edf17824be680eda6e8990bf1b80a2e6629809896022a14`,
+  manifest SHA-256
+  `11bbcf4b57469c1256ab9caa474824a538ccbfb8bd3155de6515965e2d4fcf26`,
+  MySQL `9.5.0`, InnoDB, corrected Stage 5 types and no production DDL/DML.
+  All 40 timed trials passed independent derived parity, receipt and
+  completion audits; no source files, production rows, bindings or receipts
+  changed. The initial `stage9b-20261021` attempt is retained as a failed
+  diagnostic after a SQL worker report-field bug; it is not comparison
+  evidence. The valid rerun is under
+  `output/legacy-migration/benchmark/candidates/stage9b-20261021-rerun/`.
+- Warm end-to-end medians across both blocks were Python p1 `46.6790867`
+  seconds, Python p3 `47.6287887`, Java p1 `41.1390557`, Java p3
+  `42.0641026`, and SQL p1 `57.5223325`. Best derived throughput was Python
+  p1 `9803.1695` rows/second, Java p1 `11123.3229`, and SQL p1 `7955.2233`.
+  Java p1 is approximately `11.87%` faster than Python p1 for this workload;
+  this is comparison evidence only and does not select a production backend.
+  SQL database-resident phase timings and unavailable server metrics remain
+  explicitly recorded in the report.
+- Artifact `stage9b-derived.json` SHA-256 is
+  `D381081B36F3B6D2688B518BE41FF3595B9AB034407492B7B3DED570F3CEF1ED` and
+  aggregate `study.json` SHA-256 is
+  `D8E9355DC86DE80D734AAEAA444010E6755B5096D1635074239C66C646EC6074`.
+  The aggregate reports 9a complete, 9b complete and 9c pending; historical
+  Stage 2 and Stage 9a reports remain unchanged. Java and SQL MySQL recovery
+  artifacts passed their rollback/restart, stale-input and idempotency checks;
+  Python recovery is retained as the existing offline reference evidence and
+  is labeled as such.
+- Reproduce from the checkout after `mvn -o test package` in `StockGuidance/java`:
+  set `PYTHONPATH=src`, rediscover `$pythonExe` with `get_python_environment`,
+  cap native thread variables at one, then run:
+
+  ```powershell
+  & $pythonExe -m stockguidance.cli.legacy_migration_benchmark `
+    --run-stage9-derived `
+    --manifest output/legacy-migration/benchmark/candidates/manifest.json `
+    --dbinfo-file dbinfo.id `
+    --output output/legacy-migration/benchmark/candidates/stage9b-<fresh-run> `
+    --stage9a-report output/legacy-migration/benchmark/candidates/stage9a-20261021/stage9a-raw.json `
+    --stage9-timeout-seconds 3600
+  ```
+
+- Focused Python candidate tests passed 5 tests; Maven packaging/tests passed
+  49 tests. Next prompt: **Read docs/legacy_migration_prompts.md and execute
+  revised Stage 9c only.**
