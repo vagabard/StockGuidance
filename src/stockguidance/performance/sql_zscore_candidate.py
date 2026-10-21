@@ -22,6 +22,7 @@ from stockguidance.validation.derived import _equal
 from stockguidance.zscores.calculation import calculate_zscores
 from stockguidance.zscores.inputs import InputState, ZScoreInput, ZScoreObservation
 from stockguidance.zscores.specification import DELTA_DEFINITION, ZScoreFamily, ZScoreSpecification
+from stockguidance.performance.zscore_digest import TextDigest
 
 
 TRIAL_RECEIPT = "2026-10-20T00:00:00+00:00"
@@ -171,8 +172,7 @@ BEGIN
          CASE
           WHEN p_family = 'price' THEN close_issue
           WHEN sequence_no = 0 THEN 1
-          WHEN close_issue <> 0 THEN close_issue
-          WHEN previous_issue <> 0 THEN previous_issue
+          WHEN close_issue <> 0 OR previous_issue <> 0 THEN GREATEST(close_issue, previous_issue)
           WHEN stored_ratio IS NULL THEN 2
           WHEN stored_ratio <= 0
             OR ABS(1e0 * stored_ratio - 1e0 * close_value / NULLIF(previous_close, 0))
@@ -208,7 +208,7 @@ BEGIN
  SELECT p_session_date, p_family, p_window, ticker_id,
         CASE WHEN highest_issue <> 0 OR value_count <> p_window OR population_stddev = 0 THEN NULL
              ELSE (target_value - average_value) / population_stddev END,
-        CASE WHEN value_count <> p_window THEN 1
+        CASE WHEN value_count <> p_window THEN GREATEST(1, highest_issue)
              WHEN highest_issue <> 0 THEN highest_issue
              WHEN population_stddev = 0 THEN 5
              ELSE 0 END
@@ -296,7 +296,7 @@ class SQLZScoreTarget(MySQLTarget):
 
 
 class SQLZScoreCandidate:
-	def __init__(self, manifest: dict, target: SQLZScoreTarget, output: Path) -> None:
+	def __init__(self, manifest: dict, target: SQLZScoreTarget, output: Path, *, target_session: str | None = None) -> None:
 		self.manifest = manifest
 		self.target = target
 		self.output = output
@@ -305,11 +305,19 @@ class SQLZScoreCandidate:
 		targets = [item for item in manifest["targets"] if "chronological_20" in item.get("roles", ())]
 		if not targets:
 			raise ValueError("Stage 8c chronological z-score target is unavailable")
-		self.target_session = targets[-1]["session"]
-		self.dependencies = tuple(targets[-1].get("zscore_dependencies", ()))
+		selected = next((item for item in manifest["targets"] if item["session"] == target_session), targets[-1])
+		self.target_session = selected["session"]
+		self.dependencies = tuple(selected.get("zscore_dependencies", ()))
 		if not self.dependencies or self.dependencies[-1] != self.target_session:
-			raise ValueError("Stage 8c z-score dependencies are not target-terminated")
+			raise ValueError("Z-score dependencies are not target-terminated")
 		self.raw = SQLRawCandidate(manifest, target, output.with_name("sql-zscores-raw-reference.json"))
+		self._sessions_value = None
+
+	def _sessions(self):
+		if self._sessions_value is None:
+			calendar = ExchangeCalendar("XNYS", date.fromisoformat(self.dependencies[0]), date.fromisoformat(self.dependencies[-1]))
+			self._sessions_value = tuple(calendar.session(date.fromisoformat(session)) for session in self.dependencies)
+		return self._sessions_value
 
 	def _execute(self, cursor, statement: str, parameters=()) -> None:
 		cursor.execute(statement, parameters)
@@ -333,11 +341,15 @@ class SQLZScoreCandidate:
 		finally:
 			connection.close()
 
-	def _verify_source_identities(self) -> None:
+	def _verify_source_identities(self, verified_sessions: set[str] | None = None) -> None:
 		for session in self.dependencies:
+			if verified_sessions is not None and session in verified_sessions:
+				continue
 			item = self.files.get(session)
 			if isinstance(item, dict) and item.get("valid"):
 				self.raw._archive(session)
+			if verified_sessions is not None:
+				verified_sessions.add(session)
 
 	def _expected_raw_id(self, session: str) -> str | None:
 		item = self.files.get(session)
@@ -392,20 +404,22 @@ class SQLZScoreCandidate:
 			[(ticker_id, labels[ticker_id]) for ticker_id in ticker_ids],
 		)
 
-	def _observations(self, cursor, family: str, date_ids: dict[str, int], ticker_ids: tuple[int, ...]) -> dict[int, tuple[tuple[object | None, InputState], ...]]:
+	def _load_input_snapshot(self, cursor, family: str, date_ids: dict[str, int], ticker_ids: tuple[int, ...]):
 		placeholders = ",".join("%s" for _ in date_ids)
+		ticker_placeholders = ",".join("%s" for _ in ticker_ids)
+		parameters = (*date_ids.values(), *ticker_ids)
 		prices = f"`{self.names.prices}`"
 		deltas = f"`{self.names.deltas}`"
 		cursor.execute(
-			f"SELECT date_id, ticker_id, `close` FROM {prices} WHERE date_id IN ({placeholders}) ORDER BY ticker_id, date_id",
-			tuple(date_ids.values()),
+			f"SELECT date_id, ticker_id, `close` FROM {prices} WHERE date_id IN ({placeholders}) AND ticker_id IN ({ticker_placeholders}) ORDER BY ticker_id, date_id",
+			parameters,
 		)
 		raw = {(int(ticker_id), int(date_id)): value for date_id, ticker_id, value in cursor.fetchall()}
 		delta = {}
 		if family == "price_delta":
 			cursor.execute(
-				f"SELECT date_id, ticker_id, close_ratio_to_prior FROM {deltas} WHERE date_id IN ({placeholders}) ORDER BY ticker_id, date_id",
-				tuple(date_ids.values()),
+				f"SELECT date_id, ticker_id, close_ratio_to_prior FROM {deltas} WHERE date_id IN ({placeholders}) AND ticker_id IN ({ticker_placeholders}) ORDER BY ticker_id, date_id",
+				parameters,
 			)
 			delta = {(int(ticker_id), int(date_id)): value for date_id, ticker_id, value in cursor.fetchall()}
 		imports = f"`{self.names.imports}`"
@@ -414,8 +428,11 @@ class SQLZScoreCandidate:
 			self.dependencies,
 		)
 		receipts = {str(session): (raw_id, available_at) for session, raw_id, available_at in cursor.fetchall()}
-		calendar = ExchangeCalendar("XNYS", date.fromisoformat(self.dependencies[0]), date.fromisoformat(self.dependencies[-1]))
-		sessions = tuple(calendar.session(date.fromisoformat(session)) for session in self.dependencies)
+		return raw, delta, receipts
+
+	def _observations(self, cursor, family: str, date_ids: dict[str, int], ticker_ids: tuple[int, ...], *, snapshot=None) -> dict[int, tuple[tuple[object | None, InputState], ...]]:
+		raw, delta, receipts = snapshot if snapshot is not None else self._load_input_snapshot(cursor, family, date_ids, ticker_ids)
+		sessions = self._sessions()
 		expected = {session: self._expected_raw_id(session) for session in self.dependencies}
 		result: dict[int, tuple[tuple[object | None, InputState], ...]] = {}
 		for ticker_id in ticker_ids:
@@ -455,12 +472,12 @@ class SQLZScoreCandidate:
 			result[ticker_id] = tuple(values)
 		return result
 
-	def _oracle(self, cursor, family: str, window: int) -> dict[int, tuple[float | None, int]]:
-		date_ids = self._date_ids(cursor)
-		ticker_ids = self._ticker_ids(cursor)
-		observations = self._observations(cursor, family, date_ids, ticker_ids)
-		calendar = ExchangeCalendar("XNYS", date.fromisoformat(self.dependencies[0]), date.fromisoformat(self.dependencies[-1]))
-		sessions = tuple(calendar.session(date.fromisoformat(session)) for session in self.dependencies)
+	def _oracle(self, cursor, family: str, window: int, *, snapshot=None, date_ids=None, ticker_ids=None, vectorized=False, phases=None) -> dict[int, tuple[float | None, int]]:
+		started = perf_counter()
+		date_ids = self._date_ids(cursor) if date_ids is None else date_ids
+		ticker_ids = self._ticker_ids(cursor) if ticker_ids is None else ticker_ids
+		observations = self._observations(cursor, family, date_ids, ticker_ids, snapshot=snapshot)
+		sessions = self._sessions()
 		input_values = {
 			ticker_id: tuple(ZScoreObservation(value=value, state=state) for value, state in values)
 			for ticker_id, values in observations.items()
@@ -468,7 +485,16 @@ class SQLZScoreCandidate:
 		family_value = ZScoreFamily.PRICE if family == "price" else ZScoreFamily.PRICE_DELTA
 		input_data = ZScoreInput.from_values(family_value, sessions, input_values, dependency_sessions=sessions, scored_sessions=(sessions[-1],))
 		specification = ZScoreSpecification(family_value, (window,), delta_definition=DELTA_DEFINITION if family == "price_delta" else "not_applicable")
-		result = calculate_zscores(specification, input_data)
+		if phases is not None:
+			phases["preparation"] = phases.get("preparation", 0.0) + perf_counter() - started
+		started = perf_counter()
+		if vectorized:
+			from stockguidance.zscores.vectorized import calculate_zscores_vectorized
+			result = calculate_zscores_vectorized(specification, input_data)
+		else:
+			result = calculate_zscores(specification, input_data)
+		if phases is not None:
+			phases["calculation"] = phases.get("calculation", 0.0) + perf_counter() - started
 		row_by_ticker = {row.ticker_id: (None if row.score is None else float(row.score), int(row.status)) for row in result.rows}
 		return row_by_ticker
 
@@ -478,30 +504,9 @@ class SQLZScoreCandidate:
 			return "null"
 		return format(float(value), ".15g")
 
-	def _input_digests(self, cursor, family: str, date_ids: dict[str, int], ticker_ids: tuple[int, ...]) -> tuple[str, str, bool]:
-		placeholders = ",".join("%s" for _ in date_ids)
-		prices = f"`{self.names.prices}`"
-		cursor.execute(
-			f"SELECT date_id, ticker_id, `close` FROM {prices} WHERE date_id IN ({placeholders}) ORDER BY ticker_id, date_id",
-			tuple(date_ids.values()),
-		)
-		raw = {(int(ticker_id), int(date_id)): value for date_id, ticker_id, value in cursor.fetchall()}
-		delta = {}
-		if family == "price_delta":
-			deltas = f"`{self.names.deltas}`"
-			cursor.execute(
-				f"SELECT date_id, ticker_id, close_ratio_to_prior FROM {deltas} WHERE date_id IN ({placeholders}) ORDER BY ticker_id, date_id",
-				tuple(date_ids.values()),
-			)
-			delta = {(int(ticker_id), int(date_id)): value for date_id, ticker_id, value in cursor.fetchall()}
-		imports = f"`{self.names.imports}`"
-		cursor.execute(
-			f"SELECT session_date, raw_id, available_at FROM {imports} WHERE session_date IN ({placeholders}) ORDER BY session_date",
-			self.dependencies,
-		)
-		receipts = {str(session): (raw_id, available_at) for session, raw_id, available_at in cursor.fetchall()}
-		dependency_lines: list[str] = []
-		availability_lines: list[str] = []
+	def _input_digests(self, cursor, family: str, date_ids: dict[str, int], ticker_ids: tuple[int, ...], *, snapshot=None, digests=None) -> tuple[str, str, bool]:
+		raw, delta, receipts = snapshot if snapshot is not None else self._load_input_snapshot(cursor, family, date_ids, ticker_ids)
+		dependency_lines, availability_lines = digests if digests is not None else (TextDigest(), TextDigest())
 		actual_available = True
 		for ticker_id in ticker_ids:
 			for session in self.dependencies:
@@ -523,7 +528,7 @@ class SQLZScoreCandidate:
 					actual_available = False
 				dependency_lines.append("|".join((session, str(date_id), str(ticker_id), self._decimal_text(value), self._decimal_text(ratio), str(receipt[0]) if receipt else "null", str(receipt[1]) if receipt else "null")))
 				availability_lines.append("|".join((session, str(ticker_id), state)))
-		return content_id("\n".join(dependency_lines) + "\n"), content_id("\n".join(availability_lines) + "\n"), actual_available
+		return dependency_lines.hexdigest(), availability_lines.hexdigest(), actual_available
 
 	def _ensure_series(self, cursor, family: str, window: int) -> str:
 		key = _series_key(self.manifest, family, window)
@@ -582,7 +587,7 @@ class SQLZScoreCandidate:
 
 	def _stage_rows(self, cursor, family: str, window: int) -> dict[int, tuple[float | None, int]]:
 		cursor.execute(
-			f"SELECT ticker_id, zscore, status FROM `{SCORE_TABLE}` WHERE target_date = %s AND family = %s AND `window` = %s ORDER BY ticker_id",
+			f"SELECT ticker_id, 0e0 + zscore, status FROM `{SCORE_TABLE}` WHERE target_date = %s AND family = %s AND `window` = %s ORDER BY ticker_id",
 			(self.target_session, family, window),
 		)
 		return {int(ticker_id): (None if score is None else float(score), int(status)) for ticker_id, score, status in cursor.fetchall()}
@@ -590,14 +595,17 @@ class SQLZScoreCandidate:
 	def _physical_rows(self, cursor, family: str, window: int, date_id: int) -> dict[int, tuple[float | None, int]]:
 		tables = self.names.resolve_zscore_tables((window,))[window]
 		table = tables.price if family == "price" else tables.price_delta
-		cursor.execute(f"SELECT ticker_id, zscore, status FROM `{table}` WHERE date_id = %s ORDER BY ticker_id", (date_id,))
+		cursor.execute(f"SELECT ticker_id, 0e0 + zscore, status FROM `{table}` WHERE date_id = %s ORDER BY ticker_id", (date_id,))
 		return {int(ticker_id): (None if score is None else float(score), int(status)) for ticker_id, score, status in cursor.fetchall()}
 
-	def write_zscores(self, family: str, window: int, *, checkpoint: Path | None = None, interruption: str | None = None) -> dict[str, object]:
+	def write_zscores(self, family: str, window: int, *, checkpoint: Path | None = None, interruption: str | None = None, validate_reference: bool = True, verify_source_identities: bool = True, verified_source_sessions: set[str] | None = None) -> dict[str, object]:
 		if family not in ("price", "price_delta") or window not in SUPPORTED_WINDOWS:
 			raise ValueError("Unsupported SQL z-score series")
-		self._verify_source_identities()
 		started = perf_counter()
+		if verify_source_identities:
+			self._verify_source_identities(verified_source_sessions)
+		phases = {"archive_validation": perf_counter() - started}
+		phase_started = perf_counter()
 		connection = self.target.connect()
 		cursor = connection.cursor()
 		committed = False
@@ -606,27 +614,39 @@ class SQLZScoreCandidate:
 			connection.autocommit = False
 			date_ids = self._date_ids(cursor)
 			ticker_ids = self._ticker_ids(cursor)
-			expected = self._oracle(cursor, family, window)
-			content_digest = content_id([[self.target_session, ticker_id, score, status] for ticker_id, (score, status) in sorted(expected.items())])
-			self._validate_checkpoint(checkpoint, family, window, content_digest)
+			phases["input_loading"] = perf_counter() - phase_started
+			phase_started = perf_counter()
+			expected = self._oracle(cursor, family, window) if validate_reference else None
 			self._stage_ticker_scope(cursor, ticker_ids)
 			self._stage_dependencies(cursor, family, window)
+			phases["preparation"] = perf_counter() - phase_started
+			phase_started = perf_counter()
 			self._execute(cursor, f"CALL `{COMPUTE_ROUTINE_NAME}`(%s, %s, %s)", (family, window, self.target_session))
 			actual = self._stage_rows(cursor, family, window)
-			if actual.keys() != expected.keys():
-				raise ValueError("SQL z-score ticker scope differs from the retained manifest scope")
-			for ticker_id, (actual_score, actual_status) in actual.items():
-				expected_score, expected_status = expected[ticker_id]
-				if actual_status != expected_status:
-					raise ValueError(f"SQL z-score status differs for {family}/{window}/{ticker_id}")
-				if expected_score is None:
-					if actual_score is not None:
-						raise ValueError(f"Unavailable SQL z-score has a value for {family}/{window}/{ticker_id}")
-				elif actual_score is None or abs(actual_score - expected_score) > max(1e-6, 1e-5 * abs(expected_score)):
-					raise ValueError(f"SQL z-score value differs for {family}/{window}/{ticker_id}")
+			phases["calculation"] = perf_counter() - phase_started
+			if expected is not None:
+				if actual.keys() != expected.keys():
+					raise ValueError("SQL z-score ticker scope differs from the retained manifest scope")
+				for ticker_id, (actual_score, actual_status) in actual.items():
+					expected_score, expected_status = expected[ticker_id]
+					if actual_status != expected_status:
+						raise ValueError(f"SQL z-score status differs for {family}/{window}/{ticker_id}")
+					if expected_score is None:
+						if actual_score is not None:
+							raise ValueError(f"Unavailable SQL z-score has a value for {family}/{window}/{ticker_id}")
+					elif actual_score is None or abs(actual_score - expected_score) > max(1e-6, 1e-5 * abs(expected_score)):
+						raise ValueError(f"SQL z-score value differs for {family}/{window}/{ticker_id}")
+			content_digest = content_id([[self.target_session, ticker_id, score, status] for ticker_id, (score, status) in sorted(actual.items())])
+			self._validate_checkpoint(checkpoint, family, window, content_digest)
 			hash_started = perf_counter()
-			dependency_digest, availability_digest, actual_input_available = self._input_digests(cursor, family, date_ids, ticker_ids)
+			digests = (TextDigest(), TextDigest())
+			actual_input_available = True
+			for offset in range(0, len(ticker_ids), 1000):
+				dependency_digest, availability_digest, available = self._input_digests(cursor, family, date_ids, ticker_ids[offset:offset + 1000], digests=digests)
+				actual_input_available = actual_input_available and available
 			client_hash_seconds = perf_counter() - hash_started
+			phases["input_loading_and_hashing"] = client_hash_seconds
+			phase_started = perf_counter()
 			ready_count = sum(status == 0 for _, status in actual.values())
 			status_counts = ",".join(f"{status}:{sum(value[1] == status for value in actual.values())}" for status in range(6))
 			series_key = self._ensure_series(cursor, family, window)
@@ -641,9 +661,12 @@ class SQLZScoreCandidate:
 				raise RuntimeError("Injected interruption before commit")
 			connection.commit()
 			committed = True
+			phases["persistence"] = perf_counter() - phase_started
 			if interruption == "after_commit":
 				raise RuntimeError("Injected interruption after commit")
+			phase_started = perf_counter()
 			self._write_checkpoint(checkpoint, family, window, content_digest)
+			phases["checkpoint"] = perf_counter() - phase_started
 			return {
 				"family": family,
 				"window": window,
@@ -655,6 +678,7 @@ class SQLZScoreCandidate:
 				"availability_digest": availability_digest,
 				"actual_input_available": actual_input_available,
 				"client_hash_seconds": client_hash_seconds,
+				"phase_seconds": phases,
 				"seconds": perf_counter() - started,
 				"committed": True,
 			}

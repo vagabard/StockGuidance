@@ -28,6 +28,7 @@ def parser() -> argparse.ArgumentParser:
 	mode.add_argument("--run-sql-zscore-trial", action="store_true")
 	mode.add_argument("--run-stage9-raw", action="store_true")
 	mode.add_argument("--run-stage9-derived", action="store_true")
+	mode.add_argument("--run-stage9-zscores", action="store_true")
 	arguments.add_argument("--data-root", type=_path, default=Path("data"))
 	arguments.add_argument("--dbinfo-file", type=_path, default=Path("dbinfo.id"))
 	arguments.add_argument("--evaluation-plan", type=_path, default=Path("output/legacy-migration/evaluation-plan.json"))
@@ -44,7 +45,9 @@ def parser() -> argparse.ArgumentParser:
 	arguments.add_argument("--report", type=_path, action="append", default=[])
 	arguments.add_argument("--aggregate-output", type=_path, default=Path("output/legacy-migration/benchmark/candidates/study.json"))
 	arguments.add_argument("--stage9-timeout-seconds", type=float, default=3600.0)
+	arguments.add_argument("--stage9-disposable-schema")
 	arguments.add_argument("--stage9a-report", type=_path, default=Path("output/legacy-migration/benchmark/candidates/stage9a-20261021/stage9a-raw.json"))
+	arguments.add_argument("--stage9b-report", type=_path, default=Path("output/legacy-migration/benchmark/candidates/stage9b-20261021-rerun/stage9b-derived.json"))
 	return arguments
 
 
@@ -78,6 +81,19 @@ def main(argv: Sequence[str] | None = None) -> int:
 			return 1
 		print(json.dumps({"successful": derived_report["status"] == "complete", "derived_report": str((_resolve(arguments.output) / "stage9b-derived.json").resolve()), "study": str((_resolve(arguments.output) / "study.json").resolve()), "status": study["status"]}))
 		return 0 if derived_report["status"] == "complete" else 1
+	if arguments.run_stage9_zscores:
+		from stockguidance.performance.stage9_zscores import aggregate_stage9_study, run_stage9_zscores
+
+		try:
+			zscore_report = run_stage9_zscores(_resolve(arguments.manifest), _resolve(arguments.dbinfo_file), _resolve(arguments.output), timeout_seconds=arguments.stage9_timeout_seconds, disposable_schema=arguments.stage9_disposable_schema)
+			raw_report = json.loads(_resolve(arguments.stage9a_report).read_text(encoding="utf-8"))
+			derived_report = json.loads(_resolve(arguments.stage9b_report).read_text(encoding="utf-8"))
+			study = aggregate_stage9_study(raw_report, derived_report, zscore_report, _resolve(arguments.output))
+		except Exception:
+			print(json.dumps({"successful": False, "error": "Stage 9c z-score measurement failed"}))
+			return 1
+		print(json.dumps({"successful": zscore_report["status"] == "complete", "zscore_report": str((_resolve(arguments.output) / "stage9c-zscores.json").resolve()), "study": str((_resolve(arguments.output) / "study.json").resolve()), "status": study["status"]}))
+		return 0 if zscore_report["status"] == "complete" else 1
 	if arguments.run_java_writer_trial:
 		from stockguidance.performance.java_writer_trial import run_trial
 

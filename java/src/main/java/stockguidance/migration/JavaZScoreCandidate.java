@@ -45,10 +45,21 @@ public final class JavaZScoreCandidate {
 
     private final JavaWriterManifest manifest;
     private final TableNames names;
+    private final java.util.Set<LocalDate> verifiedSources;
+    private final Map<String, Double> phaseSeconds = new LinkedHashMap<>();
 
     public JavaZScoreCandidate(JavaWriterManifest manifest) {
+        this(manifest, null);
+    }
+
+    JavaZScoreCandidate(JavaWriterManifest manifest, java.util.Set<LocalDate> verifiedSources) {
         this.manifest = manifest;
         this.names = manifest.tableNames();
+        this.verifiedSources = verifiedSources;
+    }
+
+    Map<String, Double> phaseSeconds() {
+        return Map.copyOf(phaseSeconds);
     }
 
     public WriteResult write(Connection connection, LocalDate session, Family family, int window,
@@ -57,21 +68,28 @@ public final class JavaZScoreCandidate {
         JavaWriterManifest.TargetEntry target = manifest.target(session);
         List<LocalDate> inputDates = target.zscoreDependencies();
         validateInputDates(inputDates, session, window);
+        phaseSeconds.clear();
+        long phaseStarted = System.nanoTime();
         verifySourceIdentities(inputDates);
+        phaseSeconds.put("archive_validation", (System.nanoTime() - phaseStarted) / 1e9);
         boolean committed = false;
         boolean originalAutoCommit = connection.getAutoCommit();
         try {
             connection.setAutoCommit(false);
             new JavaWriterCandidate(manifest).validateTarget(connection);
             Snapshot snapshot = loadSnapshot(connection, inputDates, session, family, window);
+            phaseStarted = System.nanoTime();
             validateCheckpoint(checkpoint, session, family, window, snapshot.contentDigest);
             String definitionKey = ensureSeries(connection, family, window);
             publish(connection, snapshot, definitionKey, session, family, window);
             JavaWriterCandidate.applyInterruption(interruption, JavaWriterCandidate.InterruptPoint.BEFORE_COMMIT);
             connection.commit();
             committed = true;
+            phaseSeconds.put("persistence", (System.nanoTime() - phaseStarted) / 1e9);
             JavaWriterCandidate.applyInterruption(interruption, JavaWriterCandidate.InterruptPoint.AFTER_COMMIT);
+            phaseStarted = System.nanoTime();
             writeCheckpoint(checkpoint, session, family, window, snapshot.contentDigest);
+            phaseSeconds.put("checkpoint", (System.nanoTime() - phaseStarted) / 1e9);
             return new WriteResult(family.value, window, session, "complete", true, snapshot.rows.size(),
                     snapshot.readyCount, snapshot.contentDigest, snapshot.dependencyDigest,
                     snapshot.availabilityDigest, snapshot.actualInputAvailable);
@@ -93,12 +111,65 @@ public final class JavaZScoreCandidate {
     static List<ScoreRow> calculate(Family family, int window, LocalDate target, List<LocalDate> dates,
                                     Map<Long, String> tickers, Map<Long, Map<LocalDate, Cell>> raw,
                                     Map<Long, Map<LocalDate, Cell>> deltas, Map<LocalDate, Evidence> evidence) {
+        return calculate(family, window, target, dates, tickers, raw, deltas, evidence, null);
+    }
+
+    private static List<ScoreRow> calculate(Family family, int window, LocalDate target, List<LocalDate> dates,
+                                    Map<Long, String> tickers, Map<Long, Map<LocalDate, Cell>> raw,
+                                    Map<Long, Map<LocalDate, Cell>> deltas, Map<LocalDate, Evidence> evidence,
+                                    Map<String, Double> phases) {
         List<ScoreRow> result = new ArrayList<>();
         int targetIndex = dates.indexOf(target);
         if (targetIndex < 0) throw new IllegalArgumentException("Z-score target is outside its dependency window");
-        for (long tickerId : tickers.keySet()) {
-            List<Observation> observations = observations(family, tickerId, dates, raw, deltas, evidence);
-            result.add(calculateTicker(family, window, tickerId, targetIndex, dates, observations));
+        List<Long> identifiers = new ArrayList<>(tickers.keySet());
+        for (int offset = 0; offset < identifiers.size(); offset += CHUNK_SIZE) {
+            long phaseStarted = System.nanoTime();
+            List<Long> batch = identifiers.subList(offset, Math.min(offset + CHUNK_SIZE, identifiers.size()));
+            double[][] values = new double[dates.size()][batch.size()];
+            Issue[] issues = new Issue[batch.size()];
+            java.util.Arrays.fill(issues, Issue.NONE);
+            int first = Math.max(0, targetIndex - window + 1);
+            for (int ticker = 0; ticker < batch.size(); ticker++) {
+                Map<LocalDate, Cell> tickerRaw = raw.getOrDefault(batch.get(ticker), Map.of());
+                Map<LocalDate, Cell> tickerDeltas = deltas.getOrDefault(batch.get(ticker), Map.of());
+                for (int sessionIndex = first; sessionIndex <= targetIndex; sessionIndex++) {
+                    LocalDate date = dates.get(sessionIndex);
+                    Cell current = tickerRaw.get(date);
+                    Issue issue = closeIssue(current, evidence.get(date));
+                    if (family == Family.PRICE) {
+                        if (issue == Issue.NONE) values[sessionIndex][ticker] = current.value;
+                    } else if (sessionIndex == 0) {
+                        issue = Issue.INSUFFICIENT_HISTORY;
+                    } else {
+                        LocalDate previousDate = dates.get(sessionIndex - 1);
+                        Cell previous = tickerRaw.get(previousDate);
+                        issue = higher(issue, closeIssue(previous, evidence.get(previousDate)));
+                        Cell stored = tickerDeltas.get(date);
+                        if (issue == Issue.NONE) {
+                            if (stored == null || stored.value == null) issue = Issue.MISSING;
+                            else if (!isFinite(stored.value) || stored.value <= 0.0
+                                    || !closeEnough(stored.value, current.value / previous.value)) issue = Issue.INVALID;
+                            else values[sessionIndex][ticker] = stored.value - 1.0;
+                        }
+                    }
+                    issues[ticker] = higher(issues[ticker], issue);
+                }
+                if (targetIndex + 1 < window) issues[ticker] = higher(issues[ticker], Issue.INSUFFICIENT_HISTORY);
+            }
+            if (phases != null) phases.merge("preparation", (System.nanoTime() - phaseStarted) / 1e9, Double::sum);
+            phaseStarted = System.nanoTime();
+            double[] scores = ZScoreVectorKernel.scores(values, first, targetIndex + 1);
+            for (int ticker = 0; ticker < batch.size(); ticker++) {
+                if (issues[ticker] != Issue.NONE) {
+                    result.add(new ScoreRow(batch.get(ticker), null, status(issues[ticker])));
+                } else if (!Double.isFinite(scores[ticker])) {
+                    result.add(calculateTicker(family, window, batch.get(ticker), targetIndex, dates,
+                            observations(family, batch.get(ticker), dates, raw, deltas, evidence)));
+                } else {
+                    result.add(new ScoreRow(batch.get(ticker), quantizeFloat32(scores[ticker]), Status.READY));
+                }
+            }
+            if (phases != null) phases.merge("calculation", (System.nanoTime() - phaseStarted) / 1e9, Double::sum);
         }
         result.sort(Comparator.comparingLong(ScoreRow::tickerId));
         return result;
@@ -167,10 +238,15 @@ public final class JavaZScoreCandidate {
     }
 
     private static Observation closeObservation(Cell cell, Evidence evidence) {
-        if (evidence == null || !evidence.verified()) return new Observation(Issue.UNVERIFIED, null);
-        if (cell == null || cell.value == null) return new Observation(Issue.MISSING, null);
-        if (!isFinite(cell.value) || cell.value <= 0.0) return new Observation(Issue.INVALID, null);
-        return new Observation(Issue.NONE, cell.value);
+        Issue issue = closeIssue(cell, evidence);
+        return new Observation(issue, issue == Issue.NONE ? cell.value : null);
+    }
+
+    private static Issue closeIssue(Cell cell, Evidence evidence) {
+        if (evidence == null || !evidence.verified()) return Issue.UNVERIFIED;
+        if (cell == null || cell.value == null) return Issue.MISSING;
+        if (!isFinite(cell.value) || cell.value <= 0.0) return Issue.INVALID;
+        return Issue.NONE;
     }
 
     private Snapshot loadSnapshot(Connection connection, List<LocalDate> dates, LocalDate target,
@@ -191,11 +267,15 @@ public final class JavaZScoreCandidate {
         Collections.sort(tickerIds);
         List<ScoreRow> rows = new ArrayList<>();
         boolean actualAvailable = true;
+        double loadingSeconds = 0, hashingSeconds = 0;
         for (int offset = 0; offset < tickerIds.size(); offset += CHUNK_SIZE) {
+            long phaseStarted = System.nanoTime();
             List<Long> chunk = tickerIds.subList(offset, Math.min(offset + CHUNK_SIZE, tickerIds.size()));
             Map<Long, Map<LocalDate, Cell>> rawChunk = readValues(connection, names.prices(), "close", dateIds, chunk);
             Map<Long, Map<LocalDate, Cell>> deltaChunk = family == Family.PRICE_DELTA
                     ? readValues(connection, names.deltas(), "close_ratio_to_prior", dateIds, chunk) : Map.of();
+            loadingSeconds += (System.nanoTime() - phaseStarted) / 1e9;
+            phaseStarted = System.nanoTime();
             for (long tickerId : chunk) {
                 Map<LocalDate, Cell> tickerRaw = rawChunk.getOrDefault(tickerId, Map.of());
                 Map<LocalDate, Cell> tickerDelta = deltaChunk.getOrDefault(tickerId, Map.of());
@@ -208,13 +288,17 @@ public final class JavaZScoreCandidate {
                     if (close.issue != Issue.NONE) actualAvailable = false;
                 }
             }
-            rows.addAll(calculate(family, window, target, dates, tickerMappingsFor(chunk, tickerMappings), rawChunk, deltaChunk, evidence));
+            hashingSeconds += (System.nanoTime() - phaseStarted) / 1e9;
+            phaseStarted = System.nanoTime();
+            rows.addAll(calculate(family, window, target, dates, tickerMappingsFor(chunk, tickerMappings), rawChunk, deltaChunk, evidence, phaseSeconds));
         }
         rows.sort(Comparator.comparingLong(ScoreRow::tickerId));
         String dependency = hex(dependencyDigest.digest());
         String availability = hex(availabilityDigest.digest());
         int ready = (int) rows.stream().filter(row -> row.status == Status.READY).count();
         String content = rowsContentId(rows, target);
+        phaseSeconds.put("input_loading", loadingSeconds);
+        phaseSeconds.put("hashing", hashingSeconds);
         return new Snapshot(rows, ready, dependency, availability, actualAvailable, content, dateIds.get(target));
     }
 
@@ -381,13 +465,27 @@ public final class JavaZScoreCandidate {
     }
 
     private static String rowsContentId(List<ScoreRow> rows, LocalDate session) {
-        JsonArray values = JsonSupport.array();
+        StringBuilder values = new StringBuilder("[");
         for (ScoreRow row : rows) {
-            JsonArray item = JsonSupport.addArray(values); item.add(session.toString()); item.add(row.tickerId);
-            item.add(row.score);
-            item.add(row.status.code);
+            if (values.length() > 1) values.append(',');
+            values.append("[\"").append(session).append("\",").append(row.tickerId).append(',');
+            values.append(row.score == null ? "null" : pythonFloat(row.score.doubleValue()));
+            values.append(',').append(row.status.code).append(']');
         }
-        return CanonicalJson.sha256(values);
+        values.append("]\n");
+        return hex(digest().digest(values.toString().getBytes(StandardCharsets.UTF_8)));
+    }
+
+    private static String pythonFloat(double value) {
+        if (value == 0.0) return Double.toString(value);
+        if (Math.abs(value) >= 1e-4 && Math.abs(value) < 1e16) {
+            String text = BigDecimal.valueOf(value).toPlainString();
+            return text.contains(".") ? text : text + ".0";
+        }
+        String[] parts = Double.toString(value).split("E");
+        if (parts.length == 1) return parts[0];
+        String mantissa = parts[0].endsWith(".0") ? parts[0].substring(0, parts[0].length() - 2) : parts[0];
+        return mantissa + "e" + String.format(java.util.Locale.ROOT, "%+03d", Integer.parseInt(parts[1]));
     }
 
     private static void updateDigest(MessageDigest digest, LocalDate date, Long dateId, long tickerId, Cell raw, Cell delta, Evidence evidence) {
@@ -409,7 +507,9 @@ public final class JavaZScoreCandidate {
 
     private void verifySourceIdentities(List<LocalDate> dates) {
         for (LocalDate date : dates) {
+            if (verifiedSources != null && verifiedSources.contains(date)) continue;
             if (manifest.isAdoptable(date)) manifest.archive(date);
+            if (verifiedSources != null) verifiedSources.add(date);
         }
     }
 

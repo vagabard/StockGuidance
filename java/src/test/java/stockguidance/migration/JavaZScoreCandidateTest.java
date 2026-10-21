@@ -66,6 +66,46 @@ class JavaZScoreCandidateTest {
         assertEquals((float) (1.0 / 3.0), value);
     }
 
+    @Test
+    void largeOffsetSmallVarianceMatchesScalarPythonReference() {
+        List<LocalDate> dates = dates(61);
+        double[] prices = new double[61];
+        for (int index = 0; index < prices.length; index++) prices[index] = 1e12 + index * 0.001;
+        Map<Long, Map<LocalDate, JavaZScoreCandidate.Cell>> raw = Map.of(11L, values(dates, prices));
+        Map<LocalDate, JavaZScoreCandidate.Evidence> evidence = new LinkedHashMap<>();
+        for (LocalDate date : dates) evidence.put(date, new JavaZScoreCandidate.Evidence(true, "id", "id", "receipt"));
+        for (int window : new int[]{20, 60}) {
+            List<JavaZScoreCandidate.ScoreRow> rows = JavaZScoreCandidate.calculate(
+                    JavaZScoreCandidate.Family.PRICE, window, dates.get(60), dates, Map.of(11L, "AAP"), raw, Map.of(), evidence);
+            double expected = window == 20 ? 1.6495943314231643 : 1.7056289244465483;
+            assertEquals(expected, rows.getFirst().score(), 1e-6);
+        }
+    }
+
+    @Test
+    void invalidDeltaDependenciesOutrankMissingInputsAndShortHistoryIsExplicit() {
+        List<LocalDate> dates = dates(4);
+        Map<LocalDate, JavaZScoreCandidate.Evidence> evidence = new LinkedHashMap<>();
+        for (LocalDate date : dates) evidence.put(date, new JavaZScoreCandidate.Evidence(true, "id", "id", "receipt"));
+        Map<Long, Map<LocalDate, JavaZScoreCandidate.Cell>> raw = Map.of(
+                11L, values(dates, 10, -2, 12, 13),
+                13L, values(dates, 10, 11, 12, 13));
+        Map<Long, Map<LocalDate, JavaZScoreCandidate.Cell>> deltas = Map.of(
+                11L, values(dates, null, 1.1, 1.1, 13.0 / 12),
+                13L, values(dates, null, 1.1, 99, 13.0 / 12));
+        List<JavaZScoreCandidate.ScoreRow> invalid = JavaZScoreCandidate.calculate(
+                JavaZScoreCandidate.Family.PRICE_DELTA, 3, dates.getLast(), dates,
+                Map.of(11L, "AAP", 13L, "AAp"), raw, deltas, evidence);
+        for (JavaZScoreCandidate.ScoreRow row : invalid) {
+            assertEquals(JavaZScoreCandidate.Status.INVALID_INPUT, row.status());
+            assertEquals(null, row.score());
+        }
+        List<JavaZScoreCandidate.ScoreRow> shortHistory = JavaZScoreCandidate.calculate(
+                JavaZScoreCandidate.Family.PRICE, 20, dates.getLast(), dates,
+                Map.of(13L, "AAp"), raw, Map.of(), evidence);
+        assertEquals(JavaZScoreCandidate.Status.INSUFFICIENT_HISTORY, shortHistory.getFirst().status());
+    }
+
     private static List<LocalDate> dates(int count) {
         List<LocalDate> result = new ArrayList<>();
         for (int index = 0; index < count; index++) result.add(LocalDate.of(2024, 1, 2).plusDays(index));

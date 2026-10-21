@@ -89,7 +89,7 @@ class ZScoreTrial:
 
     def java(self, family: str, window: int, *, checkpoint: Path | None = None,
              interruption: str | None = None, manifest_path: Path | None = None, fail: bool = False) -> dict:
-        command = ["java", "-Xmx512m", "-cp", self.classpath, "stockguidance.migration.JavaZScoreMain",
+        command = ["java", "--add-modules=jdk.incubator.vector", "-Xmx512m", "-cp", self.classpath, "stockguidance.migration.JavaZScoreMain",
                    "--manifest", str(manifest_path or self.manifest_path), "--dbinfo-file", str(self.dbinfo_file),
                    "--disposable-schema", self.schema_name, "--family", family, "--window", str(window),
                    "--session", self.target_session]

@@ -215,12 +215,13 @@ def _calculate_ticker(
 	minimum_dependency = min(dependency_sequences) if dependency_sequences else None
 	scored_sequences = {session.sequence for session in input_data.scored_sessions or ()}
 	rows: list[ZScoreRow] = []
+	missing_observation = ZScoreObservation.missing()
 	for window in specification.windows:
 		moments = _RollingMoments(window)
 		issues: deque[tuple[int, ZScoreStatus | None]] = deque()
 		issue_counts = {status: 0 for status in _STATUS_PRIORITY}
 		for sequence in range(minimum_sequence, maximum_sequence + 1):
-			observation = sequence_to_observation.get(sequence, ZScoreObservation.missing())
+			observation = sequence_to_observation.get(sequence, missing_observation)
 			issue, numeric, _ = _observation_issue(observation, specification.family)
 			issues.append((sequence, issue))
 			if issue is not None:

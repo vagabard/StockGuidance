@@ -1317,3 +1317,124 @@ parity/recovery handoff that follows.
 - Focused Python candidate tests passed 5 tests; Maven packaging/tests passed
   49 tests. Next prompt: **Read docs/legacy_migration_prompts.md and execute
   revised Stage 9c only.**
+
+### Revised Stage 9c z-score comparison implemented — incomplete, 2026-10-21
+
+- Implemented `src/stockguidance/performance/stage9_zscores.py`, the Java
+  `JavaZScoreBenchmarkMain` worker, CLI dispatch through
+  `--run-stage9-zscores`, and focused coverage in
+  `tests/stage6/test_stage9_zscores.py`. The runner validates both fixed-25
+  and chronological-20 target blocks, all four manifest candidate-order
+  rotations, one first plus three warm repetitions, Python/Java/SQL workers,
+  atomic series/session writes, checkpoints, process-tree metrics, dense
+  correctness audits and the nine-cell Stage 9 aggregate. It uses one guarded
+  disposable MySQL target, preserves seeded raw/delta inputs between output
+  resets, batches disposable delta seeding, and supports explicit reuse of a
+  verified disposable schema with `--stage9-disposable-schema`.
+- Authorized bounded runs were started against the unchanged manifest ID
+  `e5d9446e8bae97244edf17824be680eda6e8990bf1b80a2e6629809896022a14`
+  (manifest SHA-256
+  `11bbcf4b57469c1256ab9caa474824a538ccbfb8bd3155de6515965e2d4fcf26`).
+  The first rerun recorded a disposable-schema reclamation failure after a
+  914.03-second partial Python trial (`Unknown database`); the keepalive and
+  schema-reuse recovery paths were then added. Later runs completed seeding
+  and reached the Python z-score worker, but the first atomic Python series
+  remained CPU-bound beyond practical execution time and was stopped before
+  producing a valid timed cell. No 9c backend measurement is comparison
+  eligible; no backend is selected and Stage 10 must not run.
+- Preserved diagnostics include
+  `output/legacy-migration/benchmark/candidates/stage9c-20261021-rerun/`
+  (report SHA-256
+  `4BA3C386A88C09F036C4BF64C19EB1519E3D5AE0216B843D9A5448FFD8DDB0AA`),
+  `stage9c-20261021-final2/`, `stage9c-20261021-final3/`,
+  `stage9c-20261021-final4/` and `stage9c-20261021-final5/` (partial report
+  SHA-256
+  `DC57807FE3CFDC495BFA74663C20877F20BA597B5E08E3E3E09400B4E6296C37`).
+  The final reports remain `incomplete`; partial checkpoints and stderr logs
+  identify the bounded runtime state. Production DDL/DML, production rows,
+  receipts, bindings and retained source files were unchanged.
+- Validation passed: `tests/stage6` passed 134 tests with three existing
+  model warnings; focused Stage 9c/SQL z-score tests passed 6 tests;
+  `mvn -o test package` previously passed 49 Java tests. Do not treat the
+  partial 9c runs as performance evidence. Next prompt: resume Stage 9c only
+  after optimizing or otherwise bounding the Python z-score implementation.
+
+### Stage 9c optimized and prepared for rerun — 2026-10-21
+
+- Corrected the previous runtime diagnosis: `stage9c-20261021-final5` contains
+  72 committed series checkpoints covering 18 of 25 fixed targets. Their file
+  timestamps span 54 minutes 39 seconds. The trial was progressing slowly;
+  it did not remain stuck on its first series. Its incomplete results remain
+  ineligible for comparison.
+- Python now uses a bounded NumPy kernel; Java uses primitive arrays and the
+  Java 26 Vector API across tickers. Both preserve population windows,
+  float64 arithmetic, float32 storage, status precedence and NULL outcomes.
+  Exceptional Python precision cases retain the independent scalar fallback;
+  Java uses compensated anchored moments and scalar fallback for non-finite
+  SIMD results. Maven and Java worker launches enable `jdk.incubator.vector`.
+- Each Python series loads at most 1,000 tickers per batch and shares that
+  transaction's input snapshot between calculation and streaming canonical
+  dependency hashes. The accumulating result cache is removed; calendar
+  preparation is reused within a target. SQL hashing is also batched.
+  No database snapshot is cached across commits. The scalar reference avoids
+  constructing unused missing observations.
+- All three timed workers verify each required valid source archive once per
+  worker invocation, with independent caches for every repetition. They retain
+  transactional schema/mapping/receipt/dependency checks. The orchestrator checks
+  immutable archive hashes, seeded database fingerprints and candidate source/
+  class hashes around trials. Reused schemas must carry a verified seed identity;
+  earlier unmarked schemas cannot be reused. Fresh output directories are required.
+- Reports include phase timings, verified-archive counts and atomic progress
+  snapshots; timeouts preserve committed series. Independent scalar expectations
+  use checksummed disk caches keyed by input and code identities. Numerical
+  comparisons retain existing tolerances; metadata hashes are checked against
+  actual stored float32 rows. MySQL reads widen FLOAT values before text transfer
+  to avoid losing stored bits. SQL mixed delta issues now retain the highest
+  status priority. The keepalive closes on exceptional exits as well.
+- The bounded synthetic diagnostic passed for Python, Java and SQL in
+  `output/legacy-migration/benchmark/candidates/stage9c-vector-diagnostic-20261021-ready/diagnostic.json`
+  (SHA-256 `45E35552AE5501E6112B121F04F38E246ACB455654B09777426E3B1250992C70`).
+  Each backend verified 61 archives, committed all four series/132 dense rows,
+  passed four independent audits, and passed rollback, after-commit restart,
+  idempotency, stale-checkpoint and changed-source checks. Missing/changed seed
+  identities and a modified scalar audit cache were rejected. The synthetic
+  calculation-only report `output/stage9c-kernel-diagnostic.json` measured
+  approximately 4.8x lower NumPy median calculation-only time for 1,003 tickers and
+  windows 20/60. Neither diagnostic is Stage 9 ranking evidence.
+- The original manifest is unchanged (SHA-256
+  `11bbcf4b57469c1256ab9caa474824a538ccbfb8bd3155de6515965e2d4fcf26`).
+  Production rows, receipts and retained archives are unchanged. Stage 9c remains
+  incomplete until fresh paired measurements pass; no backend is selected.
+  Do not execute Stage 10. The full benchmark has deliberately not been rerun.
+- Validation: 121 relevant Python numerical, storage, update, candidate and audit
+  tests passed (four existing SQLite adapter deprecation warnings); Maven tests
+  and packaging passed all 52 Java tests. A wider run including unrelated model
+  training tests encountered installed PyTorch/Triton ROCm-discovery failures
+  (36 failures/15 errors); those dependencies and training paths were not changed.
+  Python compilation and `git diff --check` passed. No commit was created.
+
+From the repository root, rebuild and run the prepared full comparison:
+
+```powershell
+mvn -o -f java/pom.xml test package
+$pythonExe = 'C:\Users\formm\AppData\Local\Python\bin\python.exe'
+$env:PYTHONPATH = 'src'
+& $pythonExe -m stockguidance.cli.legacy_migration_benchmark `
+  --run-stage9-zscores `
+  --manifest output/legacy-migration/benchmark/candidates/manifest.json `
+  --dbinfo-file dbinfo.id `
+  --output output/legacy-migration/benchmark/candidates/stage9c-optimized-20261021 `
+  --stage9a-report output/legacy-migration/benchmark/candidates/stage9a-20261021/stage9a-raw.json `
+  --stage9b-report output/legacy-migration/benchmark/candidates/stage9b-20261021-rerun/stage9b-derived.json `
+  --stage9-timeout-seconds 3600
+```
+
+The runner caps native threads at one and retains the original candidate orders,
+both target blocks, one first plus three warm repetitions, and atomic
+series/session transactions. Use another fresh output suffix if the named
+directory already exists. To repeat only the bounded diagnostic:
+
+```powershell
+& $pythonExe -m stockguidance.performance.stage9_zscore_diagnostic `
+  --output output/legacy-migration/benchmark/candidates/stage9c-diagnostic-<fresh-run>
+```

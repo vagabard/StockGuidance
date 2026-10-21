@@ -47,6 +47,8 @@ def test_sql_zscore_candidate_is_set_based_and_atomic(tmp_path):
 	assert PUBLISH_ROUTINE_NAME in publish
 	assert "STDDEV_POP" in compute
 	assert "expected_raw_id" in compute
+	assert "GREATEST(close_issue, previous_issue)" in compute
+	assert "GREATEST(1, highest_issue)" in compute
 	assert "sequence_no" in compute
 	assert "INSERT INTO" in publish and "SELECT v_date_id" in publish
 	assert "SUM(status = 0)" in publish
