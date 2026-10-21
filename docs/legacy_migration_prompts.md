@@ -1213,3 +1213,44 @@ parity/recovery handoff that follows.
 - Combined warm medians across the three raw scenarios were Python `p1` 12.840 seconds and `p3` 13.070 seconds, Java `p1` 43.280 seconds and `p3` 42.150 seconds, and SQL `p1` 23.910 seconds. These are comparison measurements only; Stage 10 selection has not run. The Java query counter is unavailable; Python and SQL report their bounded client statement-count scopes separately.
 - Artifacts are under `output/legacy-migration/benchmark/candidates/stage9a-20261020/`: `stage9a-raw.json` (SHA-256 `4982D30F0A007B839C4993CC1FB64A9EDB47E1ED342537CA87FB5506B6ACED4C`), `study.json` (SHA-256 `0B06009984D10BCBE04EF7C93EA550F9BBDF82A1095F11F1519CC8DE7AF8B859`) and per-configuration reports under `raw/`. The Stage 9 aggregate has all nine cells, with raw adoption/repair measured and derived/z-score cells explicitly pending.
 - Focused Python candidate tests passed 16 tests; Maven Java tests passed 40 tests and packaging succeeded. Existing Java and SQL raw recovery artifacts remain passing and are referenced in the Stage 9a report. Next prompt: **Read docs/legacy_migration_prompts.md and execute revised Stage 9b only.**
+
+### Revised Stage 9a raw comparison rerun — 2026-10-21
+
+- Reran the complete Stage 9a matrix after the Java raw candidate improvements
+  from `5b1a2e5` (buffered archive reads, shared raw-write state and bounded
+  JDBC batches). The later `38a9763` commit changed IDE build metadata only;
+  it did not change the measured Java sources. `mvn -o test package` passed 49
+  Java tests and rebuilt the packaged runtime dependencies.
+- The unchanged Stage 6 manifest was used: ID
+  `e5d9446e8bae97244edf17824be680eda6e8990bf1b80a2e6629809896022a14`,
+  manifest SHA-256
+  `11bbcf4b57469c1256ab9caa474824a538ccbfb8bd3155de6515965e2d4fcf26`.
+  Python, Java and SQL each ran matching adoption, missing/different-row
+  repair and unchanged rerun with one first invocation plus three warm
+  repeats, rotated through all four candidate orders. All 60 trials passed
+  independent exact-case, exact-decimal audits over 217,734 fixed-session
+  rows or 7,758 repair/rerun rows as applicable. MySQL `9.5.0`, InnoDB,
+  corrected disposable schemas and one writer per candidate were used; no
+  production DDL/DML, receipts, bindings or source files changed.
+- Fresh artifacts are under
+  `output/legacy-migration/benchmark/candidates/stage9a-20261021/`:
+  `stage9a-raw.json` (SHA-256
+  `FB81A34D121ECB09261642E9D88B0394F8E7390249142D0DB4FC30339E7C2353`) and
+  `study.json` (SHA-256
+  `6E360243F90654404B0E66481111735A57950A6C5C803B19F8C677B134D3174A`).
+  The raw report is `complete`; its aggregate remains `incomplete` only
+  because Stage 9b and 9c are still pending. Server resource metrics remain
+  unavailable to the configured account, while process-tree RSS/CPU sampling
+  and all bounded timing fields were retained per trial.
+- Warm medians across the three raw scenarios were Python p3 `11.31` seconds,
+  Java p1 `10.36` seconds and SQL p1 `21.65` seconds. Java was approximately
+  8.37% faster than the best Python configuration for this workload; this is
+  below Stage 10's 10% qualification threshold and is not a backend
+  selection. SQL was approximately 91.44% slower. The Java JDBC query count
+  remains unavailable; Python and SQL statement-count scopes are recorded in
+  the report.
+- Focused validation passed: Python `tests/stage6` passed 131 tests with
+  three existing model warnings, and Java packaging/tests passed 49 tests.
+  Stage 9a is complete; preserve this rerun and the 2026-10-20 report as
+  separate evidence. Next prompt: **Read docs/legacy_migration_prompts.md and
+  execute revised Stage 9b only.**
