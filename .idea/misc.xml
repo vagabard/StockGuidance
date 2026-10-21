@@ -11,7 +11,9 @@
       </list>
     </option>
   </component>
-  <component name="ProjectRootManager" version="2" languageLevel="JDK_26" project-jdk-name="26" project-jdk-type="JavaSDK" />
+  <component name="ProjectRootManager" version="2" languageLevel="JDK_26" project-jdk-name="26" project-jdk-type="JavaSDK">
+    <output url="file://$PROJECT_DIR$/java/target" />
+  </component>
   <component name="PythonCompatibilityInspectionAdvertiser">
     <option name="version" value="3" />
   </component>
