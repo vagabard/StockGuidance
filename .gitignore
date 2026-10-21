@@ -7,6 +7,7 @@ cache/
 *.pt
 /tests/test_model/
 /java/target/
+/out/
 *.class
 /java/lib/mysql-connector-j-9.6.0.jar
 /java/lib/mysql-connector-j-9.6.0.zip
