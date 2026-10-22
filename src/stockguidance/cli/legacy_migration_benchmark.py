@@ -32,6 +32,7 @@ def parser() -> argparse.ArgumentParser:
 	mode.add_argument("--run-stage9-zscores", action="store_true")
 	mode.add_argument("--run-stage10", action="store_true")
 	mode.add_argument("--run-stage11a", action="store_true")
+	mode.add_argument("--run-stage11b", action="store_true")
 	arguments.add_argument("--data-root", type=_path, default=Path("data"))
 	arguments.add_argument("--dbinfo-file", type=_path, default=Path("dbinfo.id"))
 	arguments.add_argument("--evaluation-plan", type=_path, default=Path("output/legacy-migration/evaluation-plan.json"))
@@ -72,6 +73,10 @@ def parser() -> argparse.ArgumentParser:
 	arguments.add_argument("--stage11-output", type=_path, default=Path("output/legacy-migration/benchmark/candidates/stage11a-integration.json"))
 	arguments.add_argument("--stage11-checkpoint-directory", type=_path)
 	arguments.add_argument("--stage11-disposable-schema")
+	arguments.add_argument("--stage11a-report", type=_path, default=Path("output/legacy-migration/benchmark/candidates/stage11a-mysql-raw-derived.json"))
+	arguments.add_argument("--stage11b-output", type=_path, default=Path("output/legacy-migration/benchmark/candidates/stage11b-recovery.json"))
+	arguments.add_argument("--stage11b-checkpoint-directory", type=_path, default=Path("output/legacy-migration/benchmark/candidates/stage11b-checkpoints"))
+	arguments.add_argument("--stage11b-session", default="2026-04-29")
 	return arguments
 
 
@@ -151,6 +156,21 @@ def main(argv: Sequence[str] | None = None) -> int:
 			print(json.dumps({"successful": False, "error": "Stage 11a integration failed", "detail": str(error)}))
 			return 1
 		print(json.dumps({"successful": report["status"] == "complete", "operation": "run_stage11a", "report": str(_resolve(arguments.stage11_output)), "status": report["status"], "production_access": report["production_access"]}))
+		return 0 if report["status"] == "complete" else 1
+	if arguments.run_stage11b:
+		from stockguidance.performance.stage11_integration import Stage11Error, validate_prerequisites
+		from stockguidance.performance.stage11_recovery import run_stage11b
+
+		if not arguments.stage11_cutoff or not arguments.stage11_disposable_schema:
+			parser().error("--run-stage11b requires --stage11-cutoff and --stage11-disposable-schema")
+		try:
+			cutoff = datetime.fromisoformat(arguments.stage11_cutoff)
+			context = validate_prerequisites(_resolve(arguments.stage11_decision), _resolve(arguments.manifest), _resolve(arguments.audit_report), _resolve(arguments.stage11_evidence_path), cutoff)
+			report = run_stage11b(context, _resolve(arguments.stage11a_report), _resolve(arguments.dbinfo_file), arguments.stage11_disposable_schema, arguments.stage11b_session, _resolve(arguments.stage11b_output), _resolve(arguments.stage11b_checkpoint_directory))
+		except (OSError, Stage11Error, ValueError) as error:
+			print(json.dumps({"successful": False, "error": "Stage 11b recovery proof failed", "detail": str(error)}))
+			return 1
+		print(json.dumps({"successful": report["status"] == "complete", "operation": "run_stage11b", "report": str(_resolve(arguments.stage11b_output)), "status": report["status"], "production_access": report["production_access"]}))
 		return 0 if report["status"] == "complete" else 1
 	if arguments.run_java_writer_trial:
 		from stockguidance.performance.java_writer_trial import run_trial

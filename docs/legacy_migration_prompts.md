@@ -1666,3 +1666,43 @@ comparison. See `docs/stage9c_execution.md` for phase-specific commands.
   `output/legacy-migration/benchmark/candidates/stage11a-mysql-raw-derived.json`.
   No production schema, data, source binding or original archive was changed;
   no commit was created. Next prompt: execute Stage 11b only.
+
+### Stage 11b integrated recovery proof — 2026-10-22
+
+- Stage 11a was revalidated as complete and disposable-only against the frozen
+  decision, manifest and audit. The cutoff remained
+  `2026-10-21T23:59:00-06:00`; the Stage 11a report hash is
+  `1a522276b72f0f3b706f958da79e25985b6321037809f675b2bd7c73205a44f2`.
+- Added `stockguidance.performance.stage11_recovery` and the bounded
+  `--run-stage11b` frontend. It requires the Stage 11a handoff, creates a fresh
+  disposable target, runs the selected Python raw → Java derived → Java
+  z-score pipeline, records handoff phase timings, and independently verifies
+  every adopted raw record, all 16 derived columns, and all four dense z-score
+  family/window publications. SQL remains unselected and no SQL DDL was run.
+- The successful operation used schema
+  `stockguidance_disposable_11b4_20261022` and target session `2026-04-29`.
+  It adopted 62 dependency/input sessions and 740,392 records exactly,
+  persisted 12,126 derived rows, and persisted 147,464 z-score rows across
+  price/price-delta windows 20/60. Independent checks used derived
+  `rtol=1e-10, atol=1e-12` and float32 z-score `rtol=1e-5, atol=1e-6`.
+  Handoff phase wall times were raw staging 171.390651 seconds, Java derived
+  handoff 2.177364 seconds, and Java z-score handoff 40.685926 seconds; these
+  include subprocess startup and durable publication, while schema setup and
+  independent verification are excluded.
+- Recovery evidence passed for rollback, after-commit restart, stale
+  checkpoints, changed inputs, schema identity, code identity, dependency
+  corruption/races and idempotency.
+  The Stage 7 MySQL Java writer and z-score recovery artifacts were hash-checked
+  before use. The Stage 11b report is
+  `output/legacy-migration/benchmark/candidates/stage11b-recovery-4.json`
+  (SHA-256
+  `f3321d00181b4d362f203782e8837f1f5f49f236245b0ffe6c1563bb06e943d9`); its
+  pipeline report is
+  `output/legacy-migration/benchmark/candidates/stage11b-recovery-4-pipeline.json`
+  (SHA-256
+  `2926baf92969cea2e9a42581a94cac30a35e3094becad9dbfab722bf0f8c27db`).
+- `tests/stage11` passed 5 tests and `mvn -o test` passed 53 Java tests.
+  `production_access.ddl` and `.dml` are false; no production schema, data,
+  source binding or original archive was changed. No commit was created. Stage
+  12 is the next prompt and remains responsible for restore testing, precision/
+  collation migration and the bounded pilot.

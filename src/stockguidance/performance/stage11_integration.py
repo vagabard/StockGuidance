@@ -703,6 +703,7 @@ def run_mysql(
 	if any(workload not in WORKLOADS for workload in workloads) or not workloads:
 		raise Stage11Error("Invalid Stage 11 workload selection")
 	manifest = load_manifest(context.manifest_path)
+	pipeline_started = perf_counter()
 	target = MySQLTarget(dbinfo_file, schema, manifest, extra_statements=_stage11_mysql_tables())
 	probe = target.connect(select_schema=False)
 	try:
@@ -726,6 +727,7 @@ def run_mysql(
 		if "zscores" in workloads and isinstance(target_entry, dict):
 			archive_sessions.update(target_entry.get("zscore_dependencies", ()))
 	raw_results = []
+	raw_started = perf_counter()
 	for session in sorted(archive_sessions):
 		file_item = next((value for value in manifest["files"] if value.get("session") == session and value.get("valid")), None)
 		if not isinstance(file_item, dict):
@@ -737,11 +739,15 @@ def run_mysql(
 			raise Stage11Error(f"Archive evidence is outside the Stage 11 cutoff: {session}")
 		if "raw" in workloads or session not in sessions or "derived" in workloads or "zscores" in workloads:
 			raw_results.append(_mysql_adopt_raw(target, context, manifest, session, file_item, path, bars, evidence))
+	raw_finished = perf_counter()
+	derived_started = perf_counter()
 	if "derived" in workloads:
 		command = ["java", "-Xmx512m", "-cp", _java_classpath(), "stockguidance.migration.JavaDerivedBenchmarkMain", "--manifest", str(context.manifest_path), "--dbinfo-file", str(dbinfo_file), "--disposable-schema", schema, "--preparers", "1", "--sessions", ",".join(sorted(sessions)), "--checkpoint-directory", str(checkpoint_directory)]
 		derived_result = _run_java(command)
 	else:
 		derived_result = {"status": "not_requested"}
+	derived_finished = perf_counter()
+	zscore_started = perf_counter()
 	if "zscores" in workloads:
 		dependency_sessions = tuple(sorted(archive_sessions))
 		_mysql_stage_deltas(target, manifest, dependency_sessions)
@@ -749,8 +755,9 @@ def run_mysql(
 		zscore_result = _run_java(command)
 	else:
 		zscore_result = {"status": "not_requested"}
+	zscore_finished = perf_counter()
 	output = output.resolve()
 	output.parent.mkdir(parents=True, exist_ok=True)
-	report = {"schema_version": STAGE11_SCHEMA_VERSION, "stage": "11a", "status": "complete", "production_access": {"ddl": False, "dml": False, "database": "mysql_disposable"}, "prerequisites": {"decision_sha256": context.decision_sha256, "manifest_sha256": context.manifest_sha256, "audit_sha256": context.audit_sha256, "manifest_id": context.manifest_id, "cutoff": _iso(context.cutoff)}, "selected_backends": {"raw": "python", "derived": "java", "zscores": "java"}, "execution": {"storage": "mysql", "schema": schema, "schema_report": schema_report, "sessions": list(sessions), "workloads": list(workloads), "transaction_units": context.decision["rollout"]["transactions"]}, "operations": {"raw": raw_results, "derived": derived_result, "zscores": zscore_result}, "commands": _commands(context, schema, checkpoint_directory, sessions), "handoff": {"next": "Stage 11b", "production_ready": False, "checkpoint_after_commit": True, "original_receipt_time": "unknown_and_null", "chronological_rebuild": True}}
+	report = {"schema_version": STAGE11_SCHEMA_VERSION, "stage": "11a", "status": "complete", "production_access": {"ddl": False, "dml": False, "database": "mysql_disposable"}, "prerequisites": {"decision_sha256": context.decision_sha256, "manifest_sha256": context.manifest_sha256, "audit_sha256": context.audit_sha256, "manifest_id": context.manifest_id, "cutoff": _iso(context.cutoff)}, "selected_backends": {"raw": "python", "derived": "java", "zscores": "java"}, "execution": {"storage": "mysql", "schema": schema, "schema_report": schema_report, "sessions": list(sessions), "workloads": list(workloads), "transaction_units": context.decision["rollout"]["transactions"], "phase_wall_seconds": {"raw_adoption": raw_finished - raw_started, "derived_handoff_and_java": derived_finished - derived_started, "zscore_handoff_and_java": zscore_finished - zscore_started, "total_after_schema_setup": zscore_finished - raw_started, "total_including_schema_setup": zscore_finished - pipeline_started}}, "operations": {"raw": raw_results, "derived": derived_result, "zscores": zscore_result}, "commands": _commands(context, schema, checkpoint_directory, sessions), "handoff": {"next": "Stage 11b", "production_ready": False, "checkpoint_after_commit": True, "original_receipt_time": "unknown_and_null", "chronological_rebuild": True}}
 	output.write_text(json.dumps(report, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8")
 	return report
