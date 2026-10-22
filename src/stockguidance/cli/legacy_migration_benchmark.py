@@ -29,6 +29,7 @@ def parser() -> argparse.ArgumentParser:
 	mode.add_argument("--run-stage9-raw", action="store_true")
 	mode.add_argument("--run-stage9-derived", action="store_true")
 	mode.add_argument("--run-stage9-zscores", action="store_true")
+	mode.add_argument("--run-stage10", action="store_true")
 	arguments.add_argument("--data-root", type=_path, default=Path("data"))
 	arguments.add_argument("--dbinfo-file", type=_path, default=Path("dbinfo.id"))
 	arguments.add_argument("--evaluation-plan", type=_path, default=Path("output/legacy-migration/evaluation-plan.json"))
@@ -54,6 +55,11 @@ def parser() -> argparse.ArgumentParser:
 	arguments.add_argument("--stage9-audit-series-limit", type=int)
 	arguments.add_argument("--stage9a-report", type=_path, default=Path("output/legacy-migration/benchmark/candidates/stage9a-20261021/stage9a-raw.json"))
 	arguments.add_argument("--stage9b-report", type=_path, default=Path("output/legacy-migration/benchmark/candidates/stage9b-20261021-rerun/stage9b-derived.json"))
+	arguments.add_argument("--stage10-study-report", type=_path, default=Path("output/legacy-migration/benchmark/candidates/stage9c-compact-20261022-ready/study.json"))
+	arguments.add_argument("--stage10-diagnostic", type=_path, default=Path("output/legacy-migration/benchmark/candidates/stage9c-independent-diagnostic-20261022-ready/diagnostic.json"))
+	arguments.add_argument("--stage10-provisional-decision", type=_path, default=Path("output/legacy-migration/decision.json"))
+	arguments.add_argument("--stage10-audit-report", type=_path, default=Path("output/legacy-migration/audit.json"))
+	arguments.add_argument("--stage10-output", type=_path, default=Path("output/legacy-migration/decision.json"))
 	return arguments
 
 
@@ -101,6 +107,17 @@ def main(argv: Sequence[str] | None = None) -> int:
 		successful = zscore_report["status"] == "complete" or zscore_report.get("execution", {}).get("status") == "paused"
 		print(json.dumps({"successful": successful, "comparison_complete": zscore_report["status"] == "complete", "execution": zscore_report.get("execution"), "zscore_report": str((_resolve(arguments.output) / "stage9c-zscores.json").resolve()), "study": str((_resolve(arguments.output) / "study.json").resolve()), "status": study["status"]}))
 		return 0 if successful else 1
+	if arguments.run_stage10:
+		from stockguidance.performance.stage10_selection import Stage10Error, build_stage10_decision, write_stage10_decision
+
+		try:
+			decision = build_stage10_decision(_resolve(arguments.stage10_study_report), _resolve(arguments.manifest), _resolve(arguments.stage10_provisional_decision), _resolve(arguments.stage10_audit_report), _resolve(arguments.stage10_diagnostic), _resolve(arguments.stage10_output))
+			write_stage10_decision(decision, _resolve(arguments.stage10_output))
+		except (OSError, Stage10Error) as error:
+			print(json.dumps({"successful": False, "error": "Stage 10 selection failed", "detail": str(error)}))
+			return 1
+		print(json.dumps({"successful": True, "decision": str(_resolve(arguments.stage10_output)), "status": decision["status"], "production_ready": decision["production_ready"]}))
+		return 0
 	if arguments.run_java_writer_trial:
 		from stockguidance.performance.java_writer_trial import run_trial
 

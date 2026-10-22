@@ -1568,3 +1568,64 @@ comparison. See `docs/stage9c_execution.md` for phase-specific commands.
 - No production backend was selected and Stage 10 was not run. The future Stage
   10 prompt should review the compact-sample limitation and warm variability,
   then apply the documented selection rule. No commit was created.
+
+### Stage 10 backend selection and rollout freeze — 2026-10-22
+
+- Prerequisites passed. The aggregate Stage 9 study is complete with all nine
+  backend/workload cells measured, parity audits passed, raw/derived MySQL
+  recovery evidence passed, and the independent three-backend z-score recovery
+  diagnostic passed. The diagnostic remains recovery evidence only and is not
+  ranking evidence. No candidate report recorded production DDL or DML.
+- The selection rule used the best valid startup-inclusive warm median for each
+  backend and required an alternative to be at least 10% faster than Python.
+  Raw adoption/repair selects Python `python-p3` at 11.310634 seconds: Java's
+  best overall improvement is 8.37%, below threshold, although same-preparer
+  Java p1 is 13.54% faster and p3 is 6.02% faster. Derived computation plus
+  persistence selects Java `java-p1` at 41.139056 seconds, 11.87% faster than
+  Python `python-p1`; z-score persistence selects Java `java-p1` at
+  287.868001 seconds, 28.52% faster than Python. SQL qualifies for none.
+- The compact z-score profile is a sampled comparison over five fixed and three
+  chronological target dates, not a full-history runtime claim. Mixed
+  Python/Java activation is therefore frozen behind Stage 11 measurement of
+  transfer, staging and orchestration cost; Stage 10 does not infer that cost.
+  Production readiness remains false until Stage 11 integration/recovery and
+  Stage 12 restore/schema/pilot gates pass.
+- Rechecked scope is 36,866 ticker IDs and 5,130 retained sessions, with 4,898
+  valid archive sessions, 42,482,212 valid archive records and 44,199,460
+  physical database rows. Four dense z-score tables can contain 756,490,320
+  rows before metadata, indexes, table-copy space, staging, backups and recovery
+  headroom. Stage 12 must measure those bytes before full z-score population;
+  Stage 10 records the local and benchmark-server free-space observations but
+  does not claim a disk-size estimate from row counts.
+- Limits are one writer, at most three preparers, at most three queued
+  sessions, one session per raw/derived transaction, one series/session per
+  z-score transaction, a chronological 20-session z-score chunk, 512 MiB per
+  preparer, Java `-Xmx512m` and one native-library thread. Use one preparer and
+  one queued session as the reduced-memory mode.
+- `output/legacy-migration/decision.json` is the version-2 frozen decision.
+  Its SHA-256 is `ed029ec095ba4c00accd4d9e41e94e631acc4379cab9701ab137f319a76b59ea`;
+  it retains provisional identity
+  `517bf3d872e7149254493ae3177467653e4f7accf4c3daf798939119f035e0bd`.
+  Inputs are the compact study SHA-256
+  `d81fcec46ba161094204173f682bc4ae769f31d786fc92aa20cd7b654c5e1c15` and
+  unchanged manifest SHA-256
+  `11bbcf4b57469c1256ab9caa474824a538ccbfb8bd3155de6515965e2d4fcf26`.
+- The reproducible selector is
+  `PYTHONPATH=src <configured-python> -m stockguidance.cli.legacy_migration_benchmark --run-stage10`
+  with `--manifest output/legacy-migration/benchmark/candidates/manifest.json`,
+  `--stage10-study-report output/legacy-migration/benchmark/candidates/stage9c-compact-20261022-ready/study.json`,
+  `--stage10-audit-report output/legacy-migration/audit.json`, and the
+  independent diagnostic path recorded in the decision. It is read-only apart
+  from the decision artifact.
+- Stage 11 must wire Python raw adoption/repair, Java
+  `JavaDerivedBenchmarkMain`/`JavaWriterCandidate`, and Java
+  `JavaZScoreBenchmarkMain`/`JavaZScoreCandidate` in disposable storage, then
+  measure handoffs and complete recovery. Stage 12 must restore-test the backup,
+  preview/apply the precision and ticker-collation migration, and pass the
+  bounded pilot. Stage 13 uses chronological raw/derived chunks and the limits
+  above; Stage 14 publishes both z-score families at windows 20 and 60 with
+  explicit NULL/status outcomes; Stage 15 performs the independent full-scope
+  audit and operating handoff. No production work is authorized by this stage.
+- Focused validation passed: `tests/stage10/test_legacy_migration_selection.py`
+  passed 3 tests and the Stage 10 CLI help exposed the new bounded selector.
+  No commit was created. Next prompt: execute Stage 11a only.
