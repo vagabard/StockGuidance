@@ -1629,3 +1629,40 @@ comparison. See `docs/stage9c_execution.md` for phase-specific commands.
 - Focused validation passed: `tests/stage10/test_legacy_migration_selection.py`
   passed 3 tests and the Stage 10 CLI help exposed the new bounded selector.
   No commit was created. Next prompt: execute Stage 11a only.
+
+### Stage 11a selected-backend integration — 2026-10-22
+
+- Stage 10 and Stage 5 prerequisites passed. The integration revalidated the
+  frozen decision, manifest and complete Stage 5c audit before every operation:
+  decision SHA-256 `ed029ec095ba4c00accd4d9e41e94e631acc4379cab9701ab137f319a76b59ea`,
+  manifest SHA-256 `11bbcf4b57469c1256ab9caa474824a538ccbfb8bd3155de6515965e2d4fcf26`,
+  audit SHA-256 `04708b2a2ba212c9d3a42915dc7defee7b023b9622ff197fe023323b4d17d60a`.
+  The cutoff was `2026-10-21T23:59:00-06:00`; source evidence stayed bound to
+  exact file and canonical-record identities.
+- Added `stockguidance.performance.stage11_integration` and the bounded
+  `--run-stage11a` frontend. Raw adoption uses Python, derived persistence
+  invokes `JavaDerivedBenchmarkMain`, and z-score persistence invokes
+  `JavaZScoreBenchmarkMain`; SQL was not selected, so no SQL routine DDL was
+  previewed or installed. Disposable targets reject production paths and all
+  reports retain `production_access.ddl=false` and `dml=false`.
+- The real bounded SQLite operation used `2026-04-29` and adopted 12,126
+  records. Matching adoption verifies content without rewriting raw rows while
+  inserting `adopted_archive_snapshot` evidence with null unknown original
+  receipt time. The disposable MySQL operation used schema
+  `stockguidance_disposable_11a3_20261022`, staged `2026-04-28` through
+  `2026-04-30` through the Python raw path, and persisted 12,126 derived rows
+  through Java with one preparer and one session transaction. Its report hash is
+  `1a522276b72f0f3b706f958da79e25985b6321037809f675b2bd7c73205a44f2`.
+- Offline fixture tests exercised exact-case `AAP`/`AAp`, fractional values,
+  matching idempotency, before-commit rollback, raw repair invalidation,
+  chronological derived rebuild, and all four dense z-score family/window
+  publications. The real z-score Java population was not run in this bounded
+  operation; its explicit command, decision/evidence/cutoff paths and
+  checkpoint directory are recorded in the integration report for Stage 11b.
+- Focused validation passed: `tests/stage10/test_legacy_migration_selection.py`
+  and `tests/stage11/test_stage11_integration.py` passed 6 tests. Reports are
+  `output/legacy-migration/benchmark/candidates/stage11a-real-raw.json` (SHA-256
+  `e50df68aca85e92c6b6fd112d58804d5663449374192aa3d6fbd22eaf1e967ab`) and
+  `output/legacy-migration/benchmark/candidates/stage11a-mysql-raw-derived.json`.
+  No production schema, data, source binding or original archive was changed;
+  no commit was created. Next prompt: execute Stage 11b only.

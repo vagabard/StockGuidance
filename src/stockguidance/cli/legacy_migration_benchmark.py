@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime
 import json
 from pathlib import Path
 from typing import Sequence
@@ -30,6 +31,7 @@ def parser() -> argparse.ArgumentParser:
 	mode.add_argument("--run-stage9-derived", action="store_true")
 	mode.add_argument("--run-stage9-zscores", action="store_true")
 	mode.add_argument("--run-stage10", action="store_true")
+	mode.add_argument("--run-stage11a", action="store_true")
 	arguments.add_argument("--data-root", type=_path, default=Path("data"))
 	arguments.add_argument("--dbinfo-file", type=_path, default=Path("dbinfo.id"))
 	arguments.add_argument("--evaluation-plan", type=_path, default=Path("output/legacy-migration/evaluation-plan.json"))
@@ -60,6 +62,16 @@ def parser() -> argparse.ArgumentParser:
 	arguments.add_argument("--stage10-provisional-decision", type=_path, default=Path("output/legacy-migration/decision.json"))
 	arguments.add_argument("--stage10-audit-report", type=_path, default=Path("output/legacy-migration/audit.json"))
 	arguments.add_argument("--stage10-output", type=_path, default=Path("output/legacy-migration/decision.json"))
+	arguments.add_argument("--stage11-decision", type=_path, default=Path("output/legacy-migration/decision.json"))
+	arguments.add_argument("--stage11-evidence-path", type=_path, default=Path("output/legacy-migration/evidence"))
+	arguments.add_argument("--stage11-cutoff")
+	arguments.add_argument("--stage11-storage", choices=("sqlite", "mysql"), default="sqlite")
+	arguments.add_argument("--stage11-target", type=_path, default=Path("output/legacy-migration/benchmark/candidates/stage11a-disposable.sqlite"))
+	arguments.add_argument("--stage11-sessions", required=False)
+	arguments.add_argument("--stage11-workloads", default="raw,derived,zscores")
+	arguments.add_argument("--stage11-output", type=_path, default=Path("output/legacy-migration/benchmark/candidates/stage11a-integration.json"))
+	arguments.add_argument("--stage11-checkpoint-directory", type=_path)
+	arguments.add_argument("--stage11-disposable-schema")
 	return arguments
 
 
@@ -118,6 +130,28 @@ def main(argv: Sequence[str] | None = None) -> int:
 			return 1
 		print(json.dumps({"successful": True, "decision": str(_resolve(arguments.stage10_output)), "status": decision["status"], "production_ready": decision["production_ready"]}))
 		return 0
+	if arguments.run_stage11a:
+		from stockguidance.performance.stage11_integration import Stage11Error, run_mysql, run_offline, validate_prerequisites
+
+		if not arguments.stage11_cutoff or not arguments.stage11_sessions:
+			parser().error("--run-stage11a requires --stage11-cutoff and --stage11-sessions")
+		try:
+			cutoff = datetime.fromisoformat(arguments.stage11_cutoff)
+			workloads = tuple(item for item in (value.strip() for value in arguments.stage11_workloads.split(",")) if item)
+			sessions = tuple(item for item in (value.strip() for value in arguments.stage11_sessions.split(",")) if item)
+			context = validate_prerequisites(_resolve(arguments.stage11_decision), _resolve(arguments.manifest), _resolve(arguments.audit_report), _resolve(arguments.stage11_evidence_path), cutoff)
+			if arguments.stage11_storage == "mysql":
+				if not arguments.stage11_disposable_schema:
+					parser().error("--run-stage11a --stage11-storage mysql requires --stage11-disposable-schema")
+				checkpoint_directory = _resolve(arguments.stage11_checkpoint_directory or _resolve(arguments.stage11_output).parent)
+				report = run_mysql(context, _resolve(arguments.dbinfo_file), arguments.stage11_disposable_schema, sessions, workloads, _resolve(arguments.stage11_output), checkpoint_directory)
+			else:
+				report = run_offline(context, _resolve(arguments.stage11_target), sessions, workloads, _resolve(arguments.stage11_output))
+		except (OSError, Stage11Error, ValueError) as error:
+			print(json.dumps({"successful": False, "error": "Stage 11a integration failed", "detail": str(error)}))
+			return 1
+		print(json.dumps({"successful": report["status"] == "complete", "operation": "run_stage11a", "report": str(_resolve(arguments.stage11_output)), "status": report["status"], "production_access": report["production_access"]}))
+		return 0 if report["status"] == "complete" else 1
 	if arguments.run_java_writer_trial:
 		from stockguidance.performance.java_writer_trial import run_trial
 
