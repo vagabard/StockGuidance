@@ -191,6 +191,10 @@ public final class JavaZScoreCandidate {
             if (index + 1 < window) highest = higher(highest, Issue.INSUFFICIENT_HISTORY);
             if (highest != Issue.NONE) return new ScoreRow(tickerId, null, status(highest));
             if (values.size() != window) throw new IllegalStateException("Ready z-score window has the wrong size");
+            double firstValue = values.getFirst().value;
+            if (values.stream().allMatch(value -> value.value == firstValue)) {
+                return new ScoreRow(tickerId, null, Status.ZERO_VARIANCE);
+            }
             double mean = compensatedMean(values);
             double variance = compensatedVariance(values, mean) / window;
             if (!Double.isFinite(variance) || variance < 0) throw new IllegalStateException("Invalid z-score variance");

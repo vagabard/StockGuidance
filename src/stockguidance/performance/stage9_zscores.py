@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from hashlib import sha256
+import math
 import os
 from pathlib import Path
 import subprocess
@@ -66,6 +67,119 @@ def _verify_archive_files(manifest: dict[str, Any], sessions: tuple[str, ...]) -
 
 def _target_for(dbinfo_file: Path, schema: str, manifest: dict[str, Any]) -> SQLZScoreTarget:
 	return SQLZScoreTarget(dbinfo_file, schema, manifest)
+
+
+def _array_oracle(delegate: SQLZScoreCandidate, cursor, family: str, window: int, *, snapshot: tuple[dict, dict, dict], date_ids: dict[str, int], ticker_ids: tuple[int, ...], phases: dict[str, float]) -> dict[int, tuple[float | None, int]]:
+	import numpy as np
+
+	from stockguidance.zscores.calculation import _dependency_issue
+	from stockguidance.zscores.results import ZScoreStatus
+	from stockguidance.zscores.specification import ZScoreFamily
+	from stockguidance.zscores.vectorized import _compensated_sum
+
+	started = perf_counter()
+	raw, delta, receipts = snapshot
+	sessions = delegate._sessions()
+	if len(sessions) != len(date_ids) or any(current.sequence != previous.sequence + 1 for previous, current in zip(sessions, sessions[1:])):
+		return delegate._oracle(cursor, family, window, snapshot=snapshot, date_ids=date_ids, ticker_ids=ticker_ids, vectorized=True, phases=phases)
+	values = np.zeros((len(sessions), len(ticker_ids)), dtype=np.float64)
+	close_issues = np.zeros(values.shape, dtype=np.uint8)
+	expected_ids = {session: delegate._expected_raw_id(session) for session in date_ids}
+	verified = {session: expected_ids[session] is not None and session in receipts and receipts[session][0] == expected_ids[session] and bool(receipts[session][1]) for session in date_ids}
+	for session_index, session in enumerate(sessions):
+		date_id = date_ids[session.session_date.isoformat()]
+		for ticker_index, ticker_id in enumerate(ticker_ids):
+			value = raw.get((ticker_id, date_id))
+			if not verified[session.session_date.isoformat()]:
+				close_issues[session_index, ticker_index] = int(ZScoreStatus.UNVERIFIED_INPUT)
+				continue
+			if value is None:
+				close_issues[session_index, ticker_index] = int(ZScoreStatus.MISSING_INPUT)
+				continue
+			try:
+				numeric = float(value)
+			except (OverflowError, TypeError, ValueError):
+				close_issues[session_index, ticker_index] = int(ZScoreStatus.INVALID_INPUT)
+				continue
+			if not math.isfinite(numeric) or numeric <= 0.0:
+				close_issues[session_index, ticker_index] = int(ZScoreStatus.INVALID_INPUT)
+				continue
+			values[session_index, ticker_index] = numeric
+	phases["preparation"] = phases.get("preparation", 0.0) + perf_counter() - started
+	if family == "price_delta":
+		close_values = values.copy()
+		values[0, :] = 0.0
+		issues = np.ones(values.shape, dtype=np.uint8)
+		issues[0, :] = int(ZScoreStatus.INSUFFICIENT_HISTORY)
+		for session_index in range(1, len(sessions)):
+			current_session = sessions[session_index].session_date.isoformat()
+			current_date_id = date_ids[current_session]
+			previous_date_id = date_ids[sessions[session_index - 1].session_date.isoformat()]
+			combined = np.maximum(close_issues[session_index], close_issues[session_index - 1])
+			issues[session_index] = combined
+			for ticker_index, ticker_id in enumerate(ticker_ids):
+				if combined[ticker_index] != 0:
+					continue
+				current_value = close_values[session_index, ticker_index]
+				previous_value = close_values[session_index - 1, ticker_index]
+				if previous_value == 0.0:
+					issues[session_index, ticker_index] = int(ZScoreStatus.INVALID_INPUT)
+					continue
+				ratio = delta.get((ticker_id, current_date_id))
+				if ratio is None:
+					issues[session_index, ticker_index] = int(ZScoreStatus.MISSING_INPUT)
+					continue
+				try:
+					ratio_value = float(ratio)
+				except (OverflowError, TypeError, ValueError):
+					issues[session_index, ticker_index] = int(ZScoreStatus.INVALID_INPUT)
+					continue
+				expected_ratio = current_value / previous_value
+				if not math.isfinite(ratio_value) or ratio_value <= 0.0 or abs(ratio_value - expected_ratio) > max(1e-12, 1e-10 * abs(expected_ratio)):
+					issues[session_index, ticker_index] = int(ZScoreStatus.INVALID_INPUT)
+					continue
+				values[session_index, ticker_index] = ratio_value - 1.0
+	else:
+		issues = close_issues
+	started = perf_counter()
+	end = len(sessions)
+	start = end - window
+	selected = values[max(0, start):end]
+	status = issues[max(0, start):end].max(axis=0)
+	if start < 0:
+		status = np.maximum(status, int(ZScoreStatus.INSUFFICIENT_HISTORY))
+	sequence_start = sessions[-1].sequence - window + 1
+	dependency_issue = _dependency_issue(
+		ZScoreFamily.PRICE if family == "price" else ZScoreFamily.PRICE_DELTA,
+		sequence_start,
+		sessions[-1].sequence,
+		frozenset(session.sequence for session in sessions),
+		min(session.sequence for session in sessions),
+	)
+	if dependency_issue is not None:
+		status = np.maximum(status, int(dependency_issue))
+	with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+		mean = _compensated_sum(selected) / window
+		centered = selected - mean
+		variance = _compensated_sum(centered * centered) / window
+		scores = (selected[-1] - mean) / np.sqrt(variance)
+		quantized = scores.astype(np.float32)
+	phases["calculation"] = phases.get("calculation", 0.0) + perf_counter() - started
+	result = {}
+	for ticker_index, ticker_id in enumerate(ticker_ids):
+		current_status = ZScoreStatus(int(status[ticker_index]))
+		if current_status is not ZScoreStatus.READY:
+			result[ticker_id] = (None, int(current_status))
+			continue
+		if np.all(selected[:, ticker_index] == selected[0, ticker_index]):
+			result[ticker_id] = (None, int(ZScoreStatus.ZERO_VARIANCE))
+			continue
+		current_variance = float(variance[ticker_index])
+		scale = float(np.max(np.abs(selected[:, ticker_index])))
+		if not math.isfinite(current_variance) or math.sqrt(current_variance) <= 1e6 * math.ulp(scale) or not np.isfinite(quantized[ticker_index]):
+			return delegate._oracle(cursor, family, window, snapshot=snapshot, date_ids=date_ids, ticker_ids=ticker_ids, vectorized=True, phases=phases)
+		result[ticker_id] = (float(quantized[ticker_index]), int(ZScoreStatus.READY))
+	return result
 
 
 def _clear_target(target: SQLZScoreTarget, manifest: dict[str, Any]) -> None:
@@ -166,10 +280,13 @@ WHERE current_row.`close` IS NOT NULL AND prior_row.`close` IS NOT NULL AND prio
 	finally:
 		connection.close()
 	fingerprint = _input_fingerprint(target, manifest)
+	guard = _input_guard(target, manifest)
 	connection = target.connect()
 	try:
 		cursor = connection.cursor()
 		cursor.execute("INSERT INTO stage6_disposable_metadata (`key`, value) VALUES (%s, %s) ON DUPLICATE KEY UPDATE value = VALUES(value)", ("stage9c_seed", json.dumps({"manifest_id": manifest["manifest_id"], "fingerprint": fingerprint}, sort_keys=True)))
+		cursor.execute("UPDATE stage6_disposable_metadata SET value = %s WHERE `key` = %s", (json.dumps({"manifest_id": manifest["manifest_id"], "fingerprint": fingerprint, "guard": guard}, sort_keys=True), "stage9c_seed"))
+		connection.commit()
 		cursor.close()
 	finally:
 		connection.close()
@@ -199,7 +316,30 @@ def _input_fingerprint(target: SQLZScoreTarget, manifest: dict[str, Any]) -> str
 	return digest.hexdigest()
 
 
-def _has_seeded_inputs(target: SQLZScoreTarget, manifest: dict[str, Any]) -> bool:
+def _input_guard(target: SQLZScoreTarget, manifest: dict[str, Any]) -> str:
+	names = _manifest_table_names(manifest)
+	tables = (names.tickers, names.sessions, names.prices, names.deltas, names.imports)
+	connection = target.connect()
+	try:
+		target.validate(connection)
+		cursor = connection.cursor()
+		try:
+			identifiers = ", ".join(quote_identifier(table) for table in tables)
+			cursor.execute(f"CHECKSUM TABLE {identifiers} EXTENDED")
+			rows = cursor.fetchall()
+			if len(rows) != len(tables) or any(row[1] is None for row in rows):
+				raise ValueError("MySQL did not provide extended checksums for all Stage 9c input tables")
+			digest = sha256()
+			for table, row in zip(tables, rows):
+				digest.update(bytes.fromhex(content_id([table, str(row[1])])))
+			return digest.hexdigest()
+		finally:
+			cursor.close()
+	finally:
+		connection.close()
+
+
+def _seed_identity(target: SQLZScoreTarget) -> dict[str, Any]:
 	connection = target.connect()
 	try:
 		target.validate(connection)
@@ -209,12 +349,21 @@ def _has_seeded_inputs(target: SQLZScoreTarget, manifest: dict[str, Any]) -> boo
 			row = cursor.fetchone()
 			if row is None:
 				raise ValueError("Disposable schema lacks a verified Stage 9c seed; use a fresh schema")
-			identity = json.loads(row[0])
+			return json.loads(row[0])
 		finally:
 			cursor.close()
 	finally:
 		connection.close()
-	if identity.get("manifest_id") != manifest["manifest_id"] or identity.get("fingerprint") != _input_fingerprint(target, manifest):
+
+
+def _has_seeded_inputs(target: SQLZScoreTarget, manifest: dict[str, Any]) -> bool:
+	identity = _seed_identity(target)
+	if identity.get("manifest_id") != manifest["manifest_id"]:
+		raise ValueError("Disposable Stage 9c seeded inputs changed")
+	if identity.get("guard") is not None:
+		if identity["guard"] != _input_guard(target, manifest):
+			raise ValueError("Disposable Stage 9c seeded inputs changed")
+	elif identity.get("fingerprint") != _input_fingerprint(target, manifest):
 		raise ValueError("Disposable Stage 9c seeded inputs changed")
 	return True
 
@@ -250,7 +399,7 @@ class PythonZScoreCandidate:
 				snapshot = self.delegate._load_input_snapshot(cursor, family, date_ids, batch)
 				phases["input_loading"] += perf_counter() - phase_started
 				phase_started = perf_counter()
-				expected.update(self.delegate._oracle(cursor, family, window, snapshot=snapshot, date_ids=date_ids, ticker_ids=batch, vectorized=True, phases=phases))
+				expected.update(_array_oracle(self.delegate, cursor, family, window, snapshot=snapshot, date_ids=date_ids, ticker_ids=batch, phases=phases))
 				phase_started = perf_counter()
 				dependency_digest, availability_digest, available = self.delegate._input_digests(cursor, family, date_ids, batch, snapshot=snapshot, digests=digests)
 				actual_input_available = actual_input_available and available
@@ -501,11 +650,17 @@ def _run_child(arguments: dict[str, str], timeout_seconds: float, output_directo
 	monitor.start()
 	timed_out = False
 	try:
-		stdout, stderr = process.communicate(timeout=timeout_seconds)
-	except subprocess.TimeoutExpired:
-		timed_out = True
+		try:
+			stdout, stderr = process.communicate(timeout=timeout_seconds)
+		except subprocess.TimeoutExpired:
+			timed_out = True
+			process.kill()
+			stdout, stderr = process.communicate()
+	except BaseException:
 		process.kill()
-		stdout, stderr = process.communicate()
+		process.communicate()
+		monitor.stop()
+		raise
 	resources = monitor.stop()
 	wall_seconds = perf_counter() - started
 	log_path = output_directory / "logs" / f"{backend}-{arguments['block']}-{arguments['repetition']}.stderr.log"
@@ -566,7 +721,7 @@ def _audit_series(target: SQLZScoreTarget, manifest: dict[str, Any], session: st
 				if cache_path is not None:
 					cache_directory.mkdir(parents=True, exist_ok=True)
 					cached_rows = [[identifier, score, status] for identifier, (score, status) in sorted(expected.items())]
-					cache_path.write_text(json.dumps({"key": cache_key, "rows": cached_rows, "digest": content_id(cached_rows)}, sort_keys=True) + "\n", encoding="utf-8")
+					_atomic_json(cache_path, {"key": cache_key, "rows": cached_rows, "digest": content_id(cached_rows)})
 			resolved = candidate.names.resolve_zscore_tables((window,))[window]
 			table = resolved.price if family == "price" else resolved.price_delta
 			cursor.execute(f"SELECT ticker_id, 0e0 + zscore, status FROM {quote_identifier(table)} WHERE date_id = %s ORDER BY ticker_id", (date_ids[session],))
@@ -607,6 +762,7 @@ def _file_hashes(repository: Path) -> dict[str, str]:
 		"src/stockguidance/zscores/specification.py", "src/stockguidance/calendar/exchange.py",
 		"src/stockguidance/legacy_migration/precision.py", "src/stockguidance/performance/candidates.py",
 		"src/stockguidance/performance/stage9_zscore_diagnostic.py",
+		"src/stockguidance/cli/legacy_migration_benchmark.py",
 		"java/src/main/java/stockguidance/migration/JavaWriterCandidate.java",
 		"java/src/main/java/stockguidance/migration/ArchiveCandidateReader.java",
 	))
@@ -621,21 +777,86 @@ def _median(values: list[float]) -> float | None:
 	return ordered[len(ordered) // 2]
 
 
-def run_stage9_zscores(manifest_path: Path, dbinfo_file: Path, output: Path, *, timeout_seconds: float = 3600.0, disposable_schema: str | None = None) -> dict[str, Any]:
+def _selected_sessions(manifest: dict[str, Any], profile: str) -> dict[str, tuple[str, ...]]:
+	blocks = {block: _target_sessions(manifest, block) for block in BLOCKS}
+	if profile == "full":
+		return blocks
+	if profile != "compact":
+		raise ValueError("Unknown Stage 9c profile")
+	fixed = blocks["fixed_25"]
+	indices = {round(index * (len(fixed) - 1) / 4) for index in range(5)}
+	if "2018-08-29" in fixed and fixed.index("2018-08-29") not in indices:
+		indices.discard(round((len(fixed) - 1) / 2))
+		indices.add(fixed.index("2018-08-29"))
+	return {"fixed_25": tuple(fixed[index] for index in sorted(indices)), "chronological_20": blocks["chronological_20"][-3:]}
+
+
+def _atomic_json(path: Path, value: Any) -> None:
+	path.parent.mkdir(parents=True, exist_ok=True)
+	temporary = path.with_suffix(path.suffix + ".tmp")
+	temporary.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+	temporary.replace(path)
+
+
+def _output_guard(target: SQLZScoreTarget, manifest: dict[str, Any]) -> str:
+	names = _manifest_table_names(manifest)
+	tables = [names.zscore_sessions, names.zscore_series]
+	for resolved in names.resolve_zscore_tables(SUPPORTED_WINDOWS).values():
+		tables.extend((resolved.price, resolved.price_delta))
+	connection = target.connect()
+	try:
+		cursor = connection.cursor()
+		try:
+			cursor.execute("CHECKSUM TABLE " + ", ".join(quote_identifier(table) for table in tables) + " EXTENDED")
+			rows = cursor.fetchall()
+			if len(rows) != len(tables) or any(row[1] is None for row in rows):
+				raise ValueError("Stage 9c output checksums unavailable")
+			return content_id(rows)
+		finally:
+			cursor.close()
+	finally:
+		connection.close()
+
+
+def _resume_report(previous: dict[str, Any], current: dict[str, Any]) -> dict[str, Any]:
+	for key in ("manifest", "source_code_hashes", "protocol", "input_fingerprint", "input_guard"):
+		if previous.get(key) != current.get(key):
+			raise ValueError(f"Stage 9c resume identity changed: {key}; use a fresh output")
+	for key, configuration in current["configurations"].items():
+		old = previous["configurations"][key]
+		if old["schema"] != configuration["schema"] or old["target_setup"] != configuration["target_setup"]:
+			raise ValueError("Stage 9c resume target changed")
+	return previous
+
+
+def _trial_passed(trial: dict[str, Any]) -> bool:
+	return trial.get("status") == "complete" and trial.get("correctness", {}).get("status") == "passed"
+
+
+def run_stage9_zscores(manifest_path: Path, dbinfo_file: Path, output: Path, *, timeout_seconds: float = 3600.0, disposable_schema: str | None = None, profile: str = "full", resume: bool = False, max_trials: int | None = None, phase: str = "all", audit_series_limit: int | None = None, retry_failed: bool = False) -> dict[str, Any]:
+	if max_trials is not None and max_trials < 1 or audit_series_limit is not None and audit_series_limit < 1:
+		raise ValueError("Stage 9c work limits must be positive")
+	if phase not in ("all", "measure", "audit"):
+		raise ValueError("Unknown Stage 9c phase")
 	connections = []
 	try:
-		return _run_stage9_zscores(manifest_path, dbinfo_file, output, timeout_seconds=timeout_seconds, disposable_schema=disposable_schema, keepalive_connections=connections)
+		return _run_stage9_zscores(manifest_path, dbinfo_file, output, timeout_seconds=timeout_seconds, disposable_schema=disposable_schema, keepalive_connections=connections, profile=profile, resume=resume, max_trials=max_trials, phase=phase, audit_series_limit=audit_series_limit, retry_failed=retry_failed)
 	finally:
 		for connection in connections:
 			connection.close()
 
 
-def _run_stage9_zscores(manifest_path: Path, dbinfo_file: Path, output: Path, *, timeout_seconds: float, disposable_schema: str | None, keepalive_connections: list) -> dict[str, Any]:
+def _run_stage9_zscores(manifest_path: Path, dbinfo_file: Path, output: Path, *, timeout_seconds: float, disposable_schema: str | None, keepalive_connections: list, profile: str, resume: bool, max_trials: int | None, phase: str, audit_series_limit: int | None, retry_failed: bool) -> dict[str, Any]:
 	manifest = load_manifest(manifest_path)
 	repository = Path(__file__).resolve().parents[3]
 	output = output.resolve()
-	if output.exists() and any(output.iterdir()):
+	previous = None
+	if resume:
+		previous = json.loads((output / "stage9c-zscores.json").read_text(encoding="utf-8"))
+		disposable_schema = previous["configurations"]["python-p1"]["schema"]
+	elif output.exists() and any(output.iterdir()):
 		raise ValueError("Stage 9c requires a fresh output directory; preserve earlier evidence")
+	selected = _selected_sessions(manifest, profile)
 	zscore_directory = output / "zscores"
 	zscore_directory.mkdir(parents=True, exist_ok=True)
 	report: dict[str, Any] = {
@@ -655,7 +876,9 @@ def _run_stage9_zscores(manifest_path: Path, dbinfo_file: Path, output: Path, *,
 	}
 
 	def save() -> None:
-		(output / "stage9c-zscores.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+		_atomic_json(output / "stage9c-zscores.json", report)
+
+	report["protocol"].update(profile=profile, selected_sessions={key: list(value) for key, value in selected.items()}, selection_rule="all targets" if profile == "full" else "five fixed quantiles with known constant-window regression replacing midpoint; last three chronological targets", extrapolation="measured dates only; no full-history runtime claim")
 
 	targets: dict[str, SQLZScoreTarget] = {}
 	shared_schema = disposable_schema or f"stockguidance_disposable_s9c_shared_{uuid4().hex[:8]}"
@@ -663,6 +886,13 @@ def _run_stage9_zscores(manifest_path: Path, dbinfo_file: Path, output: Path, *,
 	shared_target_setup = shared_target.prepare()
 	keepalive_connection = shared_target.connect()
 	keepalive_connections.append(keepalive_connection)
+	lock_cursor = keepalive_connection.cursor()
+	try:
+		lock_cursor.execute("SELECT GET_LOCK(%s, 0)", ("sg_s9c_" + content_id(shared_schema)[:48],))
+		if lock_cursor.fetchone() != (1,):
+			raise ValueError("Another Stage 9c orchestrator owns this disposable schema")
+	finally:
+		lock_cursor.close()
 	for backend in BACKENDS:
 		configuration_key = f"{backend}-p1"
 		target = shared_target
@@ -671,70 +901,145 @@ def _run_stage9_zscores(manifest_path: Path, dbinfo_file: Path, output: Path, *,
 		report["configurations"][configuration_key] = configuration
 		targets[configuration_key] = target
 		for block in BLOCKS:
-			sessions = _target_sessions(manifest, block)
+			sessions = selected[block]
 			configuration["blocks"][block] = {"status": "incomplete", "sessions": list(sessions), "repetitions": [], "correctness": []}
-		save()
-	seed_sessions = tuple(sorted(set(session for block in BLOCKS for session in _target_sessions(manifest, block))))
-	seed_info = {"reused": True, "seconds": 0.0} if disposable_schema and _has_seeded_inputs(shared_target, manifest) else _seed_inputs(shared_target, manifest, seed_sessions, zscore_directory / "setup")
-	input_fingerprint = _input_fingerprint(shared_target, manifest)
+		if previous is None:
+			save()
+	seed_sessions = tuple(sorted(set(session for block in BLOCKS for session in selected[block])))
+	if disposable_schema:
+		_has_seeded_inputs(shared_target, manifest)
+		seed_identity = _seed_identity(shared_target)
+		seed_info = {"reused": True, "seconds": 0.0, "fingerprint": seed_identity["fingerprint"]}
+	else:
+		seed_info = _seed_inputs(shared_target, manifest, seed_sessions, zscore_directory / "setup")
+	input_fingerprint = str(seed_info["fingerprint"])
+	input_guard = _input_guard(shared_target, manifest)
 	report["input_fingerprint"] = input_fingerprint
+	report["input_guard"] = input_guard
+	report["input_guard_method"] = "MySQL CHECKSUM TABLE EXTENDED over immutable ticker/session/raw/delta/import inputs"
 	report["protocol"]["archive_validation"] = "each required valid archive verified once per timed worker; cache reset per repetition"
+	if previous is not None:
+		report = _resume_report(previous, report)
 	save()
 
+	processed = 0
+	audited = 0
+	stop = False
 	for repetition, order in enumerate(manifest["repetitions"]["candidate_orders"]):
 		for backend in order:
 			configuration_key = f"{backend}-p1"
 			configuration = report["configurations"][configuration_key]
 			target = targets[configuration_key]
 			for block in BLOCKS:
+				if stop:
+					continue
 				block_report = configuration["blocks"][block]
 				sessions = tuple(block_report["sessions"])
-				reset_started = perf_counter()
-				_clear_target(target, manifest)
-				reset_seconds = perf_counter() - reset_started
-				if _input_fingerprint(target, manifest) != input_fingerprint:
-					raise ValueError("Stage 9c inputs changed before trial")
-				if _file_hashes(repository) != report["source_code_hashes"]:
-					raise ValueError("Stage 9c candidate code changed before trial")
-				_verify_archive_files(manifest, sessions)
-				arguments = {"backend": backend, "manifest": str(manifest_path.resolve()), "dbinfo_file": str(dbinfo_file.resolve()), "schema": configuration["schema"], "sessions": ",".join(sessions), "checkpoint_directory": str(zscore_directory / "checkpoints" / f"{configuration_key}-{block}-{repetition}"), "block": block, "repetition": str(repetition)}
-				trial = _run_child(arguments, timeout_seconds, zscore_directory)
-				trial.update(repetition=repetition, candidate_order=list(order), block=block, reset_seconds=reset_seconds, seed=seed_info)
-				if trial.get("status") == "complete":
+				existing = next((item for item in block_report["repetitions"] if item["repetition"] == repetition), None)
+				if existing is not None and _trial_passed(existing):
+					continue
+				pending = existing is not None and existing.get("status") == "awaiting_audit"
+				if phase == "audit" and not pending:
+					continue
+				if max_trials is not None and processed >= max_trials:
+					stop = True
+					continue
+				processed += 1
+				if pending:
+					if phase == "measure":
+						stop = True
+						continue
+					if _output_guard(target, manifest) != existing["output_guard"]:
+						raise ValueError("Pending audit target changed; preserve this run and use a fresh output")
+					trial = existing
+				else:
+					if existing is not None:
+						if not retry_failed:
+							raise ValueError("Failed cell preserved; use --stage9-retry-failed to retry unchanged code/inputs")
+						report.setdefault("attempt_history", []).append({"backend": backend, "block": block, "trial": existing})
+						block_report["repetitions"].remove(existing)
+					trial = _measure_trial(target, manifest, sessions, configuration, configuration_key, block, repetition, order, manifest_path, dbinfo_file, zscore_directory, timeout_seconds, input_guard, repository, report, seed_info)
+					block_report["repetitions"].append(trial)
+					if trial["status"] == "complete":
+						trial["status"] = "awaiting_audit"
+						trial["output_guard"] = _output_guard(target, manifest)
+					save()
+				if trial["status"] == "awaiting_audit":
+					if phase == "measure":
+						stop = True
+						continue
 					try:
-						if _input_fingerprint(target, manifest) != input_fingerprint:
-							raise ValueError("Stage 9c inputs changed during trial")
-						if _file_hashes(repository) != report["source_code_hashes"]:
-							raise ValueError("Stage 9c candidate code changed during trial")
+						if _input_guard(target, manifest) != input_guard or _file_hashes(repository) != report["source_code_hashes"]:
+							raise ValueError("Stage 9c inputs/code changed before audit")
 						_verify_archive_files(manifest, sessions)
-						trial["correctness"] = {"status": "passed", "series": [_audit_series(target, manifest, session, family, window, cache_directory=zscore_directory / "scalar-audit-cache", input_fingerprint=input_fingerprint) for session, family, window in _series_jobs(sessions)]}
+						correctness = trial.setdefault("correctness", {"status": "incomplete", "series": []})
+						for session, family, window in _series_jobs(sessions)[len(correctness["series"]):]:
+							if audit_series_limit is not None and audited >= audit_series_limit:
+								stop = True
+								break
+							correctness["series"].append(_audit_series(target, manifest, session, family, window, cache_directory=zscore_directory / "scalar-audit-cache", input_fingerprint=input_fingerprint))
+							audited += 1
+							save()
+						if len(correctness["series"]) == len(_series_jobs(sessions)):
+							if _input_guard(target, manifest) != input_guard or _file_hashes(repository) != report["source_code_hashes"]:
+								raise ValueError("Stage 9c inputs/code changed during audit")
+							if _output_guard(target, manifest) != trial["output_guard"]:
+								raise ValueError("Stage 9c output changed during audit")
+							correctness["status"] = "passed"
+							trial["status"] = "complete"
+						else:
+							stop = True
 					except Exception as error:
 						trial.update(status="failed_correctness", failure_type=type(error).__name__, correctness_error=str(error))
-				if trial.get("correctness", {}).get("status") == "passed":
-					block_report["correctness"].append(trial["correctness"])
-				else:
-					block_report["correctness"].append({"status": "not_available"})
-				block_report["repetitions"].append(trial)
 				configuration["last_trial"] = {"block": block, "repetition": repetition, "status": trial["status"]}
-				(zscore_directory / f"{configuration_key}.json").write_text(json.dumps(configuration, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 				save()
+				if not _trial_passed(trial):
+					stop = True
 
+	_finalize_report(report, zscore_directory)
+	failed = any(trial["status"] not in ("complete", "awaiting_audit") for configuration in report["configurations"].values() for block in configuration["blocks"].values() for trial in block["repetitions"])
+	report["execution"] = {"status": "failed" if failed else "complete" if report["status"] == "complete" else "paused", "phase": phase, "trials_processed": processed, "series_audited": audited}
+	save()
+	return report
+
+
+def _measure_trial(target, manifest, sessions, configuration, configuration_key, block, repetition, order, manifest_path, dbinfo_file, zscore_directory, timeout_seconds, input_guard, repository, report, seed_info):
+	reset_started = perf_counter()
+	_clear_target(target, manifest)
+	reset_seconds = perf_counter() - reset_started
+	if _input_guard(target, manifest) != input_guard:
+		raise ValueError("Stage 9c inputs changed before trial")
+	if _file_hashes(repository) != report["source_code_hashes"]:
+		raise ValueError("Stage 9c candidate code changed before trial")
+	_verify_archive_files(manifest, sessions)
+	attempt = uuid4().hex[:8]
+	arguments = {"backend": configuration["backend"], "manifest": str(manifest_path.resolve()), "dbinfo_file": str(dbinfo_file.resolve()), "schema": configuration["schema"], "sessions": ",".join(sessions), "checkpoint_directory": str(zscore_directory / "checkpoints" / f"{configuration_key}-{block}-{repetition}-{attempt}"), "block": block, "repetition": f"{repetition}-{attempt}"}
+	trial = _run_child(arguments, timeout_seconds, zscore_directory)
+	trial.update(repetition=repetition, candidate_order=list(order), block=block, reset_seconds=reset_seconds, seed=seed_info)
+	if _input_guard(target, manifest) != input_guard or _file_hashes(repository) != report["source_code_hashes"]:
+		trial.update(status="failed_correctness", correctness_error="Stage 9c inputs/code changed during trial")
+	_verify_archive_files(manifest, sessions)
+	return trial
+
+
+def _finalize_report(report: dict[str, Any], zscore_directory: Path) -> None:
 	for configuration in report["configurations"].values():
 		for block_report in configuration["blocks"].values():
-			successful = [item for item in block_report["repetitions"] if item.get("status") == "complete" and item.get("correctness", {}).get("status") == "passed"]
-			block_report["status"] = "measured" if len(successful) == 4 else "incomplete"
-			block_report["warm_median_seconds"] = _median([float(item["end_to_end_seconds"]) for item in successful[1:]]) if len(successful) == 4 else None
+			successful = sorted((item for item in block_report["repetitions"] if _trial_passed(item)), key=lambda item: item["repetition"])
+			complete = [item["repetition"] for item in successful] == [0, 1, 2, 3]
+			block_report["correctness"] = [item.get("correctness", {"status": "not_available"}) for item in block_report["repetitions"]]
+			block_report["status"] = "measured" if complete else "incomplete"
+			block_report["warm_median_seconds"] = _median([float(item["end_to_end_seconds"]) for item in successful[1:]]) if complete else None
+			block_report["warm_seconds"] = [float(item["end_to_end_seconds"]) for item in successful if item["repetition"] > 0]
+			block_report["warm_range_seconds"] = [min(block_report["warm_seconds"]), max(block_report["warm_seconds"])] if complete else None
 			block_report["first_seconds"] = float(successful[0]["end_to_end_seconds"]) if successful else None
 			block_report["rows_per_trial"] = int(successful[0]["worker"]["rows"]) if successful else None
 		configuration["status"] = "measured" if all(value["status"] == "measured" for value in configuration["blocks"].values()) else "incomplete"
 		configuration["warm_median_seconds"] = sum(float(value["warm_median_seconds"]) for value in configuration["blocks"].values() if value["warm_median_seconds"] is not None) if configuration["status"] == "measured" else None
 		configuration["throughput_rows_per_second"] = sum(int(value["rows_per_trial"]) for value in configuration["blocks"].values() if value["rows_per_trial"] is not None) / configuration["warm_median_seconds"] if configuration["warm_median_seconds"] else None
-		(zscore_directory / f"{configuration['backend']}-p1.json").write_text(json.dumps(configuration, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-		save()
+		_atomic_json(zscore_directory / f"{configuration['backend']}-p1.json", configuration)
 	report["comparison_table"] = [{"workload": "zscores_persistence", "backend": backend, "status": "measured" if report["configurations"][f"{backend}-p1"]["status"] == "measured" else "incomplete", "best_configuration": f"{backend}-p1" if report["configurations"][f"{backend}-p1"]["status"] == "measured" else None, "warm_median_seconds": report["configurations"][f"{backend}-p1"].get("warm_median_seconds"), "throughput_rows_per_second": report["configurations"][f"{backend}-p1"].get("throughput_rows_per_second")} for backend in BACKENDS]
 	report["status"] = "complete" if all(value["status"] == "measured" for value in report["configurations"].values()) else "incomplete"
-	save()
-	return report
 
 
 def _best(report: dict[str, Any], backend: str) -> dict[str, Any]:

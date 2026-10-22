@@ -87,6 +87,14 @@ def test_constant_window_is_zero_variance_with_null_score() -> None:
 	assert row.score is None
 
 
+def test_constant_rolling_window_remains_zero_variance_after_prior_changes() -> None:
+	input_sessions = sessions(5)
+	row = calculate_zscores(specification(ZScoreFamily.PRICE, 3), price_input({7: (1.0, 2.0, 4.0, 4.0, 4.0)}, input_sessions)).row(3, input_sessions[-1], 7)
+
+	assert row.status is ZScoreStatus.ZERO_VARIANCE
+	assert row.score is None
+
+
 def test_holiday_is_not_an_interior_gap_but_missing_exchange_session_is() -> None:
 	holiday_sessions = sessions(2, dates=(date(2024, 7, 3), date(2024, 7, 5)))
 	holiday_result = calculate_zscores(specification(ZScoreFamily.PRICE, 2), price_input({7: (1.0, 2.0)}, holiday_sessions))

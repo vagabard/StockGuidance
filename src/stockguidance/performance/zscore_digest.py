@@ -9,6 +9,10 @@ class TextDigest:
 	def append(self, line: str) -> None:
 		self.digest.update(json.dumps(line + "\n", ensure_ascii=True)[1:-1].encode("utf-8"))
 
+	def append_many(self, lines: list[str]) -> None:
+		if lines:
+			self.digest.update(json.dumps("\n".join(lines) + "\n", ensure_ascii=True)[1:-1].encode("utf-8"))
+
 	def hexdigest(self) -> str:
 		result = self.digest.copy()
 		result.update(b'"\n')

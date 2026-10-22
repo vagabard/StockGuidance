@@ -534,6 +534,16 @@ z-score status populations. Prove identical starting targets and immutable sourc
 inputs; independent repeatable-read transactions are not a shared snapshot.
 Check canonical results and recovery outcomes before ranking any candidate.
 
+Stage 9c execution revision (2026-10-22): use the independently resumable
+measurement/audit steps in `docs/stage9c_execution.md`. The user-requested
+`compact` profile may replace the 45 target slots with five fixed and three
+chronological dates, while retaining all tickers, dependency history, both
+families/windows and all four repetitions for every backend. Record its narrower
+scope explicitly; never merge full-profile and compact-profile timing cells.
+Stage 9a/9b remain unchanged. A completed compact report establishes the revised
+sampled comparison, with Stage 10 still responsible for interpreting variability
+and deciding whether more paired evidence is needed before selection.
+
 Write `benchmark/candidates/raw/`, `derived/` and `zscores/` per-run JSON, sanitized
 plans/metrics, warm medians and throughput. Aggregate all nine workload/backend
 cells in `benchmark/candidates/study.json`; distinguish measured, failed,
@@ -1438,3 +1448,94 @@ directory already exists. To repeat only the bounded diagnostic:
 & $pythonExe -m stockguidance.performance.stage9_zscore_diagnostic `
   --output output/legacy-migration/benchmark/candidates/stage9c-diagnostic-<fresh-run>
 ```
+
+### Stage 9c split into resumable units and reduced profile — 2026-10-22
+
+- Inspected the still-running `stage9c-optimized-20261021-final2` attempt and
+  stopped its parent/SQL worker before changing code. Its preserved top-level
+  report SHA-256 is
+  `AA7D093983F6C594F528E5304CD1A1FA5B82EE24ACBCB639FF7A9B5D26A09CE2`.
+  Python passed both first blocks; Java passed two chronological trials but
+  failed both fixed trials on 2018-08-29/price/20/ticker 19479. SQL timed out
+  after one hour in each first block, with 63/100 and 65/80 committed series.
+  These partial full-profile results are preserved, not merged into the revised
+  comparison. Stage 9a and 9b remain complete and reusable.
+- Fixed Java's constant-window scalar fallback: repeated 26.69 values could
+  acquire a tiny variance from the rounded compensated mean, yielding READY
+  instead of ZERO_VARIANCE. Exact constant windows now return NULL/status 5.
+  Added a Java regression test for both windows and included the decimal
+  constant case in the three-backend diagnostic fixture.
+- Added `--stage9-profile compact`: five fixed target dates
+  (2006-12-08, 2010-10-04, 2018-08-29, 2021-10-04, 2026-04-29) and the last three
+  chronological dates (2026-04-27 through 2026-04-29). This reduces 45 target
+  slots to eight, while retaining all ticker IDs, all 20/60 dependency history,
+  both families, dense NULL/status outcomes, startup-inclusive persistence,
+  candidate rotations and one first plus three warm repetitions. The report
+  freezes this selection and explicitly limits extrapolation to these dates.
+- Added independent measurement and audit phases, per-invocation trial/audit
+  limits, atomic report/cache saves, per-series audit checkpoints and strict
+  resume identity checks. Timings are saved before auditing. Successful audited
+  cells are skipped on resume. Interrupted measurements restart their entire
+  cell using fresh checkpoint paths. Explicit failed-cell retries preserve
+  earlier attempts. Failures stop further trials. Pending audits require
+  unchanged disposable output checksums. A schema advisory lock rejects another
+  orchestrator; worker interruption cleans up its child and monitoring thread.
+  Deliberate pauses return success while the comparison stays incomplete.
+- Full execution breakdown, interpretation limits and copyable step/resume
+  commands are in `docs/stage9c_execution.md`. Run one measurement cell, audit
+  up to four series per invocation, then advance to the next cell. The same
+  controls also support the original full workload in a fresh output directory.
+- Validation: 162 Python tests passed before the final interruption/lock
+  additions; the final focused candidate suite passed 18 tests, including
+  interruption, resume, identity/output changes, failed retries, concurrency
+  rejection and fail-fast audit behavior. Maven tests/package passed 53 tests.
+  Final three-backend diagnostic passed in 16.45 seconds:
+  `output/legacy-migration/benchmark/candidates/stage9c-independent-diagnostic-20261022-ready/diagnostic.json`
+  (SHA-256 `581B52B287F3FA46A6320A367C99E0A7AFD3B1DF73D854D93FF11A7B61F5F51D`).
+  The actual disposable synthetic workflow passed measure/pause, partial audit,
+  remaining audit, the remaining 23 cells and a no-op completed resume:
+  `output/legacy-migration/benchmark/candidates/stage9c-workflow-synthetic-20261022-ready/stage9c-zscores.json`
+  (SHA-256 `3DC305A81809AF75B6F51D04ABA51CD934F5D499E60A39C4CD4525A709FB49E8`).
+  Synthetic results are excluded from performance ranking.
+- The final real-input bounded validation uses
+  `output/legacy-migration/benchmark/candidates/stage9c-compact-20261022-ready/`
+  and disposable schema `stockguidance_disposable_s9c_shared_5769a5a6`.
+  Python fixed-block repetition 0 finished all 20 series/737,320 rows in
+  318.011 seconds, saved its timing and exited successfully at the measurement
+  pause. A separate audit-only invocation reused that timing, passed all four
+  series for 2006-12-08 (36,866 rows each), and exited successfully at its limit.
+  The trial remains `awaiting_audit` with 4/20 audits passed; the aggregate is
+  incomplete. Remaining work is 16 audits for this cell plus the other 23
+  backend/block/repetition cells. No Stage 9c processes remain running.
+  Current report SHA-256:
+  `5475C5D4944E7D3FF613716F93D1435B100654690B0402FEB139745D104BB4B4`;
+  current `study.json` SHA-256:
+  `C65E071F1A57DB38B5A83290EE3001D51B60CBFFA73906240B4EAC727B2D1795`.
+  The earlier `stage9c-compact-20261022/` partial smoke attempt was preserved
+  when adding interruption/locking safeguards; it is ineligible for comparison.
+  The original manifest SHA-256 remains
+  `11bbcf4b57469c1256ab9caa474824a538ccbfb8bd3155de6515965e2d4fcf26`.
+  Production DDL/DML, production rows and archives remain unchanged. No backend
+  has been selected and no commit was created. Stage 9c remains incomplete;
+  continue its resumable compact comparison before Stage 10.
+
+Next prompt: **Resume Stage 9c compact only using the existing ready entry;
+audit at most four series and process at most one trial per invocation. Preserve
+successful cells and all earlier evidence. Do not run Stage 10 or commit.**
+
+```powershell
+$env:PYTHONPATH = 'src'
+& 'C:\Users\formm\AppData\Local\Python\pythoncore-3.14-64\python.exe' `
+  -m stockguidance.cli.legacy_migration_benchmark `
+  --run-stage9-zscores `
+  --manifest output/legacy-migration/benchmark/candidates/manifest.json `
+  --dbinfo-file dbinfo.id `
+  --output output/legacy-migration/benchmark/candidates/stage9c-compact-20261022-ready `
+  --stage9-profile compact --stage9-timeout-seconds 3600 `
+  --stage9-resume --stage9-max-trials 1 --stage9-audit-series-limit 4
+```
+
+Repeat this bounded command to finish the current audit and advance through the
+remaining cells. Preserve code/classes/inputs and the current disposable outputs
+between audit invocations; rebuilding or changing code can require a fresh paired
+comparison. See `docs/stage9c_execution.md` for phase-specific commands.

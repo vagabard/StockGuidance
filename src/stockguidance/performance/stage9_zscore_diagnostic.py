@@ -34,7 +34,7 @@ def fixture_manifest(manifest: dict, directory: Path) -> Path:
 			identifier = mapping["id"]
 			if identifier == 2 or (identifier == 3 and index < 50):
 				continue
-			close = 10 if identifier == 1 else 20 + identifier + (index % 11) * 0.125
+			close = (25.0 if index == 0 else 26.69) if identifier == 1 else 20 + identifier + (index % 11) * 0.125
 			bars.append({"T": mapping["label"], "o": close, "h": close + 1, "l": close - 1, "c": close,
 				"v": 100, "vw": close, "n": 3, "t": int(datetime.combine(session.session_date, datetime.min.time(), tzinfo=timezone.utc).timestamp() * 1000) + 16 * 3600000})
 		path.write_text("".join(json.dumps(bar) + "\n" for bar in bars), encoding="utf-8")

@@ -124,6 +124,9 @@ class _RollingMoments:
 	def variance(self) -> float:
 		if self.count == 0:
 			raise ValueError("cannot calculate variance of an empty window")
+		first_value = self._values[0][1]
+		if all(value == first_value for _, value in self._values):
+			return 0.0
 		if self._direct_m2 is not None:
 			m2 = self._direct_m2
 		else:

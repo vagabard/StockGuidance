@@ -410,18 +410,27 @@ class SQLZScoreCandidate:
 		parameters = (*date_ids.values(), *ticker_ids)
 		prices = f"`{self.names.prices}`"
 		deltas = f"`{self.names.deltas}`"
-		cursor.execute(
-			f"SELECT date_id, ticker_id, `close` FROM {prices} WHERE date_id IN ({placeholders}) AND ticker_id IN ({ticker_placeholders}) ORDER BY ticker_id, date_id",
-			parameters,
-		)
-		raw = {(int(ticker_id), int(date_id)): value for date_id, ticker_id, value in cursor.fetchall()}
+		raw = {}
 		delta = {}
 		if family == "price_delta":
 			cursor.execute(
-				f"SELECT date_id, ticker_id, close_ratio_to_prior FROM {deltas} WHERE date_id IN ({placeholders}) AND ticker_id IN ({ticker_placeholders}) ORDER BY ticker_id, date_id",
+				f"""SELECT prices.date_id, prices.ticker_id, prices.`close`, deltas.close_ratio_to_prior
+FROM {prices} prices
+LEFT JOIN {deltas} deltas ON deltas.date_id = prices.date_id AND deltas.ticker_id = prices.ticker_id
+WHERE prices.date_id IN ({placeholders}) AND prices.ticker_id IN ({ticker_placeholders})
+ORDER BY prices.ticker_id, prices.date_id""",
 				parameters,
 			)
-			delta = {(int(ticker_id), int(date_id)): value for date_id, ticker_id, value in cursor.fetchall()}
+			for date_id, ticker_id, value, ratio in cursor.fetchall():
+				key = (int(ticker_id), int(date_id))
+				raw[key] = value
+				delta[key] = ratio
+		else:
+			cursor.execute(
+				f"SELECT date_id, ticker_id, `close` FROM {prices} WHERE date_id IN ({placeholders}) AND ticker_id IN ({ticker_placeholders}) ORDER BY ticker_id, date_id",
+				parameters,
+			)
+			raw = {(int(ticker_id), int(date_id)): value for date_id, ticker_id, value in cursor.fetchall()}
 		imports = f"`{self.names.imports}`"
 		cursor.execute(
 			f"SELECT session_date, raw_id, available_at FROM {imports} WHERE session_date IN ({placeholders}) ORDER BY session_date",
@@ -506,7 +515,9 @@ class SQLZScoreCandidate:
 
 	def _input_digests(self, cursor, family: str, date_ids: dict[str, int], ticker_ids: tuple[int, ...], *, snapshot=None, digests=None) -> tuple[str, str, bool]:
 		raw, delta, receipts = snapshot if snapshot is not None else self._load_input_snapshot(cursor, family, date_ids, ticker_ids)
-		dependency_lines, availability_lines = digests if digests is not None else (TextDigest(), TextDigest())
+		dependency_digest, availability_digest = digests if digests is not None else (TextDigest(), TextDigest())
+		dependency_lines = []
+		availability_lines = []
 		actual_available = True
 		for ticker_id in ticker_ids:
 			for session in self.dependencies:
@@ -528,7 +539,9 @@ class SQLZScoreCandidate:
 					actual_available = False
 				dependency_lines.append("|".join((session, str(date_id), str(ticker_id), self._decimal_text(value), self._decimal_text(ratio), str(receipt[0]) if receipt else "null", str(receipt[1]) if receipt else "null")))
 				availability_lines.append("|".join((session, str(ticker_id), state)))
-		return dependency_lines.hexdigest(), availability_lines.hexdigest(), actual_available
+		dependency_digest.append_many(dependency_lines)
+		availability_digest.append_many(availability_lines)
+		return dependency_digest.hexdigest(), availability_digest.hexdigest(), actual_available
 
 	def _ensure_series(self, cursor, family: str, window: int) -> str:
 		key = _series_key(self.manifest, family, window)

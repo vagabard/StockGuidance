@@ -13,6 +13,22 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 
 class JavaZScoreCandidateTest {
     @Test
+    void decimalConstantWindowHasZeroVarianceAfterEarlierChanges() {
+        List<LocalDate> dates = dates(61);
+        double[] prices = new double[61];
+        java.util.Arrays.fill(prices, 26.69);
+        prices[0] = 25.0;
+        Map<LocalDate, JavaZScoreCandidate.Evidence> evidence = new LinkedHashMap<>();
+        for (LocalDate date : dates) evidence.put(date, new JavaZScoreCandidate.Evidence(true, "id", "id", "receipt"));
+        for (int window : new int[]{20, 60}) {
+            var rows = JavaZScoreCandidate.calculate(JavaZScoreCandidate.Family.PRICE, window, dates.getLast(),
+                    dates, Map.of(19479L, "CONST"), Map.of(19479L, values(dates, prices)), Map.of(), evidence);
+            assertEquals(JavaZScoreCandidate.Status.ZERO_VARIANCE, rows.getFirst().status());
+            assertEquals(null, rows.getFirst().score());
+        }
+    }
+
+    @Test
     void priceAndDeltaFamiliesUseDenseCaseSensitiveTickerScope() {
         List<LocalDate> dates = dates(4);
         Map<Long, String> tickers = Map.of(11L, "AAP", 13L, "AAp");
