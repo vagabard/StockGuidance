@@ -1539,3 +1539,32 @@ Repeat this bounded command to finish the current audit and advance through the
 remaining cells. Preserve code/classes/inputs and the current disposable outputs
 between audit invocations; rebuilding or changing code can require a fresh paired
 comparison. See `docs/stage9c_execution.md` for phase-specific commands.
+
+### Stage 9c compact comparison complete — 2026-10-22
+
+- Stage 9c is complete on the declared compact profile. All 24 cells (three
+  backends, two blocks, four repetitions) passed correctness audits. Every
+  fixed-block repetition audited 20 series and every chronological-block
+  repetition audited 12 series. No Stage 9c process remains running.
+- The profile measured five fixed target slots and three chronological slots,
+  retaining all 36,866 ticker rows, both families, windows 20/60, dense statuses
+  and all dependency history. It is a valid sampled comparison and makes no
+  full-history runtime claim.
+- Z-score persistence warm medians and aggregate throughput were Java
+  `287.87s` / `4,098.10 rows/s`, Python `402.76s` / `2,929.06 rows/s`, and SQL
+  `1,006.04s` / `1,172.63 rows/s`. Java was 28.52% faster than Python; SQL was
+  149.73% slower.
+- Across all Stage 9 workloads, Java's warm medians were raw `10.36s`, derived
+  `41.14s`, z-score `287.87s`; Python's were `11.31s`, `46.68s`, `402.76s`;
+  SQL's were `21.65s`, `57.52s`, `1,006.04s`. Java was faster than Python in
+  all three measured workloads; SQL was slower in all three.
+- The final files are
+  `output/legacy-migration/benchmark/candidates/stage9c-compact-20261022-ready/stage9c-zscores.json`
+  (SHA-256 `264F1300DF7D3FFF4DBFFD8870A67AF505065B2AA8B8AF7930329780D43FC0F8`)
+  and `study.json` (SHA-256
+  `D81FCEC46BA161094204173F682BC4AE769F31D786FC92AA20CD7B654C5E1C15`).
+  The manifest remains unchanged at SHA-256
+  `11bbcf4b57469c1256ab9caa474824a538ccbfb8bd3155de6515965e2d4fcf26`.
+- No production backend was selected and Stage 10 was not run. The future Stage
+  10 prompt should review the compact-sample limitation and warm variability,
+  then apply the documented selection rule. No commit was created.
