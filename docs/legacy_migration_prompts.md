@@ -1706,3 +1706,42 @@ comparison. See `docs/stage9c_execution.md` for phase-specific commands.
   source binding or original archive was changed. No commit was created. Stage
   12 is the next prompt and remains responsible for restore testing, precision/
   collation migration and the bounded pilot.
+
+### Stage 12 restore, migration, and bounded pilot — 2026-10-22
+
+- Stage 10, Stage 5c, and Stage 11b prerequisites passed. The frozen decision,
+  manifest, audit, Stage 11b recovery report, precision inventory, and full
+  backup were revalidated with SHA-256 values
+  `ed029ec095ba4c00accd4d9e41e94e631acc4379cab9701ab137f319a76b59ea`,
+  `11bbcf4b57469c1256ab9caa474824a538ccbfb8bd3155de6515965e2d4fcf26`,
+  `04708b2a2ba212c9d3a42915dc7defee7b023b9622ff197fe023323b4d17d60a`,
+  `f3321d00181b4d362f203782e8837f1f5f49f236245b0ffe6c1563bb06e943d9`,
+  `032038857deee1c000d3b1236ca53664966890a021e3d3ffcd9a492421ae5c4c`, and
+  `a13ad11841ee148690aeb53ae99444fc1c246997cd4cff188a5f0dda7d378878`.
+- Added `stockguidance.performance.stage12`, the guarded `--run-stage12`
+  frontend, production-safe Java writer modes, receipt preservation, and
+  MySQL-safe z-score DDL quoting. The restore was verified in isolated schema
+  `stockguidance_disposable_stage12_restore_20261022_r4`; representative
+  counts were 36,866 tickers, 5,130 sessions, 44,199,460 raw rows, and
+  44,152,902 derived rows. Production DDL preserved ticker/date mapping
+  identity, applied raw precision `DECIMAL(28,8)`/`DECIMAL(20,8)`/
+  `DECIMAL(42,22)`, set ticker labels to `utf8mb4_bin`, and initialized only
+  the missing InnoDB z-score and migration support tables. No SQL routines were
+  selected or installed.
+- The latest complete month lacked a following neighbor and March lacked the
+  required 60-session history, so the authorized fallback selected the latest
+  20 consecutive represented sessions `2026-04-01` through `2026-04-29`, with
+  z-score samples `2026-04-01`, `2026-04-16`, and `2026-04-29`. The pilot
+  adopted 80 bounded raw sessions through Python, persisted selected derived
+  rows through Java, and persisted both z-score families at windows 20 and 60
+  through Java. Raw, derived, z-score, receipt, dependency, and metadata audits
+  passed.
+- The identical second run produced unchanged raw content/receipt results,
+  derived audits, and z-score audits. The acceptance report is
+  `output/legacy-migration/stage12.json` with SHA-256
+  `8a7a96d8dc603b98fb15801ab305c525176babf700b4b29292f59deefd174a1e` and
+  records `status=complete`, `production_ready=true`, and authorized
+  `production_access.ddl=true`/`.dml=true`.
+- Focused validation passed: 11 Python Stage 10–12 tests, 7 focused Stage 5/
+  Stage 12 schema tests, and `mvn -o test` passed all 53 Java tests. No commit
+  was created. Next prompt: execute Stage 13 only.

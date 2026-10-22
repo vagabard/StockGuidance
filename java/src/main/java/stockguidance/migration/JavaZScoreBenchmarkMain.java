@@ -34,12 +34,13 @@ public final class JavaZScoreBenchmarkMain {
     static JsonObject run(Map<String, String> arguments) throws Exception {
         JavaWriterManifest manifest = JavaWriterManifest.read(Path.of(required(arguments, "manifest")));
         DatabaseConfiguration configuration = DatabaseConfiguration.load(Path.of(required(arguments, "dbinfo-file")));
-        String schema = required(arguments, "disposable-schema");
-        if (!schema.matches("stockguidance_disposable_[a-z0-9_]{1,39}")
-                || schema.equalsIgnoreCase(configuration.database())) {
+        boolean production = Boolean.parseBoolean(arguments.getOrDefault("production", "false"));
+        String schema = production ? configuration.database() : required(arguments, "disposable-schema");
+        if (!production && (!schema.matches("stockguidance_disposable_[a-z0-9_]{1,39}")
+                || schema.equalsIgnoreCase(configuration.database()))) {
             throw new IllegalArgumentException("Require a distinct disposable MySQL schema");
         }
-        configuration = new DatabaseConfiguration(configuration.host(), schema, configuration.user(),
+        if (!production) configuration = new DatabaseConfiguration(configuration.host(), schema, configuration.user(),
                 configuration.password(), configuration.port(), configuration.driver(), configuration.tableNamesFile());
         if (!configuration.loadTableNames().tables().equals(manifest.tableNames().tables())
                 || !configuration.loadTableNames().templates().equals(manifest.tableNames().templates())) {
@@ -49,7 +50,7 @@ public final class JavaZScoreBenchmarkMain {
         Files.createDirectories(checkpointDirectory);
         List<LocalDate> sessions = parseSessions(required(arguments, "sessions"));
         java.util.Set<LocalDate> verifiedSources = new java.util.HashSet<>();
-        JavaZScoreCandidate candidate = new JavaZScoreCandidate(manifest, verifiedSources);
+        JavaZScoreCandidate candidate = new JavaZScoreCandidate(manifest, verifiedSources, production, schema);
         JsonArray series = JsonSupport.array();
         long rows = 0;
         long started = System.nanoTime();

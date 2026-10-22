@@ -22,7 +22,6 @@ def identity_migration_ddl(table_names: TableNames) -> tuple[str, ...]:
 	tickers = quote_identifier(table_names.table(TableRole.TICKERS))
 	return (
 		f"ALTER TABLE {tickers} MODIFY label VARCHAR(16) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL",
-		f"ALTER TABLE {tickers} DROP INDEX label, ADD UNIQUE INDEX label (label)",
 	)
 
 

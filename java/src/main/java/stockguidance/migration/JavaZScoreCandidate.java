@@ -46,16 +46,29 @@ public final class JavaZScoreCandidate {
     private final JavaWriterManifest manifest;
     private final TableNames names;
     private final java.util.Set<LocalDate> verifiedSources;
+    private final boolean productionTarget;
+    private final String expectedProductionSchema;
     private final Map<String, Double> phaseSeconds = new LinkedHashMap<>();
 
     public JavaZScoreCandidate(JavaWriterManifest manifest) {
-        this(manifest, null);
+        this(manifest, null, false, null);
     }
 
     JavaZScoreCandidate(JavaWriterManifest manifest, java.util.Set<LocalDate> verifiedSources) {
+        this(manifest, verifiedSources, false, null);
+    }
+
+    public JavaZScoreCandidate(JavaWriterManifest manifest, boolean productionTarget, String expectedProductionSchema) {
+        this(manifest, null, productionTarget, expectedProductionSchema);
+    }
+
+    JavaZScoreCandidate(JavaWriterManifest manifest, java.util.Set<LocalDate> verifiedSources,
+                        boolean productionTarget, String expectedProductionSchema) {
         this.manifest = manifest;
         this.names = manifest.tableNames();
         this.verifiedSources = verifiedSources;
+        this.productionTarget = productionTarget;
+        this.expectedProductionSchema = expectedProductionSchema;
     }
 
     Map<String, Double> phaseSeconds() {
@@ -76,7 +89,7 @@ public final class JavaZScoreCandidate {
         boolean originalAutoCommit = connection.getAutoCommit();
         try {
             connection.setAutoCommit(false);
-            new JavaWriterCandidate(manifest).validateTarget(connection);
+            new JavaWriterCandidate(manifest, productionTarget, expectedProductionSchema).validateTarget(connection);
             Snapshot snapshot = loadSnapshot(connection, inputDates, session, family, window);
             phaseStarted = System.nanoTime();
             validateCheckpoint(checkpoint, session, family, window, snapshot.contentDigest);

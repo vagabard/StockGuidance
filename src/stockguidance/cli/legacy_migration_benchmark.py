@@ -33,6 +33,7 @@ def parser() -> argparse.ArgumentParser:
 	mode.add_argument("--run-stage10", action="store_true")
 	mode.add_argument("--run-stage11a", action="store_true")
 	mode.add_argument("--run-stage11b", action="store_true")
+	mode.add_argument("--run-stage12", action="store_true")
 	arguments.add_argument("--data-root", type=_path, default=Path("data"))
 	arguments.add_argument("--dbinfo-file", type=_path, default=Path("dbinfo.id"))
 	arguments.add_argument("--evaluation-plan", type=_path, default=Path("output/legacy-migration/evaluation-plan.json"))
@@ -77,6 +78,13 @@ def parser() -> argparse.ArgumentParser:
 	arguments.add_argument("--stage11b-output", type=_path, default=Path("output/legacy-migration/benchmark/candidates/stage11b-recovery.json"))
 	arguments.add_argument("--stage11b-checkpoint-directory", type=_path, default=Path("output/legacy-migration/benchmark/candidates/stage11b-checkpoints"))
 	arguments.add_argument("--stage11b-session", default="2026-04-29")
+	arguments.add_argument("--stage12-stage11b-report", type=_path, default=Path("output/legacy-migration/benchmark/candidates/stage11b-recovery-4.json"))
+	arguments.add_argument("--stage12-backup", type=_path, default=Path("output/database-backups/stockforecasting-full-20261019-112816.sql"))
+	arguments.add_argument("--stage12-restore-schema", default="stockguidance_disposable_stage12_restore_20261022")
+	arguments.add_argument("--stage12-reuse-restored-schema", action="store_true")
+	arguments.add_argument("--stage12-output", type=_path, default=Path("output/legacy-migration/stage12.json"))
+	arguments.add_argument("--stage12-zscore-sample-count", type=int, default=3)
+	arguments.add_argument("--stage12-java-timeout-seconds", type=float, default=7200.0)
 	return arguments
 
 
@@ -171,6 +179,17 @@ def main(argv: Sequence[str] | None = None) -> int:
 			print(json.dumps({"successful": False, "error": "Stage 11b recovery proof failed", "detail": str(error)}))
 			return 1
 		print(json.dumps({"successful": report["status"] == "complete", "operation": "run_stage11b", "report": str(_resolve(arguments.stage11b_output)), "status": report["status"], "production_access": report["production_access"]}))
+		return 0 if report["status"] == "complete" else 1
+	if arguments.run_stage12:
+		from stockguidance.performance.stage12 import Stage12Error, run_stage12, validate_prerequisites
+
+		try:
+			context = validate_prerequisites(_resolve(arguments.stage10_output), _resolve(arguments.manifest), _resolve(arguments.audit_report), _resolve(arguments.stage12_stage11b_report), _resolve(arguments.precision_report), _resolve(arguments.stage12_backup))
+			report = run_stage12(context, _resolve(arguments.dbinfo_file), _resolve(arguments.data_root), arguments.stage12_restore_schema, _resolve(arguments.stage12_output), zscore_sample_count=arguments.stage12_zscore_sample_count, java_timeout=arguments.stage12_java_timeout_seconds, reuse_restore=arguments.stage12_reuse_restored_schema)
+		except (OSError, Stage12Error, ValueError) as error:
+			print(json.dumps({"successful": False, "error": "Stage 12 restore, migration or pilot failed", "detail": str(error)}))
+			return 1
+		print(json.dumps({"successful": report["status"] == "complete", "operation": "run_stage12", "report": str(_resolve(arguments.stage12_output)), "status": report["status"], "production_ready": report["production_ready"]}))
 		return 0 if report["status"] == "complete" else 1
 	if arguments.run_java_writer_trial:
 		from stockguidance.performance.java_writer_trial import run_trial

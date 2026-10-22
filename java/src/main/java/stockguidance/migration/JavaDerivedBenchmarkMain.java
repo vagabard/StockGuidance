@@ -39,12 +39,13 @@ public final class JavaDerivedBenchmarkMain {
     static JsonObject run(Map<String, String> arguments) throws Exception {
         JavaWriterManifest manifest = JavaWriterManifest.read(Path.of(required(arguments, "manifest")));
         DatabaseConfiguration configuration = DatabaseConfiguration.load(Path.of(required(arguments, "dbinfo-file")));
-        String schema = required(arguments, "disposable-schema");
-        if (!schema.matches("stockguidance_disposable_[a-z0-9_]{1,39}")
-                || schema.equalsIgnoreCase(configuration.database())) {
+        boolean production = Boolean.parseBoolean(arguments.getOrDefault("production", "false"));
+        String schema = production ? configuration.database() : required(arguments, "disposable-schema");
+        if (!production && (!schema.matches("stockguidance_disposable_[a-z0-9_]{1,39}")
+                || schema.equalsIgnoreCase(configuration.database()))) {
             throw new IllegalArgumentException("Require a distinct disposable MySQL schema");
         }
-        configuration = new DatabaseConfiguration(configuration.host(), schema, configuration.user(),
+        if (!production) configuration = new DatabaseConfiguration(configuration.host(), schema, configuration.user(),
                 configuration.password(), configuration.port(), configuration.driver(), configuration.tableNamesFile());
         if (!configuration.loadTableNames().tables().equals(manifest.tableNames().tables())) {
             throw new IllegalArgumentException("Disposable database registry does not match the manifest");
@@ -54,7 +55,7 @@ public final class JavaDerivedBenchmarkMain {
         List<LocalDate> sessions = parseSessions(required(arguments, "sessions"));
         Path checkpointDirectory = Path.of(required(arguments, "checkpoint-directory"));
         Files.createDirectories(checkpointDirectory);
-        JavaWriterCandidate candidate = new JavaWriterCandidate(manifest);
+        JavaWriterCandidate candidate = new JavaWriterCandidate(manifest, production, schema);
         ExecutorService executor = Executors.newFixedThreadPool(preparers);
         ArrayDeque<PendingDerived> pending = new ArrayDeque<>();
         Iterator<LocalDate> remaining = sessions.iterator();

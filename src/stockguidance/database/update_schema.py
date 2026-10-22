@@ -40,11 +40,11 @@ def zscore_schema_statements(table_names: TableNames, windows: Iterable[int]) ->
 	statements = [
 		f"CREATE TABLE IF NOT EXISTS {quote_identifier(table_names.table(TableRole.ZSCORE_SERIES))} ("
 		"series_key CHAR(64) NOT NULL, schema_version INT NOT NULL, source_scope CHAR(64) NOT NULL, "
-		"calendar_id VARCHAR(128) NOT NULL, family VARCHAR(32) NOT NULL, window INT NOT NULL, "
+		"calendar_id VARCHAR(128) NOT NULL, family VARCHAR(32) NOT NULL, `window` INT NOT NULL, "
 		"calculation_version VARCHAR(128) NOT NULL, delta_definition VARCHAR(128) NOT NULL, "
-		"precision VARCHAR(32) NOT NULL, missing_value_policy VARCHAR(64) NOT NULL, created_at VARCHAR(40) NOT NULL, "
+		"`precision` VARCHAR(32) NOT NULL, missing_value_policy VARCHAR(64) NOT NULL, created_at VARCHAR(40) NOT NULL, "
 		"PRIMARY KEY (series_key), UNIQUE "
-		"(source_scope, calendar_id, family, window, calculation_version, delta_definition, precision, missing_value_policy)"
+		"(source_scope, calendar_id, family, `window`, calculation_version, delta_definition, `precision`, missing_value_policy)"
 		") ENGINE=InnoDB",
 		f"CREATE TABLE IF NOT EXISTS {quote_identifier(table_names.table(TableRole.ZSCORE_SESSIONS))} ("
 		"series_key CHAR(64) NOT NULL, date_id INT NOT NULL, dependency_digest CHAR(64) NOT NULL, "

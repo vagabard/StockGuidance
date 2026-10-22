@@ -30,7 +30,8 @@ import java.util.TreeMap;
 
 public final class JavaWriterCandidate {
     private static final String TRIAL_RECEIPT = "2026-10-20T00:00:00+00:00";
-    private static final String COMPLETION_TABLE = "stage6_completion";
+    private static final String DISPOSABLE_COMPLETION_TABLE = "stage6_completion";
+    private static final String PRODUCTION_COMPLETION_TABLE = "stockguidance_migration_completion";
     private static final String METADATA_TABLE = "stage6_disposable_metadata";
     private static final String RAW_SERIES = "raw";
     private static final String DERIVED_SERIES = "legacy-open-to-close-v1";
@@ -38,10 +39,20 @@ public final class JavaWriterCandidate {
 
     private final JavaWriterManifest manifest;
     private final TableNames names;
+    private final boolean productionTarget;
+    private final String expectedProductionSchema;
+    private final String completionTable;
 
     public JavaWriterCandidate(JavaWriterManifest manifest) {
+        this(manifest, false, null);
+    }
+
+    public JavaWriterCandidate(JavaWriterManifest manifest, boolean productionTarget, String expectedProductionSchema) {
         this.manifest = manifest;
         this.names = manifest.tableNames();
+        this.productionTarget = productionTarget;
+        this.expectedProductionSchema = expectedProductionSchema;
+        this.completionTable = productionTarget ? PRODUCTION_COMPLETION_TABLE : DISPOSABLE_COMPLETION_TABLE;
     }
 
     public WriteResult writeRaw(Connection connection, LocalDate session, Path checkpoint,
@@ -187,6 +198,10 @@ public final class JavaWriterCandidate {
     }
 
     public void validateTarget(Connection connection) throws SQLException {
+        if (productionTarget) {
+            validateProductionTarget(connection);
+            return;
+        }
         Map<String, String> metadata = new HashMap<>();
         String sql = "SELECT `key`, `value` FROM " + SqlIdentifiers.quote(METADATA_TABLE, METADATA_TABLE);
         try (PreparedStatement statement = connection.prepareStatement(sql); ResultSet rows = statement.executeQuery()) {
@@ -270,6 +285,46 @@ public final class JavaWriterCandidate {
         }
     }
 
+    private void validateProductionTarget(Connection connection) throws SQLException {
+        String schema = connection.getCatalog();
+        if (schema == null || schema.matches("stockguidance_disposable_[a-z0-9_]{1,39}")
+                || (expectedProductionSchema != null && !schema.equalsIgnoreCase(expectedProductionSchema))) {
+            throw new IllegalArgumentException("Java writer production schema identity mismatch");
+        }
+        Set<String> required = new HashSet<>(names.tables().values());
+        required.add(completionTable);
+        Map<String, String> engines = new HashMap<>();
+        try (PreparedStatement statement = connection.prepareStatement(
+                "SELECT TABLE_NAME, ENGINE FROM information_schema.TABLES WHERE TABLE_SCHEMA = ?")) {
+            statement.setString(1, schema);
+            try (ResultSet rows = statement.executeQuery()) {
+                while (rows.next()) engines.put(rows.getString(1), rows.getString(2));
+            }
+        }
+        for (String table : required) {
+            if (!"InnoDB".equals(engines.get(table))) {
+                throw new IllegalArgumentException("Production migration tables must exist and use InnoDB");
+            }
+        }
+        Map<String, String> columns = new HashMap<>();
+        try (PreparedStatement statement = connection.prepareStatement(
+                "SELECT COLUMN_NAME, COLUMN_TYPE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?")) {
+            statement.setString(1, schema);
+            statement.setString(2, names.prices());
+            try (ResultSet rows = statement.executeQuery()) {
+                while (rows.next()) columns.put(rows.getString(1), rows.getString(2));
+            }
+        }
+        Map<String, String> expected = Map.of(
+                "open", "decimal(28,8)", "high", "decimal(28,8)", "low", "decimal(28,8)",
+                "close", "decimal(28,8)", "volume", "decimal(20,8)", "vwap", "decimal(42,22)");
+        for (Map.Entry<String, String> entry : expected.entrySet()) {
+            if (!entry.getValue().equalsIgnoreCase(columns.get(entry.getKey()))) {
+                throw new IllegalArgumentException("Production raw precision schema does not match the manifest");
+            }
+        }
+    }
+
     private boolean registryMatches(String registry) {
         JsonObject value = JsonSupport.parse(registry);
         Map<String, String> expected = names.tables();
@@ -283,6 +338,7 @@ public final class JavaWriterCandidate {
     }
 
     private void writeMetadata(Connection connection) throws SQLException {
+        if (productionTarget) return;
         upsertMetadata(connection, "candidate_manifest_id", manifest.manifestId());
         if (manifest.sourceKey() != null) upsertMetadata(connection, "candidate_source_key", manifest.sourceKey());
         upsertMetadata(connection, "candidate_schema_hash", manifest.correctedSchemaHash());
@@ -500,14 +556,16 @@ public final class JavaWriterCandidate {
 
     private void upsertImport(Connection connection, LocalDate session, String rawId, String dependencyId, String derivedId) throws SQLException {
         String table = SqlIdentifiers.quote(names.imports(), "imports");
+        String availableAt = TRIAL_RECEIPT;
         if (dependencyId == null && derivedId == null) {
             try (PreparedStatement statement = connection.prepareStatement(
-                    "SELECT raw_id, derived_dependency_id, derived_content_id FROM " + table + " WHERE session_date = ?")) {
+                    "SELECT raw_id, available_at, derived_dependency_id, derived_content_id FROM " + table + " WHERE session_date = ?")) {
                 statement.setObject(1, session);
                 try (ResultSet rows = statement.executeQuery()) {
                     if (rows.next() && rawId.equals(rows.getString(1))) {
-                        dependencyId = rows.getString(2);
-                        derivedId = rows.getString(3);
+                        if (productionTarget && rows.getString(2) != null) availableAt = rows.getString(2);
+                        dependencyId = rows.getString(3);
+                        derivedId = rows.getString(4);
                     }
                 }
             }
@@ -515,7 +573,7 @@ public final class JavaWriterCandidate {
         String update = "UPDATE " + table + " SET raw_id = ?, available_at = ?, derived_dependency_id = ?, derived_content_id = ? WHERE session_date = ?";
         try (PreparedStatement statement = connection.prepareStatement(update)) {
             statement.setString(1, rawId);
-            statement.setString(2, TRIAL_RECEIPT);
+            statement.setString(2, availableAt);
             if (dependencyId == null) statement.setNull(3, Types.VARCHAR); else statement.setString(3, dependencyId);
             if (derivedId == null) statement.setNull(4, Types.VARCHAR); else statement.setString(4, derivedId);
             statement.setObject(5, session);
@@ -525,15 +583,15 @@ public final class JavaWriterCandidate {
         try (PreparedStatement statement = connection.prepareStatement(insert)) {
             statement.setObject(1, session);
             statement.setString(2, rawId);
-            statement.setString(3, TRIAL_RECEIPT);
+            statement.setString(3, availableAt);
             if (dependencyId == null) statement.setNull(4, Types.VARCHAR); else statement.setString(4, dependencyId);
             if (derivedId == null) statement.setNull(5, Types.VARCHAR); else statement.setString(5, derivedId);
             statement.executeUpdate();
         }
     }
 
-    private static void upsertCompletion(Connection connection, String workload, LocalDate session, String seriesKey, String digest) throws SQLException {
-        String table = SqlIdentifiers.quote(COMPLETION_TABLE, COMPLETION_TABLE);
+    private void upsertCompletion(Connection connection, String workload, LocalDate session, String seriesKey, String digest) throws SQLException {
+        String table = SqlIdentifiers.quote(completionTable, completionTable);
         String update = "UPDATE " + table + " SET content_digest = ?, committed_at = ? WHERE workload = ? AND session_date = ? AND series_key = ?";
         try (PreparedStatement statement = connection.prepareStatement(update)) {
             statement.setString(1, digest);
