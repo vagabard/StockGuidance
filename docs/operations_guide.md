@@ -198,13 +198,11 @@ Existing valid rows are reused; rerunning the same day is safe.
 ```powershell
 & $pythonExe -m stockguidance.cli.maintain_daily `
   --data-root data --dbinfo-file dbinfo.id --adjustment adjusted `
-  --publication-delay-minutes '<documented delay>' `
-  --publication-evidence '<publication provenance>' `
   --recent-window-days '<recent correction window>' `
   --recent-refresh-hours '<recent refresh interval>' `
   --archive-refresh-days '<archive refresh interval>' `
   --correction-evidence '<correction provenance>' `
-  --java-manifest output/legacy-migration/benchmark/candidates/manifest.json
+  --java-manifest data/java/production-manifest.json
 ```
 
 The command is read/write and requires the normal provider credential and
@@ -216,6 +214,14 @@ session in the requested range and its archive dependencies; do not use an old
 historical manifest for sessions it does not cover. A nonzero result must be
 investigated before training or simulation. The JSON output records the fixed
 range, downloaded sessions, Java writer reports, and Python validation result.
+The default publication policy is 15 minutes with an explicitly labeled
+operational assumption; override it with `--publication-delay-minutes` and
+`--publication-evidence` when provider-specific evidence is available.
+Correction defaults are a 30-day recent window, refresh-on-every-run for
+recent sessions (`0` hours), and a 30-day archive recheck interval. A session
+means one exchange trading day, not one calendar day. The recent window is the
+last 30 days since each trading session's close; older sessions use the archive
+interval.
 
 The Python package loads the canonical JSON through package resources when no
 external file is selected, so an installed distribution does not depend on its

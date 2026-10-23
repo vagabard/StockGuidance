@@ -15,6 +15,7 @@ from stockguidance.calendar.clock import SystemClock
 
 LOOKBACK_YEARS = 2
 ZSCORE_WINDOWS = (20, 60)
+DEFAULT_JAVA_MANIFEST = "data/java/production-manifest.json"
 
 
 def maintenance_range(as_of: date) -> tuple[date, date]:
@@ -32,7 +33,7 @@ def parser() -> argparse.ArgumentParser:
 	arguments.add_argument("--windows", type=parse_windows, default=ZSCORE_WINDOWS, help="Z-score windows; defaults to 20,60")
 	add_update_policy_arguments(arguments)
 	arguments.add_argument("--initialize-zscore-schema", action="store_true", help="Explicitly create missing selected z-score tables")
-	arguments.add_argument("--java-manifest", help="Stage 6 production manifest used by the Java derived/z-score writers")
+	arguments.add_argument("--java-manifest", default=DEFAULT_JAVA_MANIFEST, help="Production manifest used by the Java derived/z-score writers")
 	arguments.add_argument("--java-checkpoint-directory", default="output/daily-maintenance/java", help="Resume/checkpoint directory for Java writers")
 	return arguments
 

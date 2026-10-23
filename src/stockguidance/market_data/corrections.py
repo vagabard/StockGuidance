@@ -14,8 +14,8 @@ class CorrectionPolicy:
 
 	def __post_init__(self) -> None:
 		require_text(self.provenance, "correction policy provenance")
-		if any(not isinstance(value, timedelta) or value <= timedelta(0) for value in (self.recent_window, self.recent_recheck, self.archive_recheck)):
-			raise ValueError("Correction windows and recheck intervals must be positive")
+		if not isinstance(self.recent_window, timedelta) or self.recent_window <= timedelta(0) or not isinstance(self.recent_recheck, timedelta) or self.recent_recheck < timedelta(0) or not isinstance(self.archive_recheck, timedelta) or self.archive_recheck <= timedelta(0):
+			raise ValueError("Correction window and archive interval must be positive; recent interval may be zero")
 
 	def refresh_due(self, session: TradingSession, verified_at: datetime, now: datetime) -> bool:
 		interval = self.recent_recheck if now - session.closes_at <= self.recent_window else self.archive_recheck

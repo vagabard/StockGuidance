@@ -2,6 +2,20 @@ from datetime import date
 from types import SimpleNamespace
 
 from stockguidance.cli.maintain_daily import LOOKBACK_YEARS, ZSCORE_WINDOWS, maintenance_range, maintain, parser
+from stockguidance.cli.update_arguments import DEFAULT_ARCHIVE_REFRESH_DAYS, DEFAULT_CORRECTION_EVIDENCE, DEFAULT_PUBLICATION_DELAY_MINUTES, DEFAULT_PUBLICATION_EVIDENCE, DEFAULT_RECENT_REFRESH_HOURS, DEFAULT_RECENT_WINDOW_DAYS
+
+
+def test_daily_publication_policy_has_overridable_defaults():
+	arguments = parser().parse_args([
+		"--recent-window-days", "30", "--recent-refresh-hours", "1", "--archive-refresh-days", "30",
+		"--correction-evidence", "operator policy",
+	])
+	assert arguments.publication_delay_minutes == DEFAULT_PUBLICATION_DELAY_MINUTES
+	assert arguments.publication_evidence == DEFAULT_PUBLICATION_EVIDENCE
+	assert arguments.recent_window_days == DEFAULT_RECENT_WINDOW_DAYS
+	assert arguments.recent_refresh_hours == DEFAULT_RECENT_REFRESH_HOURS
+	assert arguments.archive_refresh_days == DEFAULT_ARCHIVE_REFRESH_DAYS
+	assert arguments.correction_evidence == DEFAULT_CORRECTION_EVIDENCE
 
 
 def test_maintenance_range_uses_two_calendar_years_and_handles_leap_day():
