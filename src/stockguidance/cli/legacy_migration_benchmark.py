@@ -35,6 +35,7 @@ def parser() -> argparse.ArgumentParser:
 	mode.add_argument("--run-stage11b", action="store_true")
 	mode.add_argument("--run-stage12", action="store_true")
 	mode.add_argument("--run-stage13", action="store_true")
+	mode.add_argument("--run-stage14", action="store_true")
 	arguments.add_argument("--data-root", type=_path, default=Path("data"))
 	arguments.add_argument("--dbinfo-file", type=_path, default=Path("dbinfo.id"))
 	arguments.add_argument("--evaluation-plan", type=_path, default=Path("output/legacy-migration/evaluation-plan.json"))
@@ -92,6 +93,17 @@ def parser() -> argparse.ArgumentParser:
 	arguments.add_argument("--stage13-chunk-size", type=int, default=20)
 	arguments.add_argument("--stage13-java-timeout-seconds", type=float, default=7200.0)
 	arguments.add_argument("--stage13-no-resume", action="store_true")
+	arguments.add_argument("--stage14-stage13-report", type=_path, default=Path("output/legacy-migration/population.json"))
+	arguments.add_argument("--stage14-stage13-manifest", type=_path, default=Path("output/legacy-migration/stage13/population-manifest.json"))
+	arguments.add_argument("--stage14-stage12-report", type=_path, default=Path("output/legacy-migration/stage12.json"))
+	arguments.add_argument("--stage14-snapshot", type=_path, default=Path("output/legacy-migration/snapshot.json"))
+	arguments.add_argument("--stage14-output", type=_path, default=Path("output/legacy-migration/zscores.json"))
+	arguments.add_argument("--stage14-chunk-size", type=int, default=20)
+	arguments.add_argument("--stage14-java-timeout-seconds", type=float, default=7200.0)
+	arguments.add_argument("--stage14-audit-limit", type=int, default=3)
+	arguments.add_argument("--stage14-audit-seed", type=int, default=20261022)
+	arguments.add_argument("--stage14-max-chunks", type=int)
+	arguments.add_argument("--stage14-no-resume", action="store_true")
 	return arguments
 
 
@@ -208,6 +220,17 @@ def main(argv: Sequence[str] | None = None) -> int:
 			print(json.dumps({"successful": False, "error": "Stage 13 population failed", "detail": str(error)}))
 			return 1
 		print(json.dumps({"successful": report["status"] == "complete", "operation": "run_stage13", "report": str(_resolve(arguments.stage13_output)), "status": report["status"], "coverage": report.get("coverage")}))
+		return 0 if report["status"] == "complete" else 1
+	if arguments.run_stage14:
+		from stockguidance.performance.stage14 import Stage14Error, run_stage14, validate_prerequisites
+
+		try:
+			context = validate_prerequisites(_resolve(arguments.stage10_output), _resolve(arguments.stage14_stage12_report), _resolve(arguments.stage14_stage13_report), _resolve(arguments.stage14_stage13_manifest), _resolve(arguments.stage14_snapshot))
+			report = run_stage14(context, _resolve(arguments.dbinfo_file), _resolve(arguments.stage14_output), chunk_size=arguments.stage14_chunk_size, java_timeout=arguments.stage14_java_timeout_seconds, resume=not arguments.stage14_no_resume, audit_limit=arguments.stage14_audit_limit, audit_seed=arguments.stage14_audit_seed, max_chunks=arguments.stage14_max_chunks)
+		except (OSError, Stage14Error, TypeError, ValueError) as error:
+			print(json.dumps({"successful": False, "error": "Stage 14 z-score population failed", "detail": str(error)}))
+			return 1
+		print(json.dumps({"successful": report["status"] == "complete", "operation": "run_stage14", "report": str(_resolve(arguments.stage14_output)), "status": report["status"], "coverage": report.get("coverage")}))
 		return 0 if report["status"] == "complete" else 1
 	if arguments.run_java_writer_trial:
 		from stockguidance.performance.java_writer_trial import run_trial

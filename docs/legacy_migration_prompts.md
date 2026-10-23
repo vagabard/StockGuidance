@@ -1775,3 +1775,41 @@ comparison. See `docs/stage9c_execution.md` for phase-specific commands.
   returned `status=complete` without new work, confirming idempotency.
 - Focused validation passed: 20 Python Stage 10–13 tests. No commit was
   created. Next prompt: execute Stage 14 only.
+
+### Stage 14 bounded z-score population — 2026-10-22
+
+- Stage 14 prerequisites passed: the frozen Stage 10 decision selects Java
+  for z-score persistence, Stage 12 is complete with production DML enabled,
+  Stage 13 is complete with its manifest and raw/derived receipts verified,
+  and the Stage 5d adopted archive snapshot is bound to the operation.
+- Added `stockguidance.performance.stage14` and the guarded `--run-stage14`
+  frontend. The deterministic manifest covers all 4,898 valid archive
+  sessions, both `price` and `price_delta` families, windows 20 and 60, and
+  60 preceding exchange sessions. It records per-series/session counts,
+  hashes, statuses, null semantics, and local snapshot provenance.
+- The authoritative current ticker registry contains 40,066 mappings. The
+  Stage 14 manifest binds those current exact-case mappings while preserving
+  the Stage 13 identities. An initial stale-manifest attempt was rejected at
+  36,866 tickers; its checkpoints remain isolated under
+  `output/legacy-migration/stage14/java-checkpoints`, and the corrected run
+  uses `output/legacy-migration/stage14/java-checkpoints-e8bf99777f96`.
+- The authorized bounded operation completed one 20-session chunk: 80 series,
+  3,205,280 rows, and 811.2442815 seconds. It used one writer, Java
+  `-Xmx512m`, one native thread, and the production entry point. Invalid
+  archive dependencies remain explicit unverified/null results; no synthetic
+  replacements were introduced.
+- The durable report is `output/legacy-migration/zscores.json` with SHA-256
+  `9cb29f72f734fb5300ed53cfbab5ac498d80d62c5c19df49c1d001803e0661de` and
+  `status=partial`, `production_ready=false`; its manifest is
+  `output/legacy-migration/stage14/zscore-manifest.json` with SHA-256
+  `5a5a47b5858ed2ba98575be4164340d79181b75ea96da9c25bac5203a4a83beb` and
+  manifest ID
+  `e8bf99777f967c2688d7d3ebfaf938c12fc4a7ebd1ff977121572b55d8f305f7`.
+  The completed Java chunk report is
+  `output/legacy-migration/stage14/java-reports/chunk-0000.json` with SHA-256
+  `b5d905f808689dcd5a6df2fb440844f434d460ec7b3f6d5cc9d38af8b851cac8`.
+- Remaining scope is 4,878 sessions and 19,512 series. Focused Stage 14 tests,
+  `py_compile`, and mypy passed; the existing Java suite passed all 53 tests.
+  No commit was created. Stage 14 is not complete, so the next prompt must
+  resume Stage 14 from its durable chunk report rather than advance to Stage
+  15.

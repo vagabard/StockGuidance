@@ -22,6 +22,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Types;
 import java.time.LocalDate;
+import java.time.Instant;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -42,6 +43,10 @@ public final class JavaZScoreCandidate {
     private static final double RELATIVE_TOLERANCE = 1e-10;
     private static final double ABSOLUTE_TOLERANCE = 1e-12;
     private static final int CHUNK_SIZE = 1000;
+
+    private String publicationReceipt() {
+        return productionTarget ? Instant.now().toString() : TRIAL_RECEIPT;
+    }
 
     private final JavaWriterManifest manifest;
     private final TableNames names;
@@ -434,7 +439,7 @@ public final class JavaZScoreCandidate {
             statement.setString(1, key); statement.setInt(2, 1); statement.setString(3, manifest.sourceScope());
             statement.setString(4, manifest.calendarId()); statement.setString(5, family.value); statement.setInt(6, window);
             statement.setString(7, CALCULATION_VERSION); statement.setString(8, deltaDefinition(family));
-            statement.setString(9, PRECISION); statement.setString(10, MISSING_VALUE_POLICY); statement.setString(11, TRIAL_RECEIPT);
+            statement.setString(9, PRECISION); statement.setString(10, MISSING_VALUE_POLICY); statement.setString(11, publicationReceipt());
             statement.executeUpdate();
         }
         return key;
@@ -468,7 +473,7 @@ public final class JavaZScoreCandidate {
         try (PreparedStatement insert = connection.prepareStatement("INSERT INTO " + metadata + " (series_key, date_id, dependency_digest, availability_digest, actual_input_available, completed_at, row_count, ready_count, status_counts, content_digest) VALUES (?,?,?,?,?,?,?,?,?,?)")) {
             insert.setString(1, seriesKey); insert.setLong(2, snapshot.dateId); insert.setString(3, snapshot.dependencyDigest);
             insert.setString(4, snapshot.availabilityDigest); insert.setBoolean(5, snapshot.actualInputAvailable);
-            insert.setString(6, TRIAL_RECEIPT); insert.setInt(7, snapshot.rows.size()); insert.setInt(8, snapshot.readyCount);
+            insert.setString(6, publicationReceipt()); insert.setInt(7, snapshot.rows.size()); insert.setInt(8, snapshot.readyCount);
             insert.setString(9, serialized); insert.setString(10, snapshot.contentDigest); insert.executeUpdate();
         }
     }
@@ -638,7 +643,7 @@ public final class JavaZScoreCandidate {
         JsonObject value = JsonSupport.object(); value.put("schema_version", 1);
         value.put("manifest_id", manifest.manifestId()); value.put("workload", "zscores"); value.put("family", family.value);
         value.put("window", window); value.put("session", session.toString()); value.put("content_digest", digest);
-        value.put("after_commit", true); value.put("committed_at", TRIAL_RECEIPT);
+        value.put("after_commit", true); value.put("committed_at", publicationReceipt());
         try {
             Path parent = checkpoint.toAbsolutePath().normalize().getParent();
             if (parent != null) Files.createDirectories(parent);
