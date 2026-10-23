@@ -449,6 +449,7 @@ def _adopt_raw_session(
 	adoption_time: str,
 	affected_derived: set[str],
 	affected_zscores: set[str],
+	cutoff: str | None = None,
 ) -> dict[str, Any]:
 	item = _file_item(context.manifest, session)
 	path = Path(str(item["path"])).resolve()
@@ -507,6 +508,7 @@ def _adopt_raw_session(
 					raise Stage12Error(f"Derived dependency mapping is not unique: {affected}")
 				cursor.execute(f"DELETE FROM {_quote(names.deltas)} WHERE date_id=%s", (int(rows[0][0]),))
 				cursor.execute(f"UPDATE {_quote(names.imports)} SET derived_dependency_id=NULL,derived_content_id=NULL WHERE session_date=%s", (affected,))
+				cursor.execute(f"DELETE FROM {_quote(MIGRATION_COMPLETION)} WHERE workload='derived' AND session_date=%s", (affected,))
 			for affected in sorted(affected_zscores):
 				cursor.execute(f"SELECT id FROM {_quote(names.sessions)} WHERE transaction_date=%s FOR UPDATE", (affected,))
 				rows = cursor.fetchall()
@@ -529,11 +531,12 @@ def _adopt_raw_session(
 		cursor.execute(f"SELECT adopted_at,content_digest FROM {_quote(MIGRATION_RECEIPTS)} WHERE session_date=%s FOR UPDATE", (session,))
 		old_receipt = cursor.fetchone()
 		receipt_time = str(old_receipt[0]) if old_receipt is not None and old_receipt[1] == content else adoption_time
-		receipt_values = (session, context.manifest["manifest_id"], context.manifest["snapshot_identity"]["source_key"], evidence.source.provider, str(path), file_hash, records_id, len(bars), PROVENANCE_KIND, receipt_time, None, adoption_time, evidence.evidence_id, content)
+		cutoff_value = cutoff or adoption_time
+		receipt_values = (session, context.manifest["manifest_id"], context.manifest["snapshot_identity"]["source_key"], evidence.source.provider, str(path), file_hash, records_id, len(bars), PROVENANCE_KIND, receipt_time, None, cutoff_value, evidence.evidence_id, content)
 		if old_receipt is None:
 			cursor.execute(f"INSERT INTO {_quote(MIGRATION_RECEIPTS)} (session_date,manifest_id,source_key,source_provider,source_path,file_sha256,records_id,record_count,provenance_kind,adopted_at,original_receipt_at,cutoff,evidence_id,content_digest) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)", receipt_values)
 		else:
-			cursor.execute(f"UPDATE {_quote(MIGRATION_RECEIPTS)} SET manifest_id=%s,source_key=%s,source_provider=%s,source_path=%s,file_sha256=%s,records_id=%s,record_count=%s,provenance_kind=%s,adopted_at=%s,original_receipt_at=NULL,cutoff=%s,evidence_id=%s,content_digest=%s WHERE session_date=%s", (context.manifest["manifest_id"], context.manifest["snapshot_identity"]["source_key"], evidence.source.provider, str(path), file_hash, records_id, len(bars), PROVENANCE_KIND, receipt_time, adoption_time, evidence.evidence_id, content, session))
+			cursor.execute(f"UPDATE {_quote(MIGRATION_RECEIPTS)} SET manifest_id=%s,source_key=%s,source_provider=%s,source_path=%s,file_sha256=%s,records_id=%s,record_count=%s,provenance_kind=%s,adopted_at=%s,original_receipt_at=NULL,cutoff=%s,evidence_id=%s,content_digest=%s WHERE session_date=%s", (context.manifest["manifest_id"], context.manifest["snapshot_identity"]["source_key"], evidence.source.provider, str(path), file_hash, records_id, len(bars), PROVENANCE_KIND, receipt_time, cutoff_value, evidence.evidence_id, content, session))
 		cursor.execute(f"SELECT content_digest FROM {_quote(MIGRATION_COMPLETION)} WHERE workload='raw' AND session_date=%s AND series_key='raw-adoption-v1' FOR UPDATE", (session,))
 		completion = cursor.fetchone()
 		if completion is None:
@@ -541,7 +544,7 @@ def _adopt_raw_session(
 		elif completion[0] != records_id:
 			cursor.execute(f"UPDATE {_quote(MIGRATION_COMPLETION)} SET content_digest=%s,committed_at=%s WHERE workload='raw' AND session_date=%s AND series_key='raw-adoption-v1'", (records_id, adoption_time, session))
 		connection.commit()
-		return {"session": session, "record_count": len(bars), "records_id": records_id, "content_digest": content, "changed_rows": changed, "new_tickers": len(new_ids), "receipt_adopted_at": receipt_time, "committed": True}
+		return {"session": session, "record_count": len(bars), "original_row_count": len(stored), "current_row_count": len(bars), "records_id": records_id, "content_digest": content, "changed_rows": changed, "new_tickers": len(new_ids), "repaired": changed > 0, "matching": changed == 0, "receipt_adopted_at": receipt_time, "cutoff": cutoff_value, "committed": True}
 	except Exception:
 		connection.rollback()
 		raise

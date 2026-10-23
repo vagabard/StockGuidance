@@ -1745,3 +1745,33 @@ comparison. See `docs/stage9c_execution.md` for phase-specific commands.
 - Focused validation passed: 11 Python Stage 10–12 tests, 7 focused Stage 5/
   Stage 12 schema tests, and `mvn -o test` passed all 53 Java tests. No commit
   was created. Next prompt: execute Stage 13 only.
+
+### Stage 13 retained raw/derived population — 2026-10-22
+
+- Stage 12 prerequisites passed with `status=complete` and
+  `production_ready=true`. The Stage 10 decision, retained-history manifest,
+  Stage 5 audit, precision inventory, Stage 11b recovery report, and Stage 12
+  report were revalidated by SHA-256 before the run.
+- Added `stockguidance.performance.stage13` and the guarded `--run-stage13`
+  frontend. The deterministic population manifest covers all 4,898 valid
+  archive sessions, preserves 232 invalid files and 5 missing-neighbor
+  dependencies as explicit unresolved scope, uses Python for raw and Java for
+  derived data, limits chunks to 20 sessions, and keeps one writer with
+  durable per-chunk completion markers and database-revision checks.
+- The authorized bounded run completed through cutoff
+  `2026-10-21T23:59:00-06:00`: 4,898 raw sessions and 4,893 derived sessions
+  were reconciled. It adopted 42,482,212 raw records and wrote 42,431,753
+  derived rows; original raw rows were 42,433,101 and current raw rows are
+  42,482,212. Receipt counts match the completed raw and derived scopes;
+  4,818 sessions were repaired and 80 matched. Original ticker and date
+  mapping identities were retained. No synthetic dependency replacements or
+  z-score rows were produced.
+- The acceptance report is `output/legacy-migration/population.json` with
+  SHA-256 `d342d7149315f861be1795a47d66e000a71441f0379eb7839b02e79456a24c7a`;
+  its population manifest is
+  `output/legacy-migration/stage13/population-manifest.json` with SHA-256
+  `a075a546357e4df9b2b24d3ae4e1fee8485747f0488f64bd437dcc34337c3552`.
+  Both the initial resumed completion and the identical second invocation
+  returned `status=complete` without new work, confirming idempotency.
+- Focused validation passed: 20 Python Stage 10–13 tests. No commit was
+  created. Next prompt: execute Stage 14 only.
