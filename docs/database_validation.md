@@ -91,6 +91,16 @@ converted to zero. Windows count exchange sessions, and the delta family uses
 the stored prior-close ratio minus one. A current cutoff cannot reconstruct an
 overwritten source revision or its original receipt evidence.
 
+Production training and simulation reads enforce the retained-data floor
+`2006-11-16` for the canonical Polygon/Massive source family. They also request
+the status guardian for z-score windows `20` and `60` while inspecting each
+bounded date range. Any row whose status is not `0` emits a `DataValidityWarning`
+with its family, window, date, status, and row count. The warning is advisory and
+does not rewrite, interpolate, or silently exclude a row; operators must decide
+whether to adjust the requested range or investigate the materialization. Other
+source families and optional z-score validation without an explicit guardian
+remain unaffected.
+
 Add `--as-of '<timezone-aware ISO timestamp>'` for a historical cutoff no later than the current/injected clock. Queries never cross supported history or include unfinished/unpublished sessions. Importing old bars today does not prove availability at a historical decision. Validation does not reconstruct earlier revisions of corrected data.
 
 Add `--format json` for machine-readable output. Redirect stdout to save a report; validation itself does not persist one:

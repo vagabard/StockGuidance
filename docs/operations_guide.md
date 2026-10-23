@@ -180,6 +180,12 @@ names and generated DDL have been reviewed.
    results before a rebuild, reports NULL/status outcomes explicitly, and keeps
    z-score findings out of raw/delta repair authorization.
 
+Training and simulation use the same database read boundary. For the canonical
+Polygon/Massive source, that boundary rejects requested sessions before
+`2006-11-16` and runs an advisory guardian over z-score status rows for windows
+`20` and `60`. Non-ready statuses are reported as `DataValidityWarning`; they
+are never replaced with interpolated values or zeroes.
+
 The Python package loads the canonical JSON through package resources when no
 external file is selected, so an installed distribution does not depend on its
 working directory. The Java build copies that same source JSON into Java

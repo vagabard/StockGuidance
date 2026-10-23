@@ -8,6 +8,7 @@ from stockguidance.database.repositories.eligibility import VerifiedEligibilityR
 from stockguidance.database.repositories.mysql_validation import MySQLValidationRepository
 from stockguidance.database.repositories.verified_closes import VerifiedCloseRepository
 from stockguidance.database.repositories.signals import SignalRepository
+from stockguidance.database.validity import enforce_minimum_valid_session
 from stockguidance.database.connections import MySQLConnectionFactory
 from stockguidance.database.configuration import load_database_configuration
 from stockguidance.market_data.history import UnknownHistoryBoundary
@@ -28,6 +29,8 @@ def assemble_and_simulate(configuration: SimulationConfiguration, arguments: Sim
 	boundary = JsonHistoryStore(configuration.source.data_root / "history").load(configuration.source.identity)
 	if boundary is None:
 		raise UnknownHistoryBoundary("Simulation requires evidenced, persisted source history")
+	requested_start = configuration.start if configuration.retraining is None else min(configuration.start, configuration.retraining.start)
+	enforce_minimum_valid_session(configuration.source, requested_start)
 	if (configuration.retraining is not None) != (arguments.model_policy is EvaluationPolicy.CHRONOLOGICAL_RETRAIN):
 		raise ValueError("Model policy and training configuration differ")
 	calendar = ExchangeCalendar(boundary.calendar_id, min(boundary.history_start, configuration.anchor_date) - timedelta(days=14), configuration.end + timedelta(days=14))
@@ -40,7 +43,7 @@ def assemble_and_simulate(configuration: SimulationConfiguration, arguments: Sim
 		raise ValueError("Execution audit cutoff must include the evaluation end close")
 	request = SimulationRequest(configuration.source.identity, configuration.features, TargetSpec(), AllocationSpec(configuration.allocation_policy, calendar.session(configuration.anchor_date)), configuration.start, configuration.end, configuration.initial_capital, configuration.decision_lead, configuration.eligibility, configuration.top_k, configuration.execution, configuration.availability_policy, configuration.data_snapshot)
 	table_names = load_database_configuration(configuration.source.database_config).load_table_names()
-	closes = VerifiedCloseRepository(configuration.source, MySQLValidationRepository(configuration.source, MySQLConnectionFactory(), table_names))
+	closes = VerifiedCloseRepository(configuration.source, MySQLValidationRepository(configuration.source, MySQLConnectionFactory(), table_names, (20, 60)))
 	signals = HistoricalSignals(boundary, calendar, configuration.publication, SignalRepository(closes, OpeningStore(configuration.source.data_root)), VerifiedEligibilityRepository(closes), configuration.availability_policy, configuration.data_snapshot)
 	scores: ScoreSource
 	if EvaluationPolicy(arguments.model_policy) is EvaluationPolicy.FIXED:

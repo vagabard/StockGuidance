@@ -14,6 +14,7 @@ from stockguidance.config.validation import require_aware_datetime
 from stockguidance.database.repositories.mysql_validation import MySQLValidationRepository
 from stockguidance.database.repositories.verified_closes import VerifiedCloseRepository
 from stockguidance.database.repositories.closes import CloseRepository
+from stockguidance.database.validity import enforce_minimum_valid_session
 from stockguidance.database.repositories.signals import SignalRepository
 from stockguidance.database.connections import MySQLConnectionFactory
 from stockguidance.database.configuration import load_database_configuration
@@ -101,6 +102,7 @@ def open_job_history(job: TrainingJob, *, connect: WriteConnectionFactory | None
 	boundary = JsonHistoryStore(job.source.data_root / "history").load(job.source.identity)
 	if boundary is None:
 		raise UnknownHistoryBoundary("Training requires evidenced, persisted source history")
+	enforce_minimum_valid_session(job.source, min(job.start, job.evaluation_start or job.start))
 	end = max(job.end, job.evaluation_end or job.end)
 	calendar = ExchangeCalendar(boundary.calendar_id, boundary.history_start - timedelta(days=14), end + timedelta(days=14))
 	if job.start < boundary.history_start:
@@ -111,7 +113,7 @@ def open_job_history(job: TrainingJob, *, connect: WriteConnectionFactory | None
 
 	evaluation_decisions = () if job.evaluation_start is None or job.evaluation_end is None else decisions(job.evaluation_start, job.evaluation_end)
 	table_names = load_database_configuration(job.source.database_config).load_table_names()
-	repository = VerifiedCloseRepository(job.source, MySQLValidationRepository(job.source, connect or MySQLConnectionFactory(), table_names))
+	repository = VerifiedCloseRepository(job.source, MySQLValidationRepository(job.source, connect or MySQLConnectionFactory(), table_names, (20, 60)))
 	return JobHistory(boundary, calendar, SignalRepository(repository, OpeningStore(job.source.data_root)), repository, decisions(job.start, job.end), evaluation_decisions)
 
 
