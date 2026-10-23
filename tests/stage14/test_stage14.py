@@ -24,13 +24,13 @@ def _base_manifest(count: int = 61) -> dict:
 	return {"schema_version": 1, "stage": 6, "files": files, "targets": targets}
 
 
-def test_build_zscore_manifest_uses_chronological_60_session_context():
+def test_build_zscore_manifest_uses_60_observations_plus_raw_predecessor():
 	manifest, scope = build_zscore_manifest(_base_manifest())
 
 	assert scope["requested_sessions"] == 61
 	assert manifest["targets"][0]["zscore_dependencies"] == ["2020-01-02"]
 	assert len(manifest["targets"][59]["zscore_dependencies"]) == 60
-	assert len(manifest["targets"][60]["zscore_dependencies"]) == 60
+	assert len(manifest["targets"][60]["zscore_dependencies"]) == 61
 	assert manifest["targets"][60]["zscore_dependencies"][-1] == "2020-03-02"
 	assert manifest["manifest_id"] == content_id({key: value for key, value in manifest.items() if key != "manifest_id"})
 

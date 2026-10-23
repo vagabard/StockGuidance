@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from contextlib import contextmanager
+from functools import wraps
 from hashlib import sha256
 import json
 import math
@@ -9,8 +11,9 @@ from pathlib import Path
 import random
 import struct
 import subprocess
+import sys
 from time import perf_counter
-from typing import Any, Iterable, cast
+from typing import Any, Callable, Iterable, Iterator, cast
 
 from stockguidance.database.configuration import load_database_configuration
 from stockguidance.database.table_names import TableNames, quote_identifier
@@ -30,6 +33,49 @@ STATUS_PRIORITY = {1: 1, 2: 2, 3: 3, 4: 4}
 
 class Stage14Error(ValueError):
 	pass
+
+
+@contextmanager
+def _output_lock(output: Path) -> Iterator[None]:
+	lock_path = output.resolve().parent / "stage14" / "run.lock"
+	lock_path.parent.mkdir(parents=True, exist_ok=True)
+	with lock_path.open("a+b") as stream:
+		if sys.platform == "win32":
+			import msvcrt
+			try:
+				stream.seek(0)
+				msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+			except OSError as error:
+				raise Stage14Error("Another Stage 14 coordinator holds the run lock") from error
+			try:
+				yield
+			finally:
+				stream.seek(0)
+				msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+		else:
+			import fcntl
+			try:
+				fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+			except OSError as error:
+				raise Stage14Error("Another Stage 14 coordinator holds the run lock") from error
+			try:
+				yield
+			finally:
+				fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+
+
+def _exclusive_output(function: Callable[..., dict[str, Any]]) -> Callable[..., dict[str, Any]]:
+	@wraps(function)
+	def locked(context: Stage14Context, dbinfo_file: Path, output: Path, **kwargs: Any) -> dict[str, Any]:
+		with _output_lock(output):
+			try:
+				return function(context, dbinfo_file, output, **kwargs)
+			except BaseException:
+				close = getattr(kwargs.get("java_runner"), "close", None)
+				if close is not None:
+					close()
+				raise
+	return locked
 
 
 @dataclass(frozen=True)
@@ -122,7 +168,7 @@ def build_zscore_manifest(base: dict[str, Any]) -> tuple[dict[str, Any], dict[st
 		base_target = base_targets.get(session)
 		if base_target is None:
 			raise Stage14Error(f"Stage 13 target is missing: {session}")
-		dependencies = [str(value["session"]) for value in files[max(0, index - MAX_WINDOW + 1):index + 1]]
+		dependencies = [str(value["session"]) for value in files[max(0, index - MAX_WINDOW):index + 1]]
 		targets.append({
 			"session": session,
 			"roles": ["retained_history"],
@@ -135,7 +181,7 @@ def build_zscore_manifest(base: dict[str, Any]) -> tuple[dict[str, Any], dict[st
 	manifest["target_blocks"] = {"zscore": list(valid_sessions)}
 	manifest["zscore_population"] = {
 		"stage": 14, "families": list(FAMILIES), "windows": list(WINDOWS),
-		"dependency_sessions": MAX_WINDOW, "requested_sessions": len(valid_sessions),
+		"dependency_sessions": MAX_WINDOW + 1, "requested_sessions": len(valid_sessions),
 		"invalid_archive_sessions": len(files) - len(valid_sessions),
 	}
 	manifest["manifest_id"] = content_id(manifest)
@@ -145,6 +191,19 @@ def build_zscore_manifest(base: dict[str, Any]) -> tuple[dict[str, Any], dict[st
 		"minimum_dependency_count": min(len(item["zscore_dependencies"]) for item in targets),
 		"maximum_dependency_count": max(len(item["zscore_dependencies"]) for item in targets),
 	}
+
+
+def _validate_pipeline_dependencies(manifest: dict[str, Any]) -> None:
+	files = tuple(str(item["session"]) for item in manifest["files"])
+	positions = {session: index for index, session in enumerate(files)}
+	for target in manifest["targets"]:
+		session = str(target["session"])
+		index = positions[session]
+		if index >= MAX_WINDOW:
+			needed = files[index - MAX_WINDOW:index + 1]
+			actual = tuple(str(value) for value in target["zscore_dependencies"])
+			if actual[-len(needed):] != needed:
+				raise Stage14Error(f"Dependency correction required before pipeline publication: {session} needs 61 raw sessions to validate 60 price_delta inputs; the existing manifest/checkpoint needs review")
 
 
 def validate_prerequisites(
@@ -482,6 +541,20 @@ def _audit_selection(sessions: tuple[str, ...], chunk_size: int, seed: int, limi
 	return tuple(dict.fromkeys(selected))
 
 
+def _mark_dependency_repair(state: dict[str, Any]) -> None:
+	migration = state.get("dependency_migration")
+	if not migration:
+		return
+	history = Path(migration["history"])
+	old = _json(history / "zscores.json")
+	previous = {str(session) for chunk in old["chunks"] for session in chunk["sessions"]}
+	completed = {str(session) for chunk in state["chunks"] for session in chunk["sessions"]}
+	if previous <= completed:
+		migration["status"] = "repaired"
+		migration.setdefault("repaired_at", datetime.now().astimezone().isoformat())
+
+
+@_exclusive_output
 def run_stage14(
 	context: Stage14Context,
 	dbinfo_file: Path,
@@ -493,6 +566,12 @@ def run_stage14(
 	audit_limit: int = 3,
 	audit_seed: int = 20261022,
 	max_chunks: int | None = None,
+	java_runner: Callable[..., dict[str, Any]] | None = None,
+	pipeline_configuration: dict[str, Any] | None = None,
+	on_chunk_complete: Callable[[dict[str, Any]], None] | None = None,
+	batch_manager: Any = None,
+	allow_dependency_migration: bool = False,
+	prepare_only: bool = False,
 ) -> dict[str, Any]:
 	if type(chunk_size) is not int or chunk_size < 1 or chunk_size > MAX_CHUNK_SIZE:
 		raise Stage14Error("Stage 14 chunk size must be between one and twenty sessions")
@@ -501,11 +580,11 @@ def run_stage14(
 	if max_chunks is not None and (type(max_chunks) is not int or max_chunks < 1):
 		raise Stage14Error("Stage 14 maximum chunk count must be positive")
 	manifest, scope = build_zscore_manifest(context.stage13_manifest)
+	if pipeline_configuration is not None:
+		_validate_pipeline_dependencies(manifest)
 	output = output.resolve()
 	stage_directory = output.parent / "stage14"
-	report_directory = stage_directory / "java-reports"
 	stage_directory.mkdir(parents=True, exist_ok=True)
-	report_directory.mkdir(parents=True, exist_ok=True)
 	manifest_path = stage_directory / "zscore-manifest.json"
 	names = _manifest_names(manifest)
 	production = load_database_configuration(dbinfo_file)
@@ -530,14 +609,21 @@ def run_stage14(
 	manifest["mappings"] = dict(manifest.get("mappings", {}))
 	manifest["mappings"]["ticker_mappings"] = [{"id": identifier, "label": label} for identifier, label in current_tickers]
 	manifest["manifest_id"] = content_id({key: value for key, value in manifest.items() if key != "manifest_id"})
+	state = _json(output) if resume and output.exists() else None
+	if state is not None and state.get("manifest_id") != manifest["manifest_id"]:
+		if not allow_dependency_migration:
+			raise Stage14Error("Dependency manifest changed; use the migration-aware Stage 14 runner")
+		from stockguidance.performance.stage14_batches import migrate_dependencies
+		state = migrate_dependencies(state, _json(manifest_path), manifest, output, revision)
 	_write_json(manifest_path, manifest)
+	report_directory = stage_directory / f"java-reports-{manifest['manifest_id'][:12]}" if pipeline_configuration is not None else stage_directory / "java-reports"
+	report_directory.mkdir(parents=True, exist_ok=True)
 	checkpoint_directory = stage_directory / f"java-checkpoints-{manifest['manifest_id'][:12]}"
 	checkpoint_directory.mkdir(parents=True, exist_ok=True)
 	ticker_count = len(current_tickers)
 	sessions = tuple(str(item["session"]) for item in manifest["targets"])
 	if not sessions or ticker_count < 1:
 		raise Stage14Error("Stage 14 has no requested sessions or retained ticker IDs")
-	state: dict[str, Any] | None = None
 	if resume and output.exists():
 		state = _json(output)
 		if state.get("schema_version") != STAGE14_SCHEMA_VERSION or state.get("stage") != 14 or state.get("manifest_id") != manifest["manifest_id"]:
@@ -557,13 +643,22 @@ def run_stage14(
 			"schema_version": STAGE14_SCHEMA_VERSION, "stage": 14, "status": "running", "production_ready": False,
 			"manifest_id": manifest["manifest_id"], "manifest_sha256": _sha256(manifest_path),
 			"prerequisites": {"decision_sha256": context.decision_sha256, "stage12_sha256": context.stage12_sha256, "stage13_sha256": context.stage13_sha256, "stage13_manifest_sha256": context.stage13_manifest_sha256, "snapshot_sha256": context.snapshot_sha256, "snapshot_cutoff": context.snapshot["cutoff"]},
-			"configuration": {"backend": "java", "families": list(FAMILIES), "windows": list(WINDOWS), "dependency_sessions": MAX_WINDOW, "chunk_size": chunk_size, "preparers": 1, "writers": 1, "java_heap": "-Xmx512m", "native_threads": 1},
+			"configuration": {"backend": "java", "families": list(FAMILIES), "windows": list(WINDOWS), "dependency_sessions": MAX_WINDOW + 1, "chunk_size": chunk_size, "preparers": 1, "writers": 1, "java_heap": "-Xmx512m", "native_threads": 1},
 			"scope": {"requested_sessions": len(sessions), "invalid_archive_sessions": scope["invalid_archive_sessions"], "ticker_count": ticker_count, "minimum_dependency_count": scope["minimum_dependency_count"], "maximum_dependency_count": scope["maximum_dependency_count"]},
 			"database_revision_before": revision, "database_revision_after": revision, "chunks": [], "series": [],
 		}
 	else:
 		state["configuration"]["chunk_size"] = chunk_size
+	if pipeline_configuration is not None:
+		state["configuration"].update(pipeline_configuration)
+	if batch_manager is not None:
+		batch_manager.initialize(manifest, state, checkpoint_directory, chunk_size)
+		batch_manager.recover(state)
+	if prepare_only:
+		_write_json(output, state)
+		return state
 	completed_sessions = {str(session) for chunk in state.get("chunks", ()) for session in chunk.get("sessions", ())}
+	_mark_dependency_repair(state)
 	if max_chunks is not None and len(state.get("chunks", ())) >= max_chunks:
 		state.update({"status": "partial", "production_ready": False, "coverage": {"requested_sessions": len(sessions), "completed_sessions": len(completed_sessions), "completed_series": len(state.get("series", ())), "expected_series": len(sessions) * len(FAMILIES) * len(WINDOWS)}, "handoff": {"next": "resume Stage 14", "selected_backend": "java", "bounded_operation": True, "remaining_sessions": len(sessions) - len(completed_sessions), "remaining_series": len(sessions) * len(FAMILIES) * len(WINDOWS) - len(state.get("series", ())), "resume": "Rerun without max_chunks to continue from the durable chunk report"}})
 		_write_json(output, state)
@@ -581,9 +676,22 @@ def run_stage14(
 			connection.rollback()
 			connection.close()
 		chunk_started = perf_counter()
-		java_result = _run_java(dbinfo_file, manifest_path, chunk, checkpoint_directory, java_timeout)
+		if batch_manager is not None:
+			batch_manager.begin(chunk_index, chunk)
+			runner = cast(Any, java_runner)
+			if hasattr(runner, "before_publication"):
+				runner.before_publication = batch_manager.publishing
+			else:
+				batch_manager.publishing()
+		java_result = (java_runner or _run_java)(dbinfo_file, manifest_path, chunk, checkpoint_directory, java_timeout)
+		if pipeline_configuration is not None:
+			state["configuration"].update(pipeline_configuration)
 		if len(java_result.get("series", ())) != len(chunk) * len(FAMILIES) * len(WINDOWS):
 			raise Stage14Error("Java z-score chunk did not complete every series")
+		expected_series = {(session, family, window) for session in chunk for family in FAMILIES for window in WINDOWS}
+		actual_series = {(str(item.get("session")), str(item.get("family")), int(item.get("window", -1))) for item in java_result["series"]}
+		if actual_series != expected_series:
+			raise Stage14Error("Java z-score chunk returned duplicate, missing, or unexpected series")
 		connection = _connect(dbinfo_file, production.database)
 		try:
 			date_ids = _session_ids(connection, names, chunk)
@@ -592,16 +700,28 @@ def run_stage14(
 		finally:
 			connection.rollback()
 			connection.close()
+		if chunk_revision != state.get("database_revision_after"):
+			raise Stage14Error("Raw or derived inputs changed during z-score publication; chunk was not accepted")
 		state["chunks"].append({"index": chunk_index, "sessions": list(chunk), "series_count": len(chunk_series), "rows": sum(item["row_count"] for item in chunk_series), "seconds": perf_counter() - chunk_started, "database_revision_after": chunk_revision, "java_report": str((report_directory / f"chunk-{chunk_index:04d}.json").resolve())})
+		if java_result.get("pipeline"):
+			state["chunks"][-1]["pipeline"] = {key: java_result.get(key) for key in ("pipeline", "preparers", "writers", "cached_sessions", "source_batches")}
+			state["chunks"][-1]["pipeline"]["preserved_output_rows"] = sum(int(item.get("preserved_output_rows", 0)) for item in java_result["series"])
 		state["series"].extend(chunk_series)
 		state["database_revision_after"] = chunk_revision
 		completed_sessions.update(chunk)
+		_mark_dependency_repair(state)
+		state.update({"status": "partial", "production_ready": False, "coverage": {"requested_sessions": len(sessions), "completed_sessions": len(completed_sessions), "completed_series": len(state["series"]), "expected_series": len(sessions) * len(FAMILIES) * len(WINDOWS)}, "handoff": {"next": "resume Stage 14", "selected_backend": "java", "bounded_operation": True, "remaining_sessions": len(sessions) - len(completed_sessions), "remaining_series": len(sessions) * len(FAMILIES) * len(WINDOWS) - len(state["series"]), "resume": "Run tools/resume_stage14.py with the configured interpreter; completed chunks are retained"}})
 		_write_json(report_directory / f"chunk-{chunk_index:04d}.json", java_result)
 		_write_json(output, state)
+		if batch_manager is not None:
+			batch_manager.complete(chunk_index, state)
+		if on_chunk_complete is not None:
+			on_chunk_complete(state)
 		if max_chunks is not None and len(state["chunks"]) >= max_chunks:
-			state.update({"status": "partial", "production_ready": False, "coverage": {"requested_sessions": len(sessions), "completed_sessions": len(completed_sessions), "completed_series": len(state["series"]), "expected_series": len(sessions) * len(FAMILIES) * len(WINDOWS)}, "handoff": {"next": "resume Stage 14", "selected_backend": "java", "bounded_operation": True, "remaining_sessions": len(sessions) - len(completed_sessions), "remaining_series": len(sessions) * len(FAMILIES) * len(WINDOWS) - len(state["series"]), "resume": "Rerun without max_chunks to continue from the durable chunk report"}})
-			_write_json(output, state)
 			return state
+	close = getattr(java_runner, "close", None)
+	if close is not None:
+		close()
 	connection = _connect(dbinfo_file, production.database)
 	try:
 		final_revision = _database_revision(connection, names)

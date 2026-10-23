@@ -1813,3 +1813,93 @@ comparison. See `docs/stage9c_execution.md` for phase-specific commands.
   No commit was created. Stage 14 is not complete, so the next prompt must
   resume Stage 14 from its durable chunk report rather than advance to Stage
   15.
+
+### Stage 14 resume and shared Java copy implementation — 2026-10-22
+
+- The previously active bounded operation finished chunk `0001` without
+  repeating `0000`. It accepted another 20 sessions, 80 series, and 3,205,280
+  rows in 776.8856106 seconds. Durable totals are 40 sessions, 160 series,
+  and 6,410,560 rows; remaining scope is 4,858 sessions and 19,432 series.
+  No migration Python/Java process remained active at handoff.
+- `output/legacy-migration/zscores.json` remains partial, with SHA-256
+  `c1d644fce52d3a7bda510ed7160b23e443c645cf0ff06681ec982259db6d47e5`.
+  The new `java-reports/chunk-0001.json` SHA-256 is
+  `59c24204849a8d1a3dd1e2d87ca6c66115a74c8453ae99bc59b6b6d76c079eb3`.
+  Chunk `0000`, the manifest ID/hash, and the corrected checkpoint namespace
+  retain their previous identities. An initial resume with `max_chunks=1`
+  was a no-op: this limit is cumulative, so advancing to two total chunks
+  ran exactly the next authorized chunk.
+- Following the operator's architecture request, added `JavaDbCopy` with
+  immutable raw-close/stored-delta record projections, session-batched
+  read-only snapshot loading, and shared futures for in-flight requests.
+  Each source session is queried once per JVM lifetime. A persistent
+  `JavaZScorePipelineMain` serves chronological chunks while configurable
+  calculation threads use the existing vector kernel and a separate bounded
+  publication pool writes only z-score rows/completion metadata. Source reads
+  in this path take no `FOR UPDATE` or `FOR SHARE` locks. No MySQL schema,
+  server, or source-table changes were made for this implementation.
+- Added the no-parameter `tools/resume_stage14.py` runner, defaulting to three
+  calculation workers, one publication worker, and `-Xmx64g` in one JVM.
+  It continues the existing durable report, skips completed chunks, reports
+  progress, preserves independent final audits, and stops on failed gates.
+  OS coordinator locking, child lifetime monitoring, bounded publication
+  retries, and post-publication source-revision rejection protect resume.
+  See `docs/stage14_pipeline.md` for operation and the revision-check limits.
+- Offline validation passed: 23 Python Stage 12–14 tests, all 61 Java tests,
+  and focused Python type checking. JDBC doubles verify unlocked read-only
+  source access, immutable/cache deduplication, numerical parity, output-only
+  transactions, rollback and after-commit recovery. The shared-cache pipeline
+  was not run against live MySQL; no new throughput or full-history memory
+  measurement is claimed. The original bounded chunk is the only additional
+  production operation completed in this continuation.
+- Final review found a pre-existing prerequisite failure: the generated
+  manifest has at most 60 dates including the target. The 60-day delta family
+  needs 61 raw dates to validate the predecessor of its first stored ratio.
+  With the current manifest that family cannot produce ready scores. Added a
+  pipeline preflight rejection before MySQL access or durable artifact changes,
+  with regression coverage. The new runner currently stops at this gate.
+  The existing independent audit uses the same truncated dependency scope,
+  so its agreement alone would not identify this scope error.
+- Stage 14 remains incomplete. A dependency-manifest correction and explicit
+  repair plan for affected 60-day delta results must precede use of the new
+  runner. Existing completed chunks/checkpoints were preserved pending that
+  decision. After correction, run `tools/resume_stage14.py` with the configured
+  interpreter and no parameters, then review its report and independent audits.
+  Do not advance to Stage 15 until acceptance passes. No commit was created.
+
+### Stage 14 dependency repair and live pipeline handoff — 2026-10-22
+
+- The authorized dependency correction is complete. The original 60-date
+  manifest/report remain preserved under
+  `output/legacy-migration/stage14/history/e8bf99777f967c2688d7d3ebfaf938c12fc4a7ebd1ff977121572b55d8f305f7/`.
+  The canonical manifest now uses 61 dependency dates where required, with
+  manifest ID `d93c397c3c1aec5b25f7896aab0c7789c1ef7dc751f5e37709836ca5d641c300`.
+  No raw or derived table, receipt, mapping, or schema was changed.
+- The no-parameter runner `tools/resume_stage14.py` now uses the shared
+  immutable `javaDBCopy` source cache, calculation-worker auto-tuning from 1
+  through 10, one source loader, and one publication worker. The live tuning
+  selected 10 calculation workers: two-trial median 4.867 seconds versus
+  36.818 seconds with one. Utility workers are excluded from that count.
+- Three durable chunks are accepted without repeating earlier chunks: 60
+  sessions, 240 series, and 9,615,840 rows. The two repaired chunks preserved
+  all 6,410,560 existing materialization rows; the new 20-session chunk wrote
+  3,205,280 new rows. The batch journal records `complete=3`, `pending=242`,
+  and no in-progress batch. The report remains `partial`; 4,838 sessions and
+  19,352 series remain. Current observed throughput suggests roughly three
+  hours for the remaining population, excluding final audits.
+- The first stalled tuning attempt was safely recovered: its 3,205,280-row
+  before-image was restored in one transaction and the attempt is recorded as
+  `rolled_back/restored`. Before publication, every batch is durably backed up;
+  `tools/rollback_stage14.py` performs the same recovery without starting new
+  work. The progress monitor writes a 15-second ETA to
+  `output/legacy-migration/stage14/progress.json`.
+- Independent live verification passed 28 series across seven boundary/random
+  sessions, with the source revision unchanged before and after. Evidence is
+  `output/legacy-migration/stage14/bounded-repair-audit.json`; it can be
+  resumed with `tools/audit_stage14_repair.py` without parameters. This is a
+  bounded acceptance check, not the final full-population Stage 14 audit.
+- Offline validation remains green: 23 focused Python Stage 12–14 tests plus
+  the new batch-journal tests, 62 Java tests, and Python type checks. No commit
+  was created. Resume only Stage 14 with `tools/resume_stage14.py`; do not
+  advance to Stage 15 until the full population, coverage checks, and final
+  independent audits pass.

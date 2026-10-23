@@ -80,6 +80,88 @@ public final class JavaZScoreCandidate {
         return Map.copyOf(phaseSeconds);
     }
 
+    PreparedSeries prepare(JavaDbCopy source, LocalDate session, Family family, int window) throws SQLException {
+        validateWindow(window);
+        List<LocalDate> dates = manifest.target(session).zscoreDependencies();
+        validateInputDates(dates, session, window);
+        phaseSeconds.clear();
+        Map<LocalDate, JavaDbCopy.SessionData> inputs = source.get(dates);
+        Map<LocalDate, Long> dateIds = new HashMap<>();
+        Map<LocalDate, Evidence> evidence = new HashMap<>();
+        inputs.forEach((date, data) -> {
+            if (data.dateId() != null) dateIds.put(date, data.dateId());
+            evidence.put(date, data.evidence());
+        });
+        Snapshot snapshot = calculateSnapshot(dates, session, family, window, source.tickers(), dateIds, evidence,
+                (delta, identifiers) -> cachedValues(inputs, identifiers, delta));
+        return new PreparedSeries(session, family, window, snapshot, Map.copyOf(phaseSeconds));
+    }
+
+    void validateSeries(Connection connection) throws SQLException {
+        boolean original = connection.getAutoCommit();
+        try {
+            connection.setAutoCommit(false);
+            new JavaWriterCandidate(manifest, productionTarget, expectedProductionSchema).validateTarget(connection);
+            for (Family family : Family.values()) {
+                for (int window : new int[]{20, 60}) ensureSeries(connection, family, window, false);
+            }
+            connection.commit();
+        } catch (RuntimeException | SQLException error) {
+            rollback(connection);
+            throw error;
+        } finally {
+            restoreAutoCommit(connection, original);
+        }
+    }
+
+    WriteResult writePrepared(Connection connection, PreparedSeries prepared, Path checkpoint,
+                              JavaWriterCandidate.InterruptPoint interruption) throws SQLException {
+        validateCheckpoint(checkpoint, prepared.session, prepared.family, prepared.window, prepared.snapshot.contentDigest);
+        boolean committed = false;
+        boolean original = connection.getAutoCommit();
+        try {
+            connection.setAutoCommit(false);
+            new JavaWriterCandidate(manifest, productionTarget, expectedProductionSchema).validateTarget(connection);
+            String key = ensureSeries(connection, prepared.family, prepared.window, false);
+            boolean matchingRows = matchingRows(connection, prepared.snapshot, prepared.family, prepared.window);
+            phaseSeconds.put("preserved_output_rows", matchingRows ? (double) prepared.snapshot.rows.size() : 0.0);
+            publish(connection, prepared.snapshot, key, prepared.session, prepared.family, prepared.window, matchingRows);
+            JavaWriterCandidate.applyInterruption(interruption, JavaWriterCandidate.InterruptPoint.BEFORE_COMMIT);
+            connection.commit();
+            committed = true;
+            JavaWriterCandidate.applyInterruption(interruption, JavaWriterCandidate.InterruptPoint.AFTER_COMMIT);
+            writeCheckpoint(checkpoint, prepared.session, prepared.family, prepared.window, prepared.snapshot.contentDigest);
+            Snapshot snapshot = prepared.snapshot;
+            return new WriteResult(prepared.family.value, prepared.window, prepared.session, "complete", true,
+                    snapshot.rows.size(), snapshot.readyCount, snapshot.contentDigest, snapshot.dependencyDigest,
+                    snapshot.availabilityDigest, snapshot.actualInputAvailable);
+        } catch (RuntimeException | SQLException error) {
+            if (!committed) rollback(connection);
+            throw error;
+        } finally {
+            restoreAutoCommit(connection, original);
+        }
+    }
+
+    private static Map<Long, Map<LocalDate, Cell>> cachedValues(Map<LocalDate, JavaDbCopy.SessionData> inputs,
+                                                               List<Long> identifiers, boolean delta) {
+        Map<Long, Map<LocalDate, Cell>> result = new HashMap<>();
+        for (long identifier : identifiers) {
+            Map<LocalDate, Cell> values = new HashMap<>();
+            inputs.forEach((date, input) -> {
+                if (delta) {
+                    JavaDbCopy.DeltaRow row = input.deltas().get(identifier);
+                    if (row != null) values.put(date, new Cell(row.closeRatioToPrior()));
+                } else {
+                    JavaDbCopy.RawRow row = input.raw().get(identifier);
+                    if (row != null) values.put(date, new Cell(row.close()));
+                }
+            });
+            result.put(identifier, values);
+        }
+        return result;
+    }
+
     public WriteResult write(Connection connection, LocalDate session, Family family, int window,
                              Path checkpoint, JavaWriterCandidate.InterruptPoint interruption) throws SQLException {
         validateWindow(window);
@@ -283,6 +365,14 @@ public final class JavaZScoreCandidate {
         tickerMappings = expectedMappings;
         Map<LocalDate, Long> dateIds = readDateMappings(connection, dates);
         Map<LocalDate, Evidence> evidence = readEvidence(connection, dates);
+        return calculateSnapshot(dates, target, family, window, tickerMappings, dateIds, evidence,
+                (delta, identifiers) -> readValues(connection, delta ? names.deltas() : names.prices(),
+                        delta ? "close_ratio_to_prior" : "close", dateIds, identifiers));
+    }
+
+    private Snapshot calculateSnapshot(List<LocalDate> dates, LocalDate target, Family family, int window,
+                                       Map<Long, String> tickerMappings, Map<LocalDate, Long> dateIds,
+                                       Map<LocalDate, Evidence> evidence, ValueReader reader) throws SQLException {
         MessageDigest dependencyDigest = digest();
         MessageDigest availabilityDigest = digest();
         List<Long> tickerIds = new ArrayList<>(tickerMappings.keySet());
@@ -293,9 +383,9 @@ public final class JavaZScoreCandidate {
         for (int offset = 0; offset < tickerIds.size(); offset += CHUNK_SIZE) {
             long phaseStarted = System.nanoTime();
             List<Long> chunk = tickerIds.subList(offset, Math.min(offset + CHUNK_SIZE, tickerIds.size()));
-            Map<Long, Map<LocalDate, Cell>> rawChunk = readValues(connection, names.prices(), "close", dateIds, chunk);
+            Map<Long, Map<LocalDate, Cell>> rawChunk = reader.read(false, chunk);
             Map<Long, Map<LocalDate, Cell>> deltaChunk = family == Family.PRICE_DELTA
-                    ? readValues(connection, names.deltas(), "close_ratio_to_prior", dateIds, chunk) : Map.of();
+                    ? reader.read(true, chunk) : Map.of();
             loadingSeconds += (System.nanoTime() - phaseStarted) / 1e9;
             phaseStarted = System.nanoTime();
             for (long tickerId : chunk) {
@@ -416,10 +506,14 @@ public final class JavaZScoreCandidate {
     }
 
     private String ensureSeries(Connection connection, Family family, int window) throws SQLException {
+        return ensureSeries(connection, family, window, true);
+    }
+
+    private String ensureSeries(Connection connection, Family family, int window, boolean lock) throws SQLException {
         JsonObject definition = definition(family, window);
         String key = CanonicalJson.sha256(definition);
         String table = SqlIdentifiers.quote(names.zscoreSeries(), "z-score series");
-        String select = "SELECT schema_version, source_scope, calendar_id, family, `window`, calculation_version, delta_definition, `precision`, missing_value_policy FROM " + table + " WHERE series_key = ? FOR UPDATE";
+        String select = "SELECT schema_version, source_scope, calendar_id, family, `window`, calculation_version, delta_definition, `precision`, missing_value_policy FROM " + table + " WHERE series_key = ?" + (lock ? " FOR UPDATE" : "");
         try (PreparedStatement statement = connection.prepareStatement(select)) {
             statement.setString(1, key);
             try (ResultSet rows = statement.executeQuery()) {
@@ -434,6 +528,7 @@ public final class JavaZScoreCandidate {
                 }
             }
         }
+        if (!lock) throw new IllegalArgumentException("Z-score series must be initialized before parallel publication");
         String insert = "INSERT INTO " + table + " (series_key, schema_version, source_scope, calendar_id, family, `window`, calculation_version, delta_definition, `precision`, missing_value_policy, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)";
         try (PreparedStatement statement = connection.prepareStatement(insert)) {
             statement.setString(1, key); statement.setInt(2, 1); statement.setString(3, manifest.sourceScope());
@@ -447,10 +542,38 @@ public final class JavaZScoreCandidate {
 
     private void publish(Connection connection, Snapshot snapshot, String seriesKey, LocalDate target,
                          Family family, int window) throws SQLException {
+        publish(connection, snapshot, seriesKey, target, family, window, false);
+    }
+
+    private boolean matchingRows(Connection connection, Snapshot snapshot, Family family, int window) throws SQLException {
+        var tables = names.resolveZScoreTables(List.of(window)).get(window);
+        String table = family == Family.PRICE ? tables.price() : tables.priceDelta();
+        try (PreparedStatement statement = connection.prepareStatement("SELECT ticker_id,zscore,status FROM "
+                + SqlIdentifiers.quote(table, table) + " WHERE date_id=? ORDER BY ticker_id FOR UPDATE")) {
+            statement.setLong(1, snapshot.dateId);
+            try (ResultSet rows = statement.executeQuery()) {
+                int index = 0;
+                while (rows.next()) {
+                    if (index >= snapshot.rows.size()) return false;
+                    ScoreRow expected = snapshot.rows.get(index++);
+                    long ticker = rows.getLong(1);
+                    float number = rows.getFloat(2);
+                    Float score = rows.wasNull() ? null : number;
+                    if (ticker != expected.tickerId || !java.util.Objects.equals(score, expected.score)
+                            || rows.getInt(3) != expected.status.code) return false;
+                }
+                return index == snapshot.rows.size();
+            }
+        }
+    }
+
+    private void publish(Connection connection, Snapshot snapshot, String seriesKey, LocalDate target,
+                         Family family, int window, boolean matchingRows) throws SQLException {
         if (snapshot.dateId == null) throw new IllegalArgumentException("Z-score target date mapping is missing");
         String physical = names.resolveZScoreTables(List.of(window)).get(window).price();
         if (family == Family.PRICE_DELTA) physical = names.resolveZScoreTables(List.of(window)).get(window).priceDelta();
         String table = SqlIdentifiers.quote(physical, "z-score rows");
+        if (!matchingRows) {
         try (PreparedStatement delete = connection.prepareStatement("DELETE FROM " + table + " WHERE date_id = ?")) {
             delete.setLong(1, snapshot.dateId); delete.executeUpdate();
         }
@@ -462,6 +585,7 @@ public final class JavaZScoreCandidate {
                 insert.addBatch();
             }
             insert.executeBatch();
+        }
         }
         String metadata = SqlIdentifiers.quote(names.zscoreSessions(), "z-score sessions");
         try (PreparedStatement delete = connection.prepareStatement("DELETE FROM " + metadata + " WHERE series_key = ? AND date_id = ?")) {
@@ -647,7 +771,10 @@ public final class JavaZScoreCandidate {
         try {
             Path parent = checkpoint.toAbsolutePath().normalize().getParent();
             if (parent != null) Files.createDirectories(parent);
-            Files.write(checkpoint, CanonicalJson.bytes(value));
+            Path temporary = checkpoint.resolveSibling(checkpoint.getFileName() + ".tmp");
+            Files.write(temporary, CanonicalJson.bytes(value));
+            Files.move(temporary, checkpoint, java.nio.file.StandardCopyOption.ATOMIC_MOVE,
+                    java.nio.file.StandardCopyOption.REPLACE_EXISTING);
         } catch (Exception error) {
             throw new IllegalArgumentException("Cannot write Java z-score checkpoint", error);
         }
@@ -704,8 +831,17 @@ public final class JavaZScoreCandidate {
 
     static record ScoreRow(long tickerId, Float score, Status status) { }
 
-    private record Snapshot(List<ScoreRow> rows, int readyCount, String dependencyDigest, String availabilityDigest,
-                            boolean actualInputAvailable, String contentDigest, Long dateId) { }
+    record PreparedSeries(LocalDate session, Family family, int window, Snapshot snapshot, Map<String, Double> phases) { }
+
+    @FunctionalInterface
+    private interface ValueReader {
+        Map<Long, Map<LocalDate, Cell>> read(boolean delta, List<Long> identifiers) throws SQLException;
+    }
+
+    record Snapshot(List<ScoreRow> rows, int readyCount, String dependencyDigest, String availabilityDigest,
+                            boolean actualInputAvailable, String contentDigest, Long dateId) {
+        Snapshot { rows = List.copyOf(rows); }
+    }
 
     public record WriteResult(String family, int window, LocalDate session, String status, boolean committed,
                               int rowCount, int readyCount, String contentDigest, String dependencyDigest,
