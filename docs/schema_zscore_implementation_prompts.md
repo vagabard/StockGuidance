@@ -1,5 +1,11 @@
 # Schema names and z-score implementation prompts
 
+Current operator correction: the base registry now contains eight tables. The
+six-table references in historical stage instructions/handoffs below describe
+the earlier implementation. Use the current eight-table operator guidance and
+[stage15_validation.md](stage15_validation.md) for the completed migration scope
+and independent validation commands.
+
 This is the implementation brief for the approved schema customization and
 z-score storage design. Run one numbered prompt at a time, in order, using
 Luna 5.6 with the suggested medium or high reasoning setting. Include the shared

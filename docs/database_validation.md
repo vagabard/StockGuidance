@@ -205,3 +205,14 @@ unfinished daily session, without querying that session's final daily bar.
 `capture_opening_evidence` proposals are not automatic daily repairs: original
 historical receipt times cannot be manufactured by a download today. See
 [entry_open.md](entry_open.md) for the exact provider/method and missing policy.
+
+## Stage 15 retained migration validation
+
+[stage15_validation.md](stage15_validation.md) documents the independent Python
+audit, its actual benchmark, and the command to run all retained sessions or
+resume a bounded subset. It uses NumPy ticker vectors, five spawned workers,
+one database loader, bounded shared-memory slots, one checkpoint writer, and
+console progress/ETA. Raw Decimal equality and derived semantic-reference checks
+remain independent. A benchmark pass or `status=partial` does not establish final
+acceptance: inspect `final-audit.json` for all support/materialization counts,
+metadata checks, unresolved gaps, and the verified restore/recovery evidence.

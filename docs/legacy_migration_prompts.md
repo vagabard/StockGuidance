@@ -1925,3 +1925,81 @@ comparison. See `docs/stage9c_execution.md` for phase-specific commands.
   No raw/derived source tables, receipts, mappings, or schema were changed.
   Stage 14 is complete; the next authorized operation is Stage 15. No commit
   was created.
+
+### Stage 15 independent validation rewrite — 2026-10-23 (completed)
+
+- Replaced the scalar z-score audit with independent NumPy calculations and a
+  bounded shared-memory pipeline in `performance/stage15_pipeline.py`: one
+  read-only database loader, 1,000-row fetches, five spawned validation workers,
+  256-ticker vectors, 128-target session blocks, two cache slots, and one result
+  queue consumer/checkpoint writer. Slots become readable only after publication
+  and cannot be reused until every reader acknowledges completion.
+- Added atomic checksummed per-batch checkpoints, bounded runs with
+  `--stage15-max-batches`, resume validation against prerequisite/source/database
+  identities, and console counts/rate/elapsed/ETA every ten seconds. Worker
+  count and fetch size can change without invalidating completed z-score batches.
+- `output/legacy-migration/stage15-benchmark.json` records the real 128-session,
+  256-active-ticker comparison (131,072 checks): scalar 4.033 seconds, NumPy
+  0.140 seconds, five processes including Windows startup/result transport
+  0.492 seconds. Shared source loading took 0.591 seconds separately. Counts and
+  findings agreed with zero mismatches. This single-batch calculation comparison
+  is not a full database throughput claim. NumPy alone was fastest on that small
+  batch; the multiprocessing pipeline amortizes startup over the retained scope.
+- The first full-width block loaded 24,342,767 records and saved 157 z-score
+  checkpoints in 47 seconds. A continuation reused those checkpoints. A later
+  precision regression test exposed the old raw decoder's rounding, so canonical
+  raw results are invalidated and recomputed with `read_exact_archive` and direct
+  Decimal database values. The prior empty derived coverage was also rejected;
+  `performance/stage15_derived.py` checks independent exact-derived semantics,
+  sixteen-column NumPy comparisons, and per-session resume.
+- Stage 13/14 and restore/idempotency prerequisites were checked. The frozen
+  production choices remain Python raw and Java derived/z-scores; Python, Java,
+  and SQL timings, decimal schema, evidence semantics, excluded files, recovery
+  references, and resume commands are documented in `docs/stage15_validation.md`
+  and linked from operations, database-validation, and performance documentation.
+  Current base-schema operator wording is corrected to eight tables.
+- The exact raw pass subsequently completed all 4,898 sessions and 42,482,212
+  adopted rows with zero missing/extra/different findings. Its report marks
+  `raw_engine=exact-archive-v2`. The continuation reused 2,198 previously
+  completed z-score batches after the precision correction. Focused pipeline,
+  recovery-integration, and documentation tests pass (23 tests), as does focused
+  type checking for all three Stage 15 modules.
+- Run/continue from this checkout with its configured interpreter and
+  `PYTHONPATH=src`:
+  `python -m stockguidance.cli.legacy_migration_benchmark --run-stage15 --data-root data --dbinfo-file dbinfo.id --stage15-progress-seconds 10`.
+  For a bounded continuation add `--stage15-max-batches 157`; for the comparable
+  real-data benchmark add `--stage15-benchmark`. Do not start concurrent readers
+  while the full audit is already running. Inspect
+  `output/legacy-migration/final-audit.json` and its `stage15-*-checkpoints/`
+  directories for durable progress. A partial report is not final acceptance.
+- Stage 15 completed with `status=complete` and `acceptance.audit_passed=true`.
+  All 4,893 eligible derived sessions passed (42,431,753 rows), and all 6,123
+  z-score batches passed across four tables of 196,243,268 rows each. All 19,592
+  metadata records passed independent count/status checks and frozen Stage 14
+  digest binding checks. The final report records all 16 physical table counts;
+  see `docs/stage15_validation.md` for the complete population table and methods.
+- The final mapping/ticker/date checks found zero source or z-score mapping
+  orphans and zero derived keys without raw keys. The unresolved list contains
+  232 excluded archives with reasons, five incomplete derived neighborhoods,
+  and one global raw-without-derived key gap (59,773 keys): 238 records total.
+  Physical raw/derived counts are 44,248,740 / 44,188,967 and include preserved
+  legacy rows outside the independently adopted cohort. The report deliberately
+  retains `production_ready=false` and
+  `fully_verified_continuous_coverage=false`.
+- The unchanged before/after database revision is
+  `d559c9cc39e79812c4a4110cc6b3db75cbef18895c807c2d4db03bcc6d985951`.
+  Previously completed SQL checks are reused only under matching revision and
+  exact global counts; full independently validated compact key spaces plus
+  exact table counts avoid redundant orphan joins. Fallback scans remain for
+  unproven scopes, and the report explicitly identifies all proof/reuse methods.
+- The final report SHA-256 is
+  `f0e65d72396d9a36a17fb0fe994f12a72405757050f7586251249ffe4c49e8a5`;
+  the benchmark report SHA-256 is
+  `2debf74978e79915de9ca0ef430997a8eac989dcc4fb9e762c133ecc0136b012`.
+  Final validation: 30 focused pipeline/CLI/recovery/documentation tests passed,
+  and all three Stage 15 modules passed focused type checking. Small partial
+  scopes filter source queries to pending tickers; interrupted nonzero ticker
+  offsets are tested. Console ETA switches to re-estimation when progress stalls.
+- The next work is operating maintenance and explicit resolution of the listed
+  data gaps, rather than another migration stage. Live refresh, training, and
+  simulation remain separate. No commit was created.

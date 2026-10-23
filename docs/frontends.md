@@ -96,7 +96,7 @@ Use `--table-names-file '<absolute-selected-registry>'` with
 `preview_schema` when an external registry is selected. A relative
 `table_names_file` in `dbinfo.id` is resolved relative to that file; omitting it
 uses the packaged resource. Missing or invalid selected files fail without a
-fallback. The updater requires an already compatible six-table schema and does
+fallback. The updater requires an already compatible eight-table schema and does
 not call providers. Re-run it explicitly after a dependency correction; stale
 materializations remain rejected until rebuilt. Java's packaged registry is a
 build-time copy of the canonical Python JSON, while Python-launched Java gets

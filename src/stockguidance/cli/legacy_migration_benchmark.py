@@ -36,6 +36,7 @@ def parser() -> argparse.ArgumentParser:
 	mode.add_argument("--run-stage12", action="store_true")
 	mode.add_argument("--run-stage13", action="store_true")
 	mode.add_argument("--run-stage14", action="store_true")
+	mode.add_argument("--run-stage15", action="store_true")
 	arguments.add_argument("--data-root", type=_path, default=Path("data"))
 	arguments.add_argument("--dbinfo-file", type=_path, default=Path("dbinfo.id"))
 	arguments.add_argument("--evaluation-plan", type=_path, default=Path("output/legacy-migration/evaluation-plan.json"))
@@ -104,6 +105,22 @@ def parser() -> argparse.ArgumentParser:
 	arguments.add_argument("--stage14-audit-seed", type=int, default=20261022)
 	arguments.add_argument("--stage14-max-chunks", type=int)
 	arguments.add_argument("--stage14-no-resume", action="store_true")
+	arguments.add_argument("--stage15-stage12-report", type=_path, default=Path("output/legacy-migration/stage12.json"))
+	arguments.add_argument("--stage15-stage13-report", type=_path, default=Path("output/legacy-migration/population.json"))
+	arguments.add_argument("--stage15-stage13-manifest", type=_path, default=Path("output/legacy-migration/stage13/population-manifest.json"))
+	arguments.add_argument("--stage15-stage14-report", type=_path, default=Path("output/legacy-migration/zscores.json"))
+	arguments.add_argument("--stage15-stage14-manifest", type=_path, default=Path("output/legacy-migration/stage14/zscore-manifest.json"))
+	arguments.add_argument("--stage15-snapshot", type=_path, default=Path("output/legacy-migration/snapshot.json"))
+	arguments.add_argument("--stage15-output", type=_path, default=Path("output/legacy-migration/final-audit.json"))
+	arguments.add_argument("--stage15-zscore-batch-size", type=int, default=256)
+	arguments.add_argument("--stage15-workers", type=int, default=5)
+	arguments.add_argument("--stage15-fetch-size", type=int, default=1000)
+	arguments.add_argument("--stage15-sessions-per-batch", type=int, default=128)
+	arguments.add_argument("--stage15-cache-slots", type=int, default=2)
+	arguments.add_argument("--stage15-max-batches", type=int)
+	arguments.add_argument("--stage15-progress-seconds", type=float, default=10.0)
+	arguments.add_argument("--stage15-benchmark", action="store_true")
+	arguments.add_argument("--stage15-no-resume", action="store_true")
 	return arguments
 
 
@@ -232,6 +249,19 @@ def main(argv: Sequence[str] | None = None) -> int:
 			return 1
 		print(json.dumps({"successful": report["status"] == "complete", "operation": "run_stage14", "report": str(_resolve(arguments.stage14_output)), "status": report["status"], "coverage": report.get("coverage")}))
 		return 0 if report["status"] == "complete" else 1
+	if arguments.run_stage15:
+		from stockguidance.performance.stage15 import Stage15Error, run_stage15, validate_prerequisites
+
+		try:
+			context = validate_prerequisites(_resolve(arguments.stage10_output), _resolve(arguments.stage15_stage12_report), _resolve(arguments.stage15_stage13_report), _resolve(arguments.stage15_stage13_manifest), _resolve(arguments.stage15_stage14_report), _resolve(arguments.stage15_stage14_manifest), _resolve(arguments.stage15_snapshot))
+			report = run_stage15(context, _resolve(arguments.dbinfo_file), _resolve(arguments.data_root), _resolve(arguments.stage15_output), zscore_batch_size=arguments.stage15_zscore_batch_size, resume=not arguments.stage15_no_resume, workers=arguments.stage15_workers, fetch_size=arguments.stage15_fetch_size, sessions_per_batch=arguments.stage15_sessions_per_batch, cache_slots=arguments.stage15_cache_slots, max_batches=arguments.stage15_max_batches, benchmark_only=arguments.stage15_benchmark, progress_seconds=arguments.stage15_progress_seconds)
+		except (OSError, Stage15Error, TypeError, ValueError, RuntimeError) as error:
+			print(json.dumps({"successful": False, "error": "Stage 15 final audit failed", "detail": str(error)}))
+			return 1
+		report_path = _resolve(arguments.stage15_output).with_name("stage15-benchmark.json") if arguments.stage15_benchmark else _resolve(arguments.stage15_output)
+		successful = report["status"] in {"partial", "passed"} or report["status"] == "complete" and report.get("acceptance", {}).get("audit_passed") is True
+		print(json.dumps({"successful": successful, "operation": "run_stage15", "report": str(report_path), "status": report["status"], "acceptance": report.get("acceptance")}))
+		return 0 if successful else 2 if report["status"] == "complete" else 1
 	if arguments.run_java_writer_trial:
 		from stockguidance.performance.java_writer_trial import run_trial
 

@@ -1,5 +1,12 @@
 # Stage 6 performance study
 
+The later legacy migration selected Python for raw adoption and Java for derived
+and z-score persistence after measuring Python, Java, and SQL. See
+[stage15_validation.md](stage15_validation.md) for all three recorded workload
+comparisons and the independent Stage 15 Python validation pipeline, benchmark,
+and batch-resume commands. That later evidence supplements the historical study
+below; production-writer selection does not replace independent final validation.
+
 Stage 6 is complete as a bounded offline study. It does not port Python code or
 claim semantic equivalence for the Java prototypes. The runnable harness is
 `tools/stage6_benchmark.py`, the implementation is in

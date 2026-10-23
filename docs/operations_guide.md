@@ -414,7 +414,7 @@ selected registry and optional tables first:
 ```
 
 Use `--initialize-schema` only after reviewing the preview and only when the
-existing six updater tables and source binding are already compatible. Omit it
+existing eight updater tables and source binding are already compatible. Omit it
 for later rebuilds. Windows count exchange sessions and include warm-up context
 without publishing warm-up rows. The command reports the current cutoff,
 effective scope, ready/status counts, stale rebuilds and idempotent skips. Exit
@@ -599,6 +599,13 @@ benchmark including JVM startup and transport. Python remains the default until
 that work demonstrates a benefit.
 
 ## Current completion checklist
+
+For the offline Stage 15 migration audit, use the commands, benchmark findings,
+bounded shared-memory worker pipeline, and batch resume instructions in
+[stage15_validation.md](stage15_validation.md). Its JSON report distinguishes
+partial work from final acceptance and retains excluded archives and dependency
+gaps. The validator uses Python independently of the selected Java production
+z-score writer.
 
 A normal run discovers retained history and current published coverage without
 history arguments, preserves older local data outside current provider access,
