@@ -139,9 +139,9 @@ not included in that calculation-worker count. The first repaired batches took
 305.316 seconds including startup/tuning and 22.126 seconds for the second;
 the fresh 20-session batch took 43.023 seconds end to end. The repaired rows
 preserved all 6,410,560 existing materialization rows, while the fresh batch
-created 3,205,280 new rows. These are bounded observations, not a full-history
-runtime guarantee; the remaining population is currently estimated at roughly
-three hours at the observed rate, excluding final audits.
+created 3,205,280 new rows. These were bounded observations rather than a
+full-history runtime guarantee; the full population subsequently completed in
+approximately 4.47 hours.
 
 The interrupted first attempt was recovered from its durable before-image in
 one transaction and is recorded as rolled back/restored. The independent
@@ -150,6 +150,14 @@ bounded repair audit is saved at
 series across seven boundary/random sessions with an unchanged source
 revision. Run `tools/audit_stage14_repair.py` with no parameters to resume or
 repeat that read-only audit for the accepted scope.
+
+The resumed run completed the full retained scope on 2026-10-23. The durable
+report is `output/legacy-migration/zscores.json` with `status=complete` and
+`production_ready=true`: 4,898 sessions, 40,066 tickers, all 19,592 series,
+and four-family/window coverage checks passed. The final independent audit
+passed 1,972 series across 493 boundary/random sessions. The source revision
+was identical before and after population, and the batch journal records all
+245 batches complete with no in-progress work. Stage 15 is next.
 
 Validation for this implementation uses offline fixtures and JDBC doubles for
 query deduplication, immutable/null input semantics, parallel scalar/vector

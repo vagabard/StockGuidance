@@ -637,6 +637,8 @@ def run_stage14(
 			finally:
 				connection.rollback()
 				connection.close()
+			state.setdefault("handoff", {})["dependency_sessions"] = MAX_WINDOW + 1
+			_write_json(output, state)
 			return state
 	if state is None:
 		state = {
@@ -735,6 +737,6 @@ def run_stage14(
 		connection.close()
 	if len(completed_sessions) != len(sessions) or len(state["series"]) != len(sessions) * len(FAMILIES) * len(WINDOWS):
 		raise Stage14Error("Stage 14 did not complete the retained z-score scope")
-	state.update({"status": "complete", "production_ready": True, "database_revision_after": final_revision, "coverage": coverage, "independent_audit": {"seed": audit_seed, "sessions": list(selected_audits), "series": audits, "status": "passed"}, "elapsed_seconds": perf_counter() - started, "handoff": {"next": "Stage 15", "selected_backend": "java", "families": list(FAMILIES), "windows": list(WINDOWS), "dependency_sessions": MAX_WINDOW, "local_snapshot_provenance": "adopted archive snapshot at the recorded cutoff; no original historical availability claim", "resume": "Rerun with the same report and manifest; raw/derived revision changes are rejected and completed reports are coverage-checked without new writes"}})
+	state.update({"status": "complete", "production_ready": True, "database_revision_after": final_revision, "coverage": coverage, "independent_audit": {"seed": audit_seed, "sessions": list(selected_audits), "series": audits, "status": "passed"}, "elapsed_seconds": perf_counter() - started, "handoff": {"next": "Stage 15", "selected_backend": "java", "families": list(FAMILIES), "windows": list(WINDOWS), "dependency_sessions": MAX_WINDOW + 1, "local_snapshot_provenance": "adopted archive snapshot at the recorded cutoff; no original historical availability claim", "resume": "Rerun with the same report and manifest; raw/derived revision changes are rejected and completed reports are coverage-checked without new writes"}})
 	_write_json(output, state)
 	return state

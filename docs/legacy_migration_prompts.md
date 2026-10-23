@@ -1903,3 +1903,25 @@ comparison. See `docs/stage9c_execution.md` for phase-specific commands.
   was created. Resume only Stage 14 with `tools/resume_stage14.py`; do not
   advance to Stage 15 until the full population, coverage checks, and final
   independent audits pass.
+
+### Stage 14 completed — 2026-10-23
+
+- `tools/resume_stage14.py` resumed from the durable checkpoint and completed
+  the retained Stage 14 scope without repeating accepted batches. The final
+  report `output/legacy-migration/zscores.json` is `status=complete` and
+  `production_ready=true`.
+- Final coverage passed for 4,898 sessions, 40,066 tickers, and all 19,592
+  series across `price`/`price_delta` and windows 20/60. Each of the four
+  coverage families contains 196,243,268 materialization rows; the final
+  report records 4,898 metadata rows per family.
+- The final independent audit passed 1,972 series across 493 boundary/random
+  sessions. The source revision before and after was identical
+  (`d559c9cc39e79812c4a4110cc6b3db75cbef18895c807c2d4db03bcc6d985951`). The
+  batch journal records all 245 batches complete, with no pending or
+  in-progress batch.
+- The final report records the corrected 61-date dependency requirement; the
+  canonical manifest ID remains
+  `d93c397c3c1aec5b25f7896aab0c7789c1ef7dc751f5e37709836ca5d641c300`.
+  No raw/derived source tables, receipts, mappings, or schema were changed.
+  Stage 14 is complete; the next authorized operation is Stage 15. No commit
+  was created.
