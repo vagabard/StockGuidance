@@ -169,6 +169,13 @@ verified coverage while gaps remain. Archive adoption proves the local snapshot
 at the recorded cutoff and does not establish original historical availability.
 Live refresh policy and model training/simulation remain separate workflows.
 
+The two early unavailable targets, `2006-07-03` and `2006-11-16`, remain
+unavailable retained-data gaps. The three recent targets are controlled refresh
+candidates for the daily maintenance frontend: refresh `2025-11-06` and
+`2025-11-07`, `2025-11-10` and `2025-11-11`, and `2026-05-06` and `2026-05-07`.
+After source reconciliation, rebuild derived rows and dependent z-scores, then
+rerun the bounded Stage 15 audit; do not edit the frozen audit report manually.
+
 ## Completed full-scope audit — 2026-10-23
 
 `final-audit.json` is `status=complete` and `acceptance.audit_passed=true`.

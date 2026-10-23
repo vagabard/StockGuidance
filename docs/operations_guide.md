@@ -186,6 +186,37 @@ Polygon/Massive source, that boundary rejects requested sessions before
 `20` and `60`. Non-ready statuses are reported as `DataValidityWarning`; they
 are never replaced with interpolated values or zeroes.
 
+### Daily maintenance
+
+Use the repeat-safe maintenance frontend once per day. It computes an inclusive
+two-calendar-year window ending on the current UTC date, asks
+`update_market_data` to download missing source files and reconcile raw rows,
+then invokes the selected Java production writers for derived rows and z-score
+windows `20,60`. Python performs a read-only validation after those writes.
+Existing valid rows are reused; rerunning the same day is safe.
+
+```powershell
+& $pythonExe -m stockguidance.cli.maintain_daily `
+  --data-root data --dbinfo-file dbinfo.id --adjustment adjusted `
+  --publication-delay-minutes '<documented delay>' `
+  --publication-evidence '<publication provenance>' `
+  --recent-window-days '<recent correction window>' `
+  --recent-refresh-hours '<recent refresh interval>' `
+  --archive-refresh-days '<archive refresh interval>' `
+  --correction-evidence '<correction provenance>' `
+  --java-manifest output/legacy-migration/benchmark/candidates/manifest.json
+```
+
+The command is read/write and requires the normal provider credential and
+database permissions. Use `--initialize-schema` or
+`--initialize-zscore-schema` only during an explicitly reviewed first setup
+before selecting this Java-backed daily command; normal daily runs should omit
+both. The Java manifest must cover every target
+session in the requested range and its archive dependencies; do not use an old
+historical manifest for sessions it does not cover. A nonzero result must be
+investigated before training or simulation. The JSON output records the fixed
+range, downloaded sessions, Java writer reports, and Python validation result.
+
 The Python package loads the canonical JSON through package resources when no
 external file is selected, so an installed distribution does not depend on its
 working directory. The Java build copies that same source JSON into Java
