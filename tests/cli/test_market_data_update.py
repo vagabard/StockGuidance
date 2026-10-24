@@ -1,8 +1,6 @@
 import argparse
 import json
 
-import pytest
-
 from stockguidance.cli.update_market_data import main
 from stockguidance.workflows.failures import FailureCode, StageExecutionError, StageFailure, WorkflowStage
 
@@ -43,10 +41,20 @@ def test_cli_configuration_failure_does_not_leak_exception_text(capsys):
 	assert "fixture secret" not in capsys.readouterr().out
 
 
-def test_missing_required_policy_fails_before_running():
-	with pytest.raises(SystemExit) as error:
-		main([])
-	assert error.value.code == 2
+def test_default_policy_is_applied_before_running(harness):
+	seen = {}
+
+	def run(arguments: argparse.Namespace):
+		seen.update(vars(arguments))
+		return harness.run()
+
+	assert main([], run=run) == 0
+	assert seen["publication_delay_minutes"] == 15.0
+	assert seen["publication_evidence"].startswith("Default operational policy")
+	assert seen["recent_window_days"] == 30.0
+	assert seen["recent_refresh_hours"] == 0.0
+	assert seen["archive_refresh_days"] == 30.0
+	assert seen["correction_evidence"] == "Default daily maintenance correction policy"
 
 
 def test_unknown_history_boundary_has_no_network_or_database_side_effects(tmp_path, capsys):

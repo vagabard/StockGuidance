@@ -68,10 +68,12 @@ def assemble_and_validate(arguments: argparse.Namespace) -> ValidationResult:
 	requested_start = date.fromisoformat(arguments.start_date) if arguments.start_date else None
 	requested_end = date.fromisoformat(arguments.end_date) if arguments.end_date else None
 	calendar_start = requested_start or date(1970, 1, 1)
-	calendar_end = max(cutoff.date(), requested_end or cutoff.date()) + timedelta(days=14)
-	calendar = ExchangeCalendar("XNYS", calendar_start, calendar_end)
 	store = JsonHistoryStore(source.data_root / "history")
 	boundary = store.load(identity)
+	if boundary is not None:
+		calendar_start = min(calendar_start, boundary.history_start)
+	calendar_end = max(cutoff.date(), requested_end or cutoff.date()) + timedelta(days=14)
+	calendar = ExchangeCalendar("XNYS", calendar_start, calendar_end)
 	local_inventories: list[LocalCoverageInventory] = []
 	manifest_store = ManifestStore(source.data_root)
 	manifest_inventory = manifest_store.inventory(identity, calendar, start=calendar.start, end=calendar.end)

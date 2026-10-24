@@ -9,8 +9,6 @@ from pathlib import Path
 from time import perf_counter
 from typing import Any
 
-import numpy as np
-
 from stockguidance.database.table_names import quote_identifier
 from stockguidance.market_data.identity import content_id
 from stockguidance.legacy_migration.precision import ExactArchiveBar, exact_records_id, read_exact_archive
@@ -27,6 +25,8 @@ def _archive(path: str, expected_hash: str) -> tuple[ExactArchiveBar, ...]:
 
 
 def _validate_derived(target: dict[str, Any], files: dict[str, dict[str, Any]], stored: list[tuple[Any, ...]]) -> dict[str, Any]:
+	import numpy as np
+
 	session = target["session"]
 	prior, following = target["derived_dependencies"]
 	snapshots = [_archive(files[date_value]["path"], files[date_value]["file_sha256"]) for date_value in (prior, session, following)]

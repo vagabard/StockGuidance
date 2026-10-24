@@ -1,6 +1,6 @@
-import math
+from __future__ import annotations
 
-import numpy as np
+import math
 
 from stockguidance.zscores.calculation import _calculate_ticker, _dependency_issue, _observation_issue
 from stockguidance.zscores.inputs import ZScoreInput
@@ -12,6 +12,8 @@ BATCH_SIZE = 1000
 
 
 def _compensated_sum(values: np.ndarray) -> np.ndarray:
+	import numpy as np
+
 	total = np.zeros(values.shape[1], dtype=np.float64)
 	correction = np.zeros_like(total)
 	for current in values:
@@ -22,6 +24,8 @@ def _compensated_sum(values: np.ndarray) -> np.ndarray:
 
 
 def calculate_zscores_vectorized(specification: ZScoreSpecification, input_data: ZScoreInput) -> ZScoreResult:
+	import numpy as np
+
 	if not isinstance(specification, ZScoreSpecification) or not isinstance(input_data, ZScoreInput):
 		raise ValueError("Vectorized calculation requires z-score specification and input contracts")
 	if specification.family is not input_data.family:

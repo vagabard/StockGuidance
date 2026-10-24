@@ -13,8 +13,6 @@ from time import perf_counter
 import traceback
 from typing import Any, Callable
 
-import numpy as np
-
 from stockguidance.database.table_names import quote_identifier
 from stockguidance.market_data.atomic import atomic_write
 from stockguidance.market_data.identity import content_id, encode_json
@@ -22,7 +20,15 @@ from stockguidance.market_data.identity import content_id, encode_json
 
 ENGINE_VERSION = "independent-numpy-shared-v2"
 SERIES = (("price", 20), ("price", 60), ("price_delta", 20), ("price_delta", 60))
-CELL = np.dtype([("close", "f8"), ("ratio", "f8"), ("close_present", "?"), ("ratio_present", "?"), ("scores", "f4", (4,)), ("statuses", "i1", (4,))])
+def _cell_type() -> Any:
+	import numpy as np
+	return np.dtype([("close", "f8"), ("ratio", "f8"), ("close_present", "?"), ("ratio_present", "?"), ("scores", "f4", (4,)), ("statuses", "i1", (4,))])
+
+
+def __getattr__(name: str) -> Any:
+	if name == "CELL":
+		return _cell_type()
+	raise AttributeError(name)
 
 
 @dataclass(frozen=True)
@@ -47,6 +53,8 @@ class PipelineOptions:
 
 
 def _reset(cache: np.ndarray) -> None:
+	import numpy as np
+
 	cache["close"].fill(np.nan)
 	cache["ratio"].fill(np.nan)
 	cache["close_present"].fill(False)
@@ -67,10 +75,12 @@ def _plans(manifest: dict[str, Any], options: PipelineOptions) -> list[dict[str,
 
 
 def _numeric(value: Any) -> float:
-	return np.nan if value is None else float(value)
+	return float("nan") if value is None else float(value)
 
 
 def _load(connection: Any, names: Any, cache: np.ndarray, plan: dict[str, Any], tickers: tuple[int, ...], date_ids: dict[str, int], fetch_size: int, *, ticker_filter: bool = False, filter_tickers: tuple[int, ...] | None = None, progress: Any = None, stopped: Any = None) -> dict[str, Any]:
+	import numpy as np
+
 	_reset(cache)
 	date_indexes = {date_ids[session]: index for index, session in enumerate(plan["dates"]) if session in date_ids}
 	ticker_indexes = {identifier: index for index, identifier in enumerate(tickers)}
@@ -115,6 +125,8 @@ def _load(connection: Any, names: Any, cache: np.ndarray, plan: dict[str, Any], 
 
 
 def benchmark(connection: Any, names: Any, manifest: dict[str, Any], date_ids: dict[str, int], verified_by_id: dict[int, bool], output: Path, options: PipelineOptions) -> dict[str, Any]:
+	import numpy as np
+
 	from stockguidance.performance.stage15 import _write_json
 
 	cursor = connection.cursor()
@@ -134,8 +146,9 @@ def benchmark(connection: Any, names: Any, manifest: dict[str, Any], date_ids: d
 	if not tickers:
 		raise ValueError("Stage 15 benchmark has no active tickers")
 	shape = (1, len(plan["dates"]), len(tickers))
-	memory = SharedMemory(create=True, size=math.prod(shape) * CELL.itemsize)
-	cache = np.ndarray(shape, dtype=CELL, buffer=memory.buf)
+	cell_type = _cell_type()
+	memory = SharedMemory(create=True, size=math.prod(shape) * cell_type.itemsize)
+	cache = np.ndarray(shape, dtype=cell_type, buffer=memory.buf)
 	try:
 		print(f"Stage 15 benchmark: loading {len(plan['targets'])} real sessions x {len(tickers)} tickers, {options.fetch_size} rows per fetch", flush=True)
 		loading = _load(connection, names, cache[0], plan, tickers, date_ids, options.fetch_size, ticker_filter=True)
@@ -194,6 +207,8 @@ def benchmark(connection: Any, names: Any, manifest: dict[str, Any], date_ids: d
 
 
 def _reference(cache: np.ndarray, indexes: list[int], verified: np.ndarray, family: str, window: int) -> tuple[np.ndarray, np.ndarray]:
+	import numpy as np
+
 	selected = cache[np.asarray(indexes, dtype=np.intp)]
 	close = selected["close"]
 	issues = np.where(~selected["close_present"], 2, np.where(~np.isfinite(close) | (close <= 0), 4, 0)).astype(np.uint8)
@@ -236,6 +251,8 @@ def _reference(cache: np.ndarray, indexes: list[int], verified: np.ndarray, fami
 
 
 def _validate(cache: np.ndarray, plan: dict[str, Any], tickers: tuple[int, ...], verified: np.ndarray, *, scalar: bool = False) -> dict[str, Any]:
+	import numpy as np
+
 	started = perf_counter()
 	counts = np.zeros((len(plan["targets"]), 4, 6), dtype=np.int64)
 	actual_rows = np.zeros(4, dtype=np.int64)
@@ -278,8 +295,10 @@ def _put(queue: Any, value: Any, stopped: Any) -> bool:
 
 
 def _worker(memory_name: str, shape: tuple[int, ...], jobs: Any, results: Any, stopped: Any) -> None:
+	import numpy as np
+
 	memory = SharedMemory(name=memory_name)
-	cache = np.ndarray(shape, dtype=CELL, buffer=memory.buf)
+	cache = np.ndarray(shape, dtype=_cell_type(), buffer=memory.buf)
 	cache.flags.writeable = False
 	try:
 		while not stopped.is_set():
@@ -305,6 +324,8 @@ def _eta(seconds: float) -> str:
 
 
 def run_pipeline(connection: Any, names: Any, manifest: dict[str, Any], date_ids: dict[str, int], verified_by_id: dict[int, bool], directory: Path, binding: dict[str, Any], options: PipelineOptions, *, published_metadata: list[dict[str, Any]] | None = None, metadata_validator: Callable[..., dict[str, Any]] | None = None, progress_label: str = "Independent z-score validation") -> dict[str, Any]:
+	import numpy as np
+
 	def write_json(path: Path, value: dict[str, Any]) -> None:
 		atomic_write(path.resolve(), encode_json(value))
 
@@ -339,8 +360,9 @@ def run_pipeline(connection: Any, names: Any, manifest: dict[str, Any], date_ids
 	if pending:
 		context = mp.get_context("spawn")
 		shape = (min(options.cache_slots, len({plan["index"] for plan, _, _ in pending})), max(len(plan["dates"]) for plan, _, _ in pending), len(tickers))
-		memory = SharedMemory(create=True, size=math.prod(shape) * CELL.itemsize)
-		cache = np.ndarray(shape, dtype=CELL, buffer=memory.buf)
+		cell_type = _cell_type()
+		memory = SharedMemory(create=True, size=math.prod(shape) * cell_type.itemsize)
+		cache = np.ndarray(shape, dtype=cell_type, buffer=memory.buf)
 		jobs = context.Queue(maxsize=options.workers * 2)
 		results = context.Queue(maxsize=options.workers * 2)
 		free_slots = context.Queue()
