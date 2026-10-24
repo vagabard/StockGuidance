@@ -567,7 +567,7 @@ public final class JavaWriterCandidate {
         try (PreparedStatement statement = connection.prepareStatement(sql)) {
             statement.setObject(1, session);
             try (ResultSet rows = statement.executeQuery()) {
-                if (!rows.next() || !archive.recordsId().equals(rows.getString(1)) || rows.next()) {
+                if (!rows.next() || (!manifest.trustsExistingFile(session) && !archive.recordsId().equals(rows.getString(1))) || rows.next()) {
                     throw new IllegalArgumentException("Raw dependency is not adopted: " + session);
                 }
             }
@@ -583,6 +583,10 @@ public final class JavaWriterCandidate {
             }
         }
         Map<String, StoredBar> stored = readStoredBars(connection, dateId);
+        if (manifest.trustsExistingFile(session)) {
+            if (stored.isEmpty()) throw new IllegalArgumentException("Raw dependency has no stored data: " + session);
+            return;
+        }
         if (!stored.keySet().equals(archive.bars().keySet())
                 || archive.bars().entrySet().stream().anyMatch(entry -> !stored.get(entry.getKey()).matches(entry.getValue()))) {
             throw new IllegalArgumentException("Stored raw dependency differs from adopted archive: " + session);

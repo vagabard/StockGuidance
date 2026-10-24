@@ -18,7 +18,7 @@ from stockguidance.calendar.clock import SystemClock
 from stockguidance.calendar.exchange import ExchangeCalendar
 from stockguidance.calendar.protocols import SessionCalendar
 from stockguidance.calendar.sessions import TradingSession
-from stockguidance.cli.paths import resolve_cli_path
+from stockguidance.config.paths import resolve_cli_path
 from stockguidance.config.source import DataConfiguration, PriceAdjustment, SourceConfig
 from stockguidance.database.configuration import load_database_configuration
 from stockguidance.database.connections import MySQLConnectionFactory
@@ -31,7 +31,18 @@ from stockguidance.market_data.manifests import InvalidManifest, ManifestStore, 
 from stockguidance.market_data.providers.configured_polygon import ConfiguredPolygonProvider
 from stockguidance.market_data.providers.contracts import DownloadedSession, ResponseState
 from stockguidance.market_data.publication import DailyPublicationPolicy
-from stockguidance.market_data.records import bar_payload, records_id
+from stockguidance.market_data.records import bar_payload, decode_bar, records_id
+
+
+LOOKBACK_YEARS = 2
+
+
+def maintenance_range(as_of: date) -> tuple[date, date]:
+	try:
+		start = as_of.replace(year=as_of.year - LOOKBACK_YEARS)
+	except ValueError:
+		start = as_of.replace(year=as_of.year - LOOKBACK_YEARS, day=28)
+	return start, as_of
 
 
 def session_workload(calendar: SessionCalendar, start: date, end: date, cutoff: datetime, publication: DailyPublicationPolicy) -> tuple[tuple[TradingSession, ...], tuple[TradingSession, ...]]:
@@ -71,6 +82,19 @@ def _archive_entry(source: SourceConfig, session: TradingSession, raw_id: str | 
 		return None
 	return {"session": session.session_date.isoformat(), "path": str(path.resolve()), "valid": True,
 		"file_sha256": None, "records_id": raw_id, "available_at": available_at}
+
+
+def archive_identity(path: Path) -> tuple[str, str]:
+	content = path.read_bytes()
+	records = []
+	for line in content.splitlines():
+		row = json.loads(line)
+		if not isinstance(row, dict):
+			raise ValueError(f"Daily-maintenance archive record is not an object: {path}")
+		records.append(decode_bar(row))
+	if not records or len({record.ticker for record in records}) != len(records):
+		raise ValueError(f"Daily-maintenance archive is empty or contains duplicate tickers: {path}")
+	return sha256(content).hexdigest(), records_id(tuple(records))
 
 
 def _raw_import_state(cursor: Any, names: TableNames, sessions: tuple[TradingSession, ...]) -> dict[date, tuple[str, str, int]]:
@@ -168,8 +192,11 @@ def validate_materialized_zscores(source: SourceConfig, names: TableNames, workl
 
 
 def run_daily_maintenance(arguments: argparse.Namespace) -> dict[str, object]:
-	from stockguidance.cli.maintain_daily import maintenance_range
-	command = java_preflight(arguments)
+	stage = getattr(arguments, "stage", None)
+	run_source = stage in (None, "source")
+	run_java = stage in (None, "java")
+	run_validation = stage in (None, "validation")
+	command = java_preflight(arguments) if run_java else None
 	clock = SystemClock()
 	now = clock.now()
 	default_start, default_end = maintenance_range(now.date())
@@ -214,90 +241,153 @@ def run_daily_maintenance(arguments: argparse.Namespace) -> dict[str, object]:
 		cursor.execute("SELECT ENGINE FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s", ("stockguidance_migration_completion",))
 		if cursor.fetchall() != [("InnoDB",)]:
 			raise ValueError("The migrated production completion table must exist and use InnoDB")
-		partial_imports_removed = _prepare_partial_imports(cursor, connection, names)
-		store = ManifestStore(source.data_root)
-		provider = ConfiguredPolygonProvider(3)
+		partial_imports_removed = _prepare_partial_imports(cursor, connection, names) if run_java else 0
+		imports = _raw_import_state(cursor, names, raw_sessions)
 		files_by_date: dict[date, dict[str, Any]] = {}
 		availability: dict[date, str] = {}
 		downloaded = 0
-		started = monotonic()
-		last_lock_check = started
-		imports = _raw_import_state(cursor, names, raw_sessions)
 		refreshed_dates: set[date] = set()
-		for index, session in enumerate(raw_sessions, 1):
-			if monotonic() - last_lock_check >= 30:
+		if run_source:
+			store = ManifestStore(source.data_root)
+			provider = ConfiguredPolygonProvider(3)
+			started = monotonic()
+			last_lock_check = started
+			for index, session in enumerate(raw_sessions, 1):
+				if monotonic() - last_lock_check >= 30:
+					cursor.execute("SELECT IS_USED_LOCK('stockguidance_daily_maintenance') = CONNECTION_ID()", ())
+					if cursor.fetchall() != [(1,)]:
+						raise RuntimeError("The maintenance database lock was lost")
+					connection.rollback()
+					last_lock_check = monotonic()
+				imported = imports.get(session.session_date)
+				available_at = imported[1] if imported is not None else (publication.expected_at(session) or session.closes_at).isoformat()
+				refresh_due = imported is not None and correction.refresh_due(session, datetime.fromisoformat(imported[1]), now)
+				entry = None if refresh_due else _archive_entry(source, session, None if imported is None else imported[0], available_at)
+				if refresh_due or entry is None:
+					try:
+						manifest = None if refresh_due else store.load(identity, session)
+					except InvalidManifest:
+						manifest = None
+					if manifest is not None and correction.refresh_due(session, manifest.download.available_at, now):
+						manifest = None
+					if manifest is None or manifest.download.response.state is not ResponseState.COMPLETE:
+						response = provider.fetch(source, session)
+						if response.state is not ResponseState.COMPLETE:
+							raise RuntimeError(f"Massive has not supplied a complete response for {session.session_date}; resolve publication or provider access and rerun")
+						manifest = store.save_download(identity, DownloadedSession(session, response, clock.now()))
+						downloaded += 1
+					entry = export_archive(source, manifest)
+					entry["available_at"] = manifest.download.available_at.isoformat()
+					available_at = manifest.download.available_at.isoformat()
+					refreshed_dates.add(session.session_date)
+				files_by_date[session.session_date] = entry
+				availability[session.session_date] = available_at
+				remaining = (monotonic() - started) / index * (len(raw_sessions) - index)
+				print(f"Source {index}/{len(raw_sessions)} {session.session_date}; downloaded {downloaded}; estimated {remaining:.0f}s remaining in source phase", file=sys.stderr, flush=True)
+		elif run_java:
+			for session in raw_sessions:
+				imported = imports.get(session.session_date)
+				available_at = imported[1] if imported is not None else (publication.expected_at(session) or session.closes_at).isoformat()
+				entry = _archive_entry(source, session, None if imported is None else imported[0], available_at)
+				if entry is None:
+					raise ValueError(f"Stage 'java' requires the source archive for {session.session_date}; run --stage source first")
+				file_sha256, archive_records_id = archive_identity(Path(entry["path"]))
+				entry["file_sha256"] = file_sha256
+				entry["records_id"] = archive_records_id
+				files_by_date[session.session_date] = entry
+				availability[session.session_date] = available_at
+				if imported is None or imported[0] != archive_records_id:
+					refreshed_dates.add(session.session_date)
+		else:
+			for session in raw_sessions:
+				imported = imports.get(session.session_date)
+				availability[session.session_date] = imported[1] if imported is not None else (publication.expected_at(session) or session.closes_at).isoformat()
+
+		if stage == "source":
+			return {"successful": True, "stage": "source", "lookback_years": 2,
+				"start_date": targets[0].session_date.isoformat(), "end_date": targets[-1].session_date.isoformat(),
+				"downloaded_sessions": downloaded, "java_updates": [], "partial_imports_removed": 0,
+				"python_validation": {"complete": False, "skipped": True, "batches": []},
+				"forecast_session": targets[-1].session_date.isoformat(), "forecast_input_session": targets[-1].session_date.isoformat(),
+				"training_outcomes_through": (targets[-1] if calendar.shift(targets[-1], 1).session_date in availability else calendar.shift(targets[-1], -1)).session_date.isoformat()}
+
+		checkpoint = Path(arguments.java_checkpoint_directory).resolve()
+		if run_java:
+			checkpoint.mkdir(parents=True, exist_ok=True)
+		reports: list[dict[str, Any]] = []
+		validations: list[dict[str, Any]] = []
+		if stage == "validation":
+			for offset in range(0, len(targets), arguments.batch_sessions):
+				batch = targets[offset:offset + arguments.batch_sessions]
+				expected_sessions = [session.session_date.isoformat() for session in batch]
+				candidates = []
+				for workload_path in sorted(checkpoint.glob("workload-*.json"), key=lambda item: item.stat().st_mtime, reverse=True):
+					with workload_path.open(encoding="utf-8") as stream:
+						workload = json.load(stream)
+					if workload.get("zscore_sessions") == expected_sessions:
+						candidates.append((workload_path, workload))
+				if not candidates:
+					raise ValueError(f"Stage 'validation' requires a completed Java workload for {batch[0].session_date} through {batch[-1].session_date}; run --stage java first")
+				workload_path, workload = candidates[0]
+				report_path = checkpoint / f"report-{workload['manifest_id']}.json"
+				if not report_path.is_file():
+					raise ValueError(f"Stage 'validation' requires the Java report for {workload_path.name}; run --stage java first")
+				with report_path.open(encoding="utf-8") as stream:
+					report = json.load(stream)
+				reports.append(report)
+				print(f"Independently validating {batch[0].session_date} through {batch[-1].session_date}", file=sys.stderr, flush=True)
+				zscores = validate_materialized_zscores(source, names, workload, report, checkpoint.parent / "python-validation")
+				validation_report = {"exit_code": 0 if zscores["successful"] else 1, "complete": zscores["successful"], "zscores": zscores,
+					"findings": [] if zscores["successful"] else ["Independent z-score validation found mismatches"]}
+				validations.append(validation_report)
+				atomic_write(checkpoint / f"validation-{workload['manifest_id']}.json", encode_json({**validation_report,
+					"findings": validation_report["findings"]}))
+				if not zscores["successful"]:
+					break
+		else:
+			assert command is not None
+			java_started = monotonic()
+			for offset in range(0, len(targets), arguments.batch_sessions):
 				cursor.execute("SELECT IS_USED_LOCK('stockguidance_daily_maintenance') = CONNECTION_ID()", ())
 				if cursor.fetchall() != [(1,)]:
 					raise RuntimeError("The maintenance database lock was lost")
 				connection.rollback()
-				last_lock_check = monotonic()
-			imported = imports.get(session.session_date)
-			available_at = imported[1] if imported is not None else (publication.expected_at(session) or session.closes_at).isoformat()
-			refresh_due = imported is not None and correction.refresh_due(session, datetime.fromisoformat(imported[1]), now)
-			entry = None if refresh_due else _archive_entry(source, session, None if imported is None else imported[0], available_at)
-			if refresh_due or entry is None:
-				try:
-					manifest = None if refresh_due else store.load(identity, session)
-				except InvalidManifest:
-					manifest = None
-				if manifest is not None and correction.refresh_due(session, manifest.download.available_at, now):
-					manifest = None
-				if manifest is None or manifest.download.response.state is not ResponseState.COMPLETE:
-					response = provider.fetch(source, session)
-					if response.state is not ResponseState.COMPLETE:
-						raise RuntimeError(f"Massive has not supplied a complete response for {session.session_date}; resolve publication or provider access and rerun")
-					manifest = store.save_download(identity, DownloadedSession(session, response, clock.now()))
-					downloaded += 1
-				entry = export_archive(source, manifest)
-				entry["available_at"] = manifest.download.available_at.isoformat()
-				available_at = manifest.download.available_at.isoformat()
-				refreshed_dates.add(session.session_date)
-			files_by_date[session.session_date] = entry
-			availability[session.session_date] = available_at
-			else:
-				files_by_date[session.session_date] = entry
-				availability[session.session_date] = available_at
-			remaining = (monotonic() - started) / index * (len(raw_sessions) - index)
-			print(f"Source {index}/{len(raw_sessions)} {session.session_date}; downloaded {downloaded}; estimated {remaining:.0f}s remaining in source phase", file=sys.stderr, flush=True)
-		checkpoint = Path(arguments.java_checkpoint_directory).resolve()
-		checkpoint.mkdir(parents=True, exist_ok=True)
-		reports = []
-		validations: list[dict[str, Any]] = []
-		java_started = monotonic()
-		for offset in range(0, len(targets), arguments.batch_sessions):
-			cursor.execute("SELECT IS_USED_LOCK('stockguidance_daily_maintenance') = CONNECTION_ID()", ())
-			if cursor.fetchall() != [(1,)]:
-				raise RuntimeError("The maintenance database lock was lost")
-			connection.rollback()
-			last_lock_check = monotonic()
-			batch = targets[offset:offset + arguments.batch_sessions]
-			first = calendar.shift(batch[0], -61).session_date
-			last = min(calendar.shift(batch[-1], 3).session_date, raw_sessions[-1].session_date)
-			inputs = tuple(session for session in raw_sessions if first <= session.session_date <= last)
-			batch_raw_dates = tuple(session for session in inputs if session.session_date not in imports or imports[session.session_date][2] == 0 or session.session_date in refreshed_dates)
-			workload = build_workload(source, names, calendar, inputs, batch, files_by_date, availability, batch_raw_dates)
-			path = checkpoint / f"workload-{workload['manifest_id']}.json"
-			atomic_write(path, encode_json(workload))
-			report = execute_java(arguments, command, path, checkpoint)
-			reports.append(report)
-			print(f"Independently validating {batch[0].session_date} through {batch[-1].session_date}", file=sys.stderr, flush=True)
-			zscores = validate_materialized_zscores(source, names, workload, report, checkpoint.parent / "python-validation")
-			validation_report = {"exit_code": 0 if zscores["successful"] else 1, "complete": zscores["successful"], "zscores": zscores,
-				"findings": [] if zscores["successful"] else ["Independent z-score validation found mismatches"]}
-			validations.append(validation_report)
-			atomic_write(checkpoint / f"validation-{workload['manifest_id']}.json", encode_json({**validation_report,
-				"findings": validation_report["findings"]))
-			if not zscores["successful"]:
-				break
-			completed = min(offset + len(batch), len(targets))
-			remaining = (monotonic() - java_started) / completed * (len(targets) - completed)
-			print(f"Updated and validated {completed}/{len(targets)} sessions; estimated {remaining:.0f}s remaining", file=sys.stderr, flush=True)
+				batch = targets[offset:offset + arguments.batch_sessions]
+				first = calendar.shift(batch[0], -61).session_date
+				last = min(calendar.shift(batch[-1], 3).session_date, raw_sessions[-1].session_date)
+				inputs = tuple(session for session in raw_sessions if first <= session.session_date <= last)
+				batch_raw_dates = tuple(session for session in inputs if session.session_date not in imports or imports[session.session_date][2] == 0 or session.session_date in refreshed_dates)
+				workload = build_workload(source, names, calendar, inputs, batch, files_by_date, availability, batch_raw_dates)
+				path = checkpoint / f"workload-{workload['manifest_id']}.json"
+				atomic_write(path, encode_json(workload))
+				report = execute_java(arguments, command, path, checkpoint)
+				reports.append(report)
+				atomic_write(checkpoint / f"report-{workload['manifest_id']}.json", encode_json(report))
+				if not run_validation:
+					continue
+				print(f"Independently validating {batch[0].session_date} through {batch[-1].session_date}", file=sys.stderr, flush=True)
+				zscores = validate_materialized_zscores(source, names, workload, report, checkpoint.parent / "python-validation")
+				validation_report = {"exit_code": 0 if zscores["successful"] else 1, "complete": zscores["successful"], "zscores": zscores,
+					"findings": [] if zscores["successful"] else ["Independent z-score validation found mismatches"]}
+				validations.append(validation_report)
+				atomic_write(checkpoint / f"validation-{workload['manifest_id']}.json", encode_json({**validation_report,
+					"findings": validation_report["findings"]}))
+				if not zscores["successful"]:
+					break
+				completed = min(offset + len(batch), len(targets))
+				remaining = (monotonic() - java_started) / completed * (len(targets) - completed)
+				print(f"Updated and validated {completed}/{len(targets)} sessions; estimated {remaining:.0f}s remaining", file=sys.stderr, flush=True)
 		successful = all(item["complete"] and item["zscores"]["successful"] for item in validations)
-		return {"successful": successful, "lookback_years": 2,
+		if stage == "java":
+			successful = True
+		elif stage == "validation":
+			successful = all(item["complete"] and item["zscores"]["successful"] for item in validations)
+		return {"successful": successful, "stage": stage or "all", "lookback_years": 2,
 			"start_date": targets[0].session_date.isoformat(), "end_date": targets[-1].session_date.isoformat(),
 			"downloaded_sessions": downloaded, "java_updates": reports,
 			"partial_imports_removed": partial_imports_removed,
-			"python_validation": {"complete": successful, "batches": [{**item, "findings": [str(finding) for finding in item["findings"]]} for item in validations]},
+			"python_validation": {"complete": successful if run_validation else False, "skipped": not run_validation,
+				"batches": [{**item, "findings": [str(finding) for finding in item["findings"]]} for item in validations]},
 			"forecast_session": targets[-1].session_date.isoformat(),
 			"forecast_input_session": targets[-1].session_date.isoformat(),
 			"training_outcomes_through": (targets[-1] if calendar.shift(targets[-1], 1).session_date in availability else calendar.shift(targets[-1], -1)).session_date.isoformat()}

@@ -137,7 +137,7 @@ leave an explicit incomplete result. Sales/marks still occur on their calendar.
 
 ```powershell
 & $stockguidancePython -m stockguidance.cli.compare_signals --config chronological-simulation.json --artifacts-directory output/paired > output/signal-comparison.json
-& $stockguidancePython -m pytest tests/stage10/test_comparison.py -q -s
+& $stockguidancePython -m pytest tests/simulation/test_comparison.py -q -s
 ```
 
 The JSON configuration supplies one allocation schedule, period, exact universe,

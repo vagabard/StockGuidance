@@ -522,7 +522,7 @@ usable entry can be later than the local archive minimum.
 $trainingExit = $LASTEXITCODE
 ```
 
-The small offline acceptance fixture is `tests/stage5/test_examples_acceptance.py`.
+The small offline acceptance fixture is `tests/training/test_examples.py`.
 It trains a CPU model through the in-memory repository, reads the reported
 `artifact.path` and canonical `artifact.artifact_id`, exports and reloads the
 model, then simulates a strictly later range. It also checks fees, independent
@@ -531,7 +531,7 @@ absence of future feature/label reads. It never initializes MySQL or calls a
 provider.
 
 The cross-stage Stage 10 acceptance fixture is
-`tests/stage10/test_cross_stage_acceptance.py`. It keeps retained 2010 evidence
+`tests/integration/test_archive_to_simulation.py`. It keeps retained 2010 evidence
 when provider access begins in 2021, repairs an in-access gap, blocks an older
 gap, trains a subset, and runs a later fixed simulation without future reads.
 

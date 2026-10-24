@@ -92,7 +92,7 @@ def _load(connection: Any, names: Any, cache: np.ndarray, plan: dict[str, Any], 
 			cursor.execute(f"SELECT date_id, ticker_id, {columns} FROM {quote_identifier(table)} WHERE date_id IN ({','.join('%s' for _ in identifiers)}){ticker_clause}", identifiers + filtered)
 			while True:
 				if stopped is not None and stopped.is_set():
-			raise RuntimeError("Independent z-score validation cache loader cancelled")
+					raise RuntimeError("Independent z-score validation cache loader cancelled")
 				batch = cursor.fetchmany(fetch_size)
 				if not batch:
 					break
@@ -417,7 +417,7 @@ def run_pipeline(connection: Any, names: Any, manifest: dict[str, Any], date_ids
 					print(f"{progress_label}: {len(completed)}/{len(plans) * jobs_per_plan} batches; {received / elapsed:.2f} batches/s; elapsed {_eta(elapsed)}; ETA {estimate}; {loader_state['phase']}; loaded {loader_state['rows_loaded']:,} rows", flush=True)
 					last_progress = elapsed
 				if any(worker.exitcode not in (None, 0) for worker in workers):
-				raise RuntimeError("Independent z-score validation worker exited unexpectedly")
+					raise RuntimeError("Independent z-score validation worker exited unexpectedly")
 		finally:
 			stopped.set()
 			if loader.ident is not None:

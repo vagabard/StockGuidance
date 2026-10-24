@@ -37,6 +37,22 @@ processes, vector batches of 256 tickers and database fetches of 1,000 records.
 The source phase holds one downloaded session in memory. Shared Java and NumPy
 database copies are bounded to the current batch and its dependencies.
 
+For debugging or a controlled rerun, execute one phase at a time:
+
+```powershell
+& .venv/Scripts/python.exe -m stockguidance.cli.maintain_daily --stage source
+& .venv/Scripts/python.exe -m stockguidance.cli.maintain_daily --stage java
+& .venv/Scripts/python.exe -m stockguidance.cli.maintain_daily --stage validation
+```
+
+`source` downloads and archives the requested sessions. `java` requires those
+archive files, materializes the database and saves one Java report beside each
+workload under `output/daily-maintenance/java`. `validation` requires the
+workloads and reports from `java` and runs only the independent Python checks.
+Use the same date, policy, checkpoint and batch arguments for all three
+commands. The default, with no `--stage`, runs all three phases. Numeric aliases
+`1`, `2` and `3` are also accepted for source, Java and validation respectively.
+
 For a bounded repair, override dates:
 
 ```powershell
@@ -104,7 +120,7 @@ temporary dedicated schema and the real Java writers and Python validators:
 
 ```powershell
 $env:STOCKGUIDANCE_MYSQL_INTEGRATION = '1'
-& .venv/Scripts/python.exe -m pytest tests/stage9/test_daily_maintenance.py -q
+& .venv/Scripts/python.exe -m pytest tests/workflows/test_daily_maintenance.py -q
 ```
 
 It checks initial population, repeat runs and a source correction. The temporary

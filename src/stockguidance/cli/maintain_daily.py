@@ -6,16 +6,21 @@ from typing import Callable, Sequence
 from stockguidance.cli.update_arguments import add_update_policy_arguments
 
 
-LOOKBACK_YEARS = 2
 ZSCORE_WINDOWS = (20, 60)
+MAINTENANCE_STAGES = ("source", "java", "validation")
+
+
+def parse_stage(value: str) -> str:
+	aliases = {"1": "source", "2": "java", "3": "validation", "download": "source", "update": "java", "validate": "validation"}
+	stage = aliases.get(value.lower(), value.lower())
+	if stage not in MAINTENANCE_STAGES:
+		raise argparse.ArgumentTypeError(f"stage must be one of {', '.join(MAINTENANCE_STAGES)}")
+	return stage
 
 
 def maintenance_range(as_of: date) -> tuple[date, date]:
-	try:
-		start = as_of.replace(year=as_of.year - LOOKBACK_YEARS)
-	except ValueError:
-		start = as_of.replace(year=as_of.year - LOOKBACK_YEARS, day=28)
-	return start, as_of
+	from stockguidance.workflows.daily_maintenance import maintenance_range as workflow_range
+	return workflow_range(as_of)
 
 
 def parser() -> argparse.ArgumentParser:
@@ -31,6 +36,7 @@ def parser() -> argparse.ArgumentParser:
 	arguments.add_argument("--workers", type=int, default=3)
 	arguments.add_argument("--batch-sessions", type=int, default=20)
 	arguments.add_argument("--timeout-seconds", type=float, default=7200)
+	arguments.add_argument("--stage", type=parse_stage, metavar="{source,java,validation}", help="Run only one maintenance stage; later stages require earlier stage artifacts")
 	return arguments
 
 

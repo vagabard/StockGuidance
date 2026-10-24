@@ -85,7 +85,7 @@ Replaced by `src/stockguidance/features`, `targets`, `calendar`, `database/repos
 
 ### Obsolete controller, intraday and guessed-window tests (17)
 
-Their removed APIs and old target/layout assumptions are replaced by behavioral tests in `tests/stage5` through `tests/stage9`. No tests are hidden by collection exclusions. Numerical sparse/random/activation/initialization tests are retained and import the package models.
+Their removed APIs and old target/layout assumptions are replaced by behavioral tests in the domain-organized `tests/` suites. No tests are hidden by collection exclusions. Numerical sparse/random/activation/initialization tests are retained and import the package models.
 
 - `test_reuse_tensors.py`
 - `test_training_instance_provider.py`

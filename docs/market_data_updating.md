@@ -133,7 +133,7 @@ closures, deferred availability, stale refreshes, failures, and the resulting
 - `1`: required setup, provider, storage, or completion-persistence failure.
 
 The offline cross-stage acceptance fixture in
-`tests/stage10/test_cross_stage_acceptance.py` exercises this preservation and
+`tests/integration/test_archive_to_simulation.py` exercises this preservation and
 bounded-fetch behavior with a fake provider and disposable SQLite storage.
 
 Data revisions include source/request/interval identity, normalized raw contents,

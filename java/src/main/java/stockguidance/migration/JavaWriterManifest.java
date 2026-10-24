@@ -186,17 +186,22 @@ public final class JavaWriterManifest {
         if (entry.fileSha256() != null && !entry.fileSha256().equals(archive.fileSha256())) {
             throw new IllegalArgumentException("Changed Stage 6 input: " + session);
         }
-        if (entry.recordsId() != null && !entry.recordsId().equals(archive.recordsId())) {
+        if (!trustsExistingFile(session) && entry.recordsId() != null && !entry.recordsId().equals(archive.recordsId())) {
             throw new IllegalArgumentException("Changed Stage 6 record identity: " + session);
         }
         return archive;
+    }
+
+    public boolean trustsExistingFile(LocalDate session) {
+        FileEntry entry = file(session);
+        return operational() && entry.fileSha256() == null;
     }
 
     public void verifyArchiveIdentity(ArchiveCandidateReader.SessionArchive archive) {
         FileEntry entry = file(archive.session());
         if (!entry.valid() || entry.path() == null
                 || (entry.fileSha256() != null && !entry.fileSha256().equals(archive.fileSha256()))
-                || (entry.recordsId() != null && !entry.recordsId().equals(archive.recordsId()))
+                || (!trustsExistingFile(archive.session()) && entry.recordsId() != null && !entry.recordsId().equals(archive.recordsId()))
                 || (entry.fileSha256() != null && !entry.fileSha256().equals(hash(entry.path())))) {
             throw new IllegalArgumentException("Changed Stage 6 input: " + archive.session());
         }
