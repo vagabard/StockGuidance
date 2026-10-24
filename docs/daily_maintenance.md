@@ -15,6 +15,12 @@ configuration and its table-name registry. Set `MASSIVE_API_KEY` or
 The grouped-daily Massive/Polygon adapter is shared with the other update CLIs.
 Java classes and dependencies must be available under `java/target`.
 
+The implementation keeps one `maintain_daily` command but separates the workflow
+internally into context/setup, source archival, Java materialization, and Python
+validation modules. The `--stage` option selects the corresponding module for a
+focused rerun; the default command preserves the source-to-Java-to-validation
+handoff and validates each Java batch before continuing.
+
 ## Scope and defaults
 
 The repair window starts two calendar years before the current UTC date. Each

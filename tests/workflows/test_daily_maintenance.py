@@ -23,6 +23,9 @@ from stockguidance.market_data.publication import DailyPublicationPolicy
 from stockguidance.market_data.records import DailyBar, decode_bar, records_id
 from stockguidance.legacy_migration.precision import ExactArchiveBar, exact_records_id
 from stockguidance.workflows import daily_maintenance as workflow
+from stockguidance.workflows import daily_maintenance_java as java_stage
+from stockguidance.workflows import daily_maintenance_source as source_stage
+from stockguidance.workflows import daily_maintenance_validation as validation_stage
 
 
 def test_cli_defaults_and_overrides():
@@ -164,9 +167,9 @@ def test_workflow_resumes_downloads_before_validation(tmp_path, monkeypatch):
 		assert arguments.end_date == date(2024, 7, 3)
 		return {"successful": True}
 
-	monkeypatch.setattr(workflow, "ConfiguredPolygonProvider", lambda _: SimpleNamespace(fetch=fetch))
-	monkeypatch.setattr(workflow, "execute_java", execute)
-	monkeypatch.setattr(workflow, "validate_materialized_zscores", validate)
+	monkeypatch.setattr(source_stage, "ConfiguredPolygonProvider", lambda _: SimpleNamespace(fetch=fetch))
+	monkeypatch.setattr(java_stage, "execute_java", execute)
+	monkeypatch.setattr(validation_stage, "validate_materialized_zscores", validate)
 	with pytest.raises(RuntimeError, match="interrupted"):
 		workflow.run_daily_maintenance(arguments)
 	first_count = len(fetched)
@@ -218,7 +221,7 @@ def test_real_java_mysql_update_resume_correction_and_vectorized_validation(tmp_
 			close = "11.5" if corrected[0] and session.session_date == date(2024, 7, 2) else str(10 + session.sequence % 15 / 10)
 			return response_fixture(session, close)
 
-		monkeypatch.setattr(workflow, "ConfiguredPolygonProvider", lambda _: SimpleNamespace(fetch=fetch))
+		monkeypatch.setattr(source_stage, "ConfiguredPolygonProvider", lambda _: SimpleNamespace(fetch=fetch))
 		first = workflow.run_daily_maintenance(arguments)
 		assert first["successful"], first["python_validation"]
 		second = workflow.run_daily_maintenance(arguments)
@@ -232,14 +235,14 @@ def test_real_java_mysql_update_resume_correction_and_vectorized_validation(tmp_
 		test_cursor.close()
 		connection.close()
 		corrected[0] = True
-		original_execute = workflow.execute_java
+		original_execute = java_stage.execute_java
 		def interrupt_after_commit(*args):
 			original_execute(*args)
 			raise RuntimeError("coordinator interrupted after committed Java batch")
-		monkeypatch.setattr(workflow, "execute_java", interrupt_after_commit)
+		monkeypatch.setattr(java_stage, "execute_java", interrupt_after_commit)
 		with pytest.raises(RuntimeError, match="coordinator interrupted"):
 			workflow.run_daily_maintenance(arguments)
-		monkeypatch.setattr(workflow, "execute_java", original_execute)
+		monkeypatch.setattr(java_stage, "execute_java", original_execute)
 		third = workflow.run_daily_maintenance(arguments)
 		assert third["successful"], third["python_validation"]
 		assert sum(report["raw_changed"] for report in third["java_updates"]) == 0
