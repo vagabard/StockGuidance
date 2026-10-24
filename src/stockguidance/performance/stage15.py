@@ -467,6 +467,7 @@ def _semantic_score(
 
 
 def _zscore_metadata(connection: Any, names: TableNames, manifest: dict[str, Any], target_by_id: dict[int, dict[str, Any]], expected_counts: dict[tuple[int, str, int], dict[int, int]], ticker_count: int, published_metadata: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+	operational = manifest.get("kind") == "daily-maintenance"
 	cursor = connection.cursor()
 	try:
 		cursor.execute(f"SELECT series_key, schema_version, source_scope, calendar_id, family, `window`, calculation_version, delta_definition, `precision`, missing_value_policy FROM {quote_identifier(names.zscore_series)} ORDER BY series_key")
@@ -485,6 +486,9 @@ def _zscore_metadata(connection: Any, names: TableNames, manifest: dict[str, Any
 		definition = {"schema_version": 1, "source_scope": source_scope, "calendar_id": "XNYS", "family": family, "window": window, "calculation_version": "rolling-population-zscore-v1", "delta_definition": "close_ratio_to_prior_minus_one" if family == "price_delta" else "not_applicable", "precision": "float32", "missing_value_policy": "null_status_v1"}
 		expected_fields = tuple(definition[field] for field in ("schema_version", "source_scope", "calendar_id", "family", "window", "calculation_version", "delta_definition", "precision", "missing_value_policy"))
 		series_expected[content_id(definition)] = (family, window, expected_fields)
+	if operational:
+		series_rows = [row for row in series_rows if str(row[0]) in series_expected]
+		metadata_rows = [row for row in metadata_rows if str(row[0]) in series_expected and int(row[1]) in target_by_id]
 	series_findings: list[dict[str, Any]] = []
 	for row in series_rows:
 		key = str(row[0])
@@ -511,7 +515,7 @@ def _zscore_metadata(connection: Any, names: TableNames, manifest: dict[str, Any
 		expected_total = sum(expected.values())
 		if int(row[2]) != ticker_count or int(row[3]) != expected[0] or stored_counts != expected or not isinstance(row[5], str) or len(str(row[5])) != 64 or not isinstance(row[6], str) or len(str(row[6])) != 64 or not isinstance(row[7], str) or len(str(row[7])) != 64 or expected_total != ticker_count:
 			metadata_findings.append({"series_key": series_key, "date_id": date_id, "finding": "metadata_count_or_digest_shape_mismatch"})
-		if bool(row[8]):
+		if not operational and bool(row[8]):
 			metadata_findings.append({"series_key": series_key, "date_id": date_id, "finding": "archive_snapshot_must_not_claim_historical_availability"})
 		if published_metadata is not None:
 			reference = published.get((target_by_id[date_id]["session"], family, window))

@@ -20,7 +20,9 @@ Neither a local minimum nor an override is treated as current provider
 entitlement. Current network requests require fresh, verified provider
 capability bounds.
 
-Publication and correction policy arguments are required. The operator chooses a
+Publication and correction policy arguments have overridable operational defaults.
+For the Java-backed recurring maintenance command, see [Daily maintenance](daily_maintenance.md).
+The operator chooses a
 publication delay supported by their provider/account and an explicit correction
 recheck policy, with provenance for both. Recent sessions are checked at the
 recent interval; older sessions are checked at the archive interval. Every run

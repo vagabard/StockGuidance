@@ -46,6 +46,7 @@ public final class JavaWriterManifest {
     public static JavaWriterManifest read(Path path) {
         if (path == null) throw new IllegalArgumentException("Manifest path is required");
         JsonObject root = JsonSupport.read(path);
+        if ("daily-maintenance".equals(root.get("kind"))) return readOperational(path, root);
         if (JsonSupport.integerOrDefault(root.get("schema_version"), -1) != 1 || JsonSupport.integerOrDefault(root.get("stage"), -1) != 6) {
             throw new IllegalArgumentException("Unsupported Stage 6 manifest");
         }
@@ -85,6 +86,32 @@ public final class JavaWriterManifest {
 
     public Path manifestPath() {
         return manifestPath;
+    }
+
+    private static JavaWriterManifest readOperational(Path path, JsonObject root) {
+        if (JsonSupport.integerOrDefault(root.get("schema_version"), -1) != 1) {
+            throw new IllegalArgumentException("Unsupported daily workload version");
+        }
+        JsonObject registry = object(root, "authoritative_registry");
+        TableNames names = TableNames.decode(registry);
+        Map<LocalDate, FileEntry> files = readFiles(array(root, "files"), path);
+        Map<LocalDate, TargetEntry> targets = readTargets(array(root, "targets"));
+        JsonObject unsigned = (JsonObject) JsonSupport.deepCopy(root);
+        unsigned.remove("manifest_id");
+        String identity = CanonicalJson.sha256(unsigned);
+        if (!identity.equals(requiredText(root, "manifest_id"))) {
+            throw new IllegalArgumentException("Daily workload identity changed");
+        }
+        return new JavaWriterManifest(path.toAbsolutePath(), root, names, identity,
+                requiredText(root, "source_key"), "operational", Path.of(requiredText(root, "data_root")), files, targets);
+    }
+
+    public boolean operational() {
+        return "daily-maintenance".equals(root.get("kind"));
+    }
+
+    public String availableAt(LocalDate session) {
+        return requiredText(object(root, "availability"), session.toString());
     }
 
     public JsonObject root() {

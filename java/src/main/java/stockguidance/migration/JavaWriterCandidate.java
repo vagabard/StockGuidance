@@ -78,6 +78,13 @@ public final class JavaWriterCandidate {
     private WriteResult writeRaw(Connection connection, ArchiveCandidateReader.SessionArchive archive,
                                  Path checkpoint, InterruptPoint interruption, TickerState tickers) throws SQLException {
         LocalDate session = archive.session();
+        if (manifest.operational()) {
+            try {
+                requireRawImport(connection, archive);
+                return new WriteResult("raw", session, "reused", true, 0, archive.recordsId());
+            } catch (IllegalArgumentException absentOrChanged) {
+            }
+        }
         validateCheckpoint(checkpoint, RAW_SERIES, session, archive.recordsId());
         validateTarget(connection);
         boolean committed = false;
@@ -92,6 +99,19 @@ public final class JavaWriterCandidate {
             }
             long nextTickerId = tickers.nextId;
             Map<String, StoredBar> existing = readStoredBars(connection, dateId);
+            if (manifest.operational()) {
+                try (PreparedStatement statement = connection.prepareStatement("DELETE FROM "
+                        + SqlIdentifiers.quote(names.prices(), "prices") + " WHERE date_id = ? AND ticker_id = ?")) {
+                    for (String ticker : existing.keySet()) {
+                        if (!archive.bars().containsKey(ticker)) {
+                            statement.setLong(1, dateId);
+                            statement.setLong(2, tickers.ids.get(ticker));
+                            statement.addBatch();
+                        }
+                    }
+                    statement.executeBatch();
+                }
+            }
             List<NewTicker> newTickers = new ArrayList<>();
             List<RawWrite> inserts = new ArrayList<>();
             List<RawWrite> updates = new ArrayList<>();
@@ -109,6 +129,7 @@ public final class JavaWriterCandidate {
             batchInsertTickers(connection, newTickers);
             batchInsertBars(connection, inserts);
             batchUpdateBars(connection, updates);
+            if (manifest.operational()) invalidateZScores(connection, session);
             upsertImport(connection, session, archive.recordsId(), null, null);
             upsertCompletion(connection, RAW_SERIES, session, RAW_SERIES, archive.recordsId());
             manifest.verifyArchiveIdentity(archive);
@@ -164,6 +185,10 @@ public final class JavaWriterCandidate {
         Map<String, ValidationContent.DerivedRow> rows = new TreeMap<>();
         expected.forEach((ticker, values) -> rows.put(ticker, new ValidationContent.DerivedRow(ticker, values)));
         String contentDigest = derivedContentId(rows);
+        String dependencyDigest = manifest.operational() ? operationalDependency(current, prior, following) : dependencyDigest(prior, following);
+        if (manifest.operational() && derivedMatches(connection, session, dependencyDigest, contentDigest)) {
+            return new WriteResult("derived", session, "reused", true, 0, contentDigest);
+        }
         validateCheckpoint(checkpoint, DERIVED_SERIES, session, contentDigest);
         validateTarget(connection);
         boolean committed = false;
@@ -173,16 +198,16 @@ public final class JavaWriterCandidate {
             writeMetadata(connection);
             long dateId = ensureSession(connection, session);
             requireRawImport(connection, current);
-            requireRawImport(connection, prior);
-            requireRawImport(connection, following);
-            String dependencyDigest = dependencyDigest(prior, following);
+            if (!manifest.operational() || !prior.bars().isEmpty()) requireRawImport(connection, prior);
+            if (!manifest.operational() || !following.bars().isEmpty()) requireRawImport(connection, following);
             deleteDerived(connection, dateId);
             batchInsertDerived(connection, dateId, rows);
+            if (manifest.operational()) invalidateZScores(connection, session);
             upsertImport(connection, session, current.recordsId(), dependencyDigest, contentDigest);
             upsertCompletion(connection, "derived", session, DERIVED_SERIES, contentDigest);
             manifest.verifyArchiveIdentity(current);
-            manifest.verifyArchiveIdentity(prior);
-            manifest.verifyArchiveIdentity(following);
+            if (!manifest.operational() || !prior.bars().isEmpty()) manifest.verifyArchiveIdentity(prior);
+            if (!manifest.operational() || !following.bars().isEmpty()) manifest.verifyArchiveIdentity(following);
             applyInterruption(interruption, InterruptPoint.BEFORE_COMMIT);
             connection.commit();
             committed = true;
@@ -547,7 +572,17 @@ public final class JavaWriterCandidate {
                 }
             }
         }
-        Map<String, StoredBar> stored = readStoredBars(connection, ensureSession(connection, session));
+        long dateId;
+        try (PreparedStatement statement = connection.prepareStatement("SELECT id FROM "
+                + SqlIdentifiers.quote(names.sessions(), "sessions") + " WHERE transaction_date = ?")) {
+            statement.setObject(1, session);
+            try (ResultSet rows = statement.executeQuery()) {
+                if (!rows.next()) throw new IllegalArgumentException("Raw dependency has no date mapping: " + session);
+                dateId = rows.getLong(1);
+                if (rows.next()) throw new IllegalArgumentException("Raw dependency has duplicate date mappings: " + session);
+            }
+        }
+        Map<String, StoredBar> stored = readStoredBars(connection, dateId);
         if (!stored.keySet().equals(archive.bars().keySet())
                 || archive.bars().entrySet().stream().anyMatch(entry -> !stored.get(entry.getKey()).matches(entry.getValue()))) {
             throw new IllegalArgumentException("Stored raw dependency differs from adopted archive: " + session);
@@ -556,7 +591,15 @@ public final class JavaWriterCandidate {
 
     private void upsertImport(Connection connection, LocalDate session, String rawId, String dependencyId, String derivedId) throws SQLException {
         String table = SqlIdentifiers.quote(names.imports(), "imports");
-        String availableAt = TRIAL_RECEIPT;
+        String availableAt = manifest.operational() ? manifest.availableAt(session) : TRIAL_RECEIPT;
+        if (manifest.operational() && dependencyId != null) {
+            try (PreparedStatement statement = connection.prepareStatement("SELECT available_at FROM " + table + " WHERE session_date = ?")) {
+                statement.setObject(1, session);
+                try (ResultSet rows = statement.executeQuery()) {
+                    if (rows.next()) availableAt = rows.getString(1);
+                }
+            }
+        }
         if (dependencyId == null && derivedId == null) {
             try (PreparedStatement statement = connection.prepareStatement(
                     "SELECT raw_id, available_at, derived_dependency_id, derived_content_id FROM " + table + " WHERE session_date = ?")) {
@@ -595,7 +638,7 @@ public final class JavaWriterCandidate {
         String update = "UPDATE " + table + " SET content_digest = ?, committed_at = ? WHERE workload = ? AND session_date = ? AND series_key = ?";
         try (PreparedStatement statement = connection.prepareStatement(update)) {
             statement.setString(1, digest);
-            statement.setString(2, TRIAL_RECEIPT);
+            statement.setString(2, manifest.operational() ? java.time.Instant.now().toString() : TRIAL_RECEIPT);
             statement.setString(3, workload);
             statement.setObject(4, session);
             statement.setString(5, seriesKey);
@@ -607,7 +650,7 @@ public final class JavaWriterCandidate {
             statement.setObject(2, session);
             statement.setString(3, seriesKey);
             statement.setString(4, digest);
-            statement.setString(5, TRIAL_RECEIPT);
+            statement.setString(5, manifest.operational() ? java.time.Instant.now().toString() : TRIAL_RECEIPT);
             statement.executeUpdate();
         }
     }
@@ -635,6 +678,65 @@ public final class JavaWriterCandidate {
         raw.add(prior.recordsId());
         raw.add(following.recordsId());
         return CanonicalJson.sha256(value);
+    }
+
+    private static String operationalDependency(ArchiveCandidateReader.SessionArchive current,
+                                              ArchiveCandidateReader.SessionArchive prior,
+                                              ArchiveCandidateReader.SessionArchive following) {
+        JsonArray value = JsonSupport.array();
+        value.add("legacy-open-to-close-v1");
+        value.add(prior.recordsId());
+        value.add(current.recordsId());
+        value.add(following.recordsId());
+        return CanonicalJson.sha256(value);
+    }
+
+    private void invalidateZScores(Connection connection, LocalDate session) throws SQLException {
+        List<Long> identifiers = new ArrayList<>();
+        try (PreparedStatement statement = connection.prepareStatement("SELECT id FROM "
+                + SqlIdentifiers.quote(names.sessions(), "sessions") + " WHERE transaction_date >= ? ORDER BY transaction_date LIMIT 62")) {
+            statement.setObject(1, session);
+            try (ResultSet rows = statement.executeQuery()) {
+                while (rows.next()) identifiers.add(rows.getLong(1));
+            }
+        }
+        try (PreparedStatement statement = connection.prepareStatement("DELETE FROM "
+                + SqlIdentifiers.quote(names.zscoreSessions(), "zscore_sessions") + " WHERE date_id = ?")) {
+            for (long identifier : identifiers) {
+                statement.setLong(1, identifier);
+                statement.addBatch();
+            }
+            statement.executeBatch();
+        }
+    }
+
+    private boolean derivedMatches(Connection connection, LocalDate session, String dependency, String digest) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("SELECT derived_dependency_id, derived_content_id FROM "
+                + SqlIdentifiers.quote(names.imports(), "imports") + " WHERE session_date = ?")) {
+            statement.setObject(1, session);
+            try (ResultSet rows = statement.executeQuery()) {
+                if (!rows.next() || !dependency.equals(rows.getString(1)) || !digest.equals(rows.getString(2))) return false;
+            }
+        }
+        Map<String, ValidationContent.DerivedRow> stored = new TreeMap<>();
+        String columns = String.join(", ", LegacyDerivedCalculator.COLUMNS.stream().map(column -> SqlIdentifiers.quote(column, column)).toList());
+        try (PreparedStatement statement = connection.prepareStatement("SELECT t.label, " + columns + " FROM "
+                + SqlIdentifiers.quote(names.deltas(), "deltas") + " d JOIN " + SqlIdentifiers.quote(names.tickers(), "tickers")
+                + " t ON t.id = d.ticker_id JOIN " + SqlIdentifiers.quote(names.sessions(), "sessions")
+                + " s ON s.id = d.date_id WHERE s.transaction_date = ? ORDER BY t.label")) {
+            statement.setObject(1, session);
+            try (ResultSet rows = statement.executeQuery()) {
+                while (rows.next()) {
+                    List<Double> values = new ArrayList<>();
+                    for (int index = 0; index < LegacyDerivedCalculator.COLUMNS.size(); index++) {
+                        double value = rows.getDouble(index + 2);
+                        values.add(rows.wasNull() ? null : value);
+                    }
+                    stored.put(rows.getString(1), new ValidationContent.DerivedRow(rows.getString(1), values));
+                }
+            }
+        }
+        return digest.equals(derivedContentId(stored));
     }
 
     private static String derivedContentId(Map<String, ValidationContent.DerivedRow> rows) {

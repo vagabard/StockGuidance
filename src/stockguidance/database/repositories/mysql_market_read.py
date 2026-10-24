@@ -8,7 +8,7 @@ from stockguidance.database.repositories.mysql_sessions import Cursor
 from stockguidance.database.repositories.sessions import SessionQuery
 from stockguidance.database.table_names import TableNames, TableRole, quote_identifier
 from stockguidance.market_data.legacy_derived import DERIVED_COLUMNS, LegacyDerivedRow
-from stockguidance.market_data.records import DailyBar, count_value, decimal_price, decimal_quantity
+from stockguidance.market_data.records import DailyBar, count_value, decimal_price, decimal_quantity, decimal_vwap
 
 
 def _optional_text(value: object) -> str | None:
@@ -29,7 +29,7 @@ def _derived_value(value: object) -> float | None:
 def decode_raw_row(row: Sequence[object]) -> tuple[int, DailyBar]:
 	if len(row) != 9 or not isinstance(row[1], str):
 		raise ValueError("Invalid raw record layout")
-	return normalize_date_id(row[0]), DailyBar(row[1], decimal_price(row[2]), decimal_price(row[3]), decimal_price(row[4]), decimal_price(row[5]), decimal_quantity(row[6]), None if row[7] is None else decimal_price(row[7]), None if row[8] is None else count_value(row[8]))
+	return normalize_date_id(row[0]), DailyBar(row[1], decimal_price(row[2]), decimal_price(row[3]), decimal_price(row[4]), decimal_price(row[5]), decimal_quantity(row[6]), None if row[7] is None else decimal_vwap(row[7]), None if row[8] is None else count_value(row[8]))
 
 
 def decode_derived_row(row: Sequence[object]) -> tuple[int, LegacyDerivedRow]:

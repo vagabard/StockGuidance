@@ -528,7 +528,7 @@ public final class JavaZScoreCandidate {
                 }
             }
         }
-        if (!lock) throw new IllegalArgumentException("Z-score series must be initialized before parallel publication");
+        if (!lock && !manifest.operational()) throw new IllegalArgumentException("Z-score series must be initialized before parallel publication");
         String insert = "INSERT INTO " + table + " (series_key, schema_version, source_scope, calendar_id, family, `window`, calculation_version, delta_definition, `precision`, missing_value_policy, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)";
         try (PreparedStatement statement = connection.prepareStatement(insert)) {
             statement.setString(1, key); statement.setInt(2, 1); statement.setString(3, manifest.sourceScope());

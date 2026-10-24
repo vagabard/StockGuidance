@@ -41,7 +41,7 @@ public final class JavaZScorePipelineMain implements AutoCloseable {
     private final int writers;
     private final JsonArray progress = JsonSupport.array();
 
-    private JavaZScorePipelineMain(Map<String, String> arguments) throws Exception {
+    JavaZScorePipelineMain(Map<String, String> arguments) throws Exception {
         manifest = JavaWriterManifest.read(Path.of(required(arguments, "manifest")));
         configuration = targetConfiguration(arguments);
         production = Boolean.parseBoolean(arguments.getOrDefault("production", "false"));
@@ -91,7 +91,7 @@ public final class JavaZScorePipelineMain implements AutoCloseable {
         }
     }
 
-    private JsonObject run(List<LocalDate> sessions) throws Exception {
+    JsonObject run(List<LocalDate> sessions) throws Exception {
         long started = System.nanoTime();
         synchronized (progress) { progress.clear(); }
         List<LocalDate> dependencies = sessions.stream().flatMap(session -> manifest.target(session).zscoreDependencies().stream())
@@ -108,6 +108,11 @@ public final class JavaZScorePipelineMain implements AutoCloseable {
             }
             results.addAll(completion.take().get());
             completed++;
+            if (manifest.operational()) {
+                double elapsed = (System.nanoTime() - started) / 1e9;
+                System.err.printf(java.util.Locale.ROOT, "Z-scores %d/%d sessions; estimated %.0fs remaining%n",
+                        completed, sessions.size(), elapsed / completed * (sessions.size() - completed));
+            }
         }
         results.sort(java.util.Comparator.comparing(value -> value.get("session") + "/" + value.get("family") + "/" + value.get("window")));
         JsonArray series = JsonSupport.array();
@@ -178,6 +183,8 @@ public final class JavaZScorePipelineMain implements AutoCloseable {
         item.put("row_count", result.rowCount());
         item.put("ready_count", result.readyCount());
         item.put("content_digest", result.contentDigest());
+        item.put("dependency_digest", result.dependencyDigest());
+        item.put("availability_digest", result.availabilityDigest());
         item.put("preserved_output_rows", preserved.get());
         item.put("seconds", preparationSeconds + persistenceSeconds);
         JsonObject phases = JsonSupport.object();

@@ -7,7 +7,7 @@ from stockguidance.calendar.sessions import TradingSession
 from stockguidance.market_data.identity import content_id, mapping
 
 
-def decimal_price(value: object) -> Decimal:
+def _decimal_price(value: object, places: int) -> Decimal:
 	if isinstance(value, bool) or not isinstance(value, (str, int, float, Decimal)):
 		raise ValueError("Expected a numeric price")
 	try:
@@ -15,13 +15,27 @@ def decimal_price(value: object) -> Decimal:
 		if not result.is_finite() or result <= 0 or result >= Decimal("1e60"):
 			raise ValueError("Price must be finite, positive, and representable")
 		with localcontext() as context:
-			context.prec = max(70, len(result.as_tuple().digits) + abs(result.as_tuple().exponent) + 8)
-			result = result.quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
+			context.prec = max(90, len(result.as_tuple().digits) + abs(int(result.as_tuple().exponent)) + places)
+			result = result.quantize(Decimal(1).scaleb(-places), rounding=ROUND_HALF_UP)
 		if result <= 0:
 			raise ValueError("Price rounds to zero")
 		return result
 	except InvalidOperation as error:
 		raise ValueError("Invalid price") from error
+
+
+def decimal_price(value: object) -> Decimal:
+	return _decimal_price(value, 8)
+
+
+def decimal_vwap(value: object) -> Decimal:
+	return _decimal_price(value, 22)
+
+
+def canonical_decimal(value: Decimal | int) -> str:
+	decimal = Decimal(value)
+	text = format(decimal, "f")
+	return "0" if decimal == 0 else text.rstrip("0").rstrip(".") if "." in text else text
 
 
 def decimal_quantity(value: object) -> Decimal:
@@ -67,15 +81,15 @@ class DailyBar:
 		if decimal_quantity(self.volume) != self.volume:
 			raise ValueError("Daily volume must use exact decimal quantity precision")
 		if self.vwap is not None:
-			decimal_price(self.vwap)
+			decimal_vwap(self.vwap)
 		if self.transactions is not None:
 			count_value(self.transactions)
 
 
 def bar_payload(bar: DailyBar) -> dict[str, object]:
-	volume = decimal_quantity(bar.volume)
-	volume_value: int | str = int(volume) if volume == volume.to_integral_value() else format(volume.normalize(), "f")
-	return {"T": bar.ticker, "o": str(decimal_price(bar.open)), "h": str(decimal_price(bar.high)), "l": str(decimal_price(bar.low)), "c": str(decimal_price(bar.close)), "v": volume_value, "vw": None if bar.vwap is None else str(decimal_price(bar.vwap)), "n": bar.transactions}
+	return {"T": bar.ticker, "o": canonical_decimal(decimal_price(bar.open)), "h": canonical_decimal(decimal_price(bar.high)),
+		"l": canonical_decimal(decimal_price(bar.low)), "c": canonical_decimal(decimal_price(bar.close)),
+		"v": canonical_decimal(decimal_quantity(bar.volume)), "vw": None if bar.vwap is None else canonical_decimal(decimal_vwap(bar.vwap)), "n": bar.transactions}
 
 
 def decode_bar(value: object) -> DailyBar:
@@ -83,7 +97,7 @@ def decode_bar(value: object) -> DailyBar:
 	ticker = row["T"]
 	if not isinstance(ticker, str):
 		raise ValueError("Ticker must be text")
-	return DailyBar(ticker, decimal_price(row["o"]), decimal_price(row["h"]), decimal_price(row["l"]), decimal_price(row["c"]), decimal_quantity(row["v"]), None if row.get("vw") is None else decimal_price(row["vw"]), None if row.get("n") is None else count_value(row["n"]))
+	return DailyBar(ticker, decimal_price(row["o"]), decimal_price(row["h"]), decimal_price(row["l"]), decimal_price(row["c"]), decimal_quantity(row["v"]), None if row.get("vw") is None else decimal_vwap(row["vw"]), None if row.get("n") is None else count_value(row["n"]))
 
 
 def provider_bar(value: object, session: TradingSession) -> DailyBar:
@@ -96,4 +110,4 @@ def provider_bar(value: object, session: TradingSession) -> DailyBar:
 
 
 def records_id(records: tuple[DailyBar, ...]) -> str:
-	return content_id([bar_payload(bar) for bar in sorted(records, key=lambda item: item.ticker)])
+	return content_id({"schema_version": 2, "records": [bar_payload(bar) for bar in sorted(records, key=lambda item: item.ticker)]})

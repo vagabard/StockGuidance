@@ -188,32 +188,27 @@ are never replaced with interpolated values or zeroes.
 
 ### Daily maintenance
 
-Use the repeat-safe maintenance frontend once per day. It computes an inclusive
-two-calendar-year window ending on the current UTC date, asks
-`update_market_data` to download missing source files and reconcile raw rows,
-then invokes the selected Java production writers for derived rows and z-score
-windows `20,60`. Python performs a read-only validation after those writes.
-Existing valid rows are reused; rerunning the same day is safe.
+Run the maintenance frontend daily or after missed runs. It discovers published
+XNYS trading days in a two-calendar-year repair window, downloads missing,
+corrupt or refresh-due Massive source responses, and uses the production Java
+writers for raw rows, daily derived rows and z-score windows `20,60`. Independent
+Python validation checks each bounded batch, using the Stage 15 vectorized,
+multiprocess z-score validator. Existing matching raw and derived rows are reused;
+z-score calculations recheck their dependencies and preserve matching output rows.
 
 ```powershell
-& $pythonExe -m stockguidance.cli.maintain_daily `
-  --data-root data --dbinfo-file dbinfo.id --adjustment adjusted `
-  --recent-window-days '<recent correction window>' `
-  --recent-refresh-hours '<recent refresh interval>' `
-  --archive-refresh-days '<archive refresh interval>' `
-  --correction-evidence '<correction provenance>' `
-  --java-manifest data/java/production-manifest.json
+& .venv/Scripts/python.exe -m stockguidance.cli.maintain_daily
 ```
 
-The command is read/write and requires the normal provider credential and
-database permissions. Use `--initialize-schema` or
-`--initialize-zscore-schema` only during an explicitly reviewed first setup
-before selecting this Java-backed daily command; normal daily runs should omit
-both. The Java manifest must cover every target
-session in the requested range and its archive dependencies; do not use an old
-historical manifest for sessions it does not cover. A nonzero result must be
-investigated before training or simulation. The JSON output records the fixed
-range, downloaded sessions, Java writer reports, and Python validation result.
+The command is read/write and requires the normal provider credential and an
+initialized migrated production schema. Build Java with
+`mvn -f java/pom.xml package -DskipTests` after code changes. Source semantics and
+table names are inferred from the database configuration. No operator-supplied
+migration manifest is required: live workload descriptions and resume evidence
+are generated under `output/daily-maintenance/java`.
+A nonzero result must be resolved before training or forecasting. JSON goes to
+stdout; progress and phase estimates go to stderr. See
+[Daily maintenance](daily_maintenance.md) for recovery, bounds and readiness.
 The default publication policy is 15 minutes with an explicitly labeled
 operational assumption; override it with `--publication-delay-minutes` and
 `--publication-evidence` when provider-specific evidence is available.

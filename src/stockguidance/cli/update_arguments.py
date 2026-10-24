@@ -9,7 +9,7 @@ DEFAULT_ARCHIVE_REFRESH_DAYS = 30.0
 DEFAULT_CORRECTION_EVIDENCE = "Default daily maintenance correction policy"
 
 
-def add_update_policy_arguments(arguments: argparse.ArgumentParser) -> None:
+def add_update_policy_arguments(arguments: argparse.ArgumentParser, *, include_schema_initialization: bool = True) -> None:
 	arguments.add_argument("--history-start")
 	arguments.add_argument("--history-evidence")
 	arguments.add_argument("--adjustment", choices=("adjusted", "unadjusted"), default="adjusted")
@@ -19,4 +19,5 @@ def add_update_policy_arguments(arguments: argparse.ArgumentParser) -> None:
 	arguments.add_argument("--recent-refresh-hours", type=float, default=DEFAULT_RECENT_REFRESH_HOURS)
 	arguments.add_argument("--archive-refresh-days", type=float, default=DEFAULT_ARCHIVE_REFRESH_DAYS)
 	arguments.add_argument("--correction-evidence", default=DEFAULT_CORRECTION_EVIDENCE)
-	arguments.add_argument("--initialize-schema", action="store_true", help="Explicitly create missing updater tables; existing tables are never altered")
+	if include_schema_initialization:
+		arguments.add_argument("--initialize-schema", action="store_true", help="Explicitly create missing updater tables; existing tables are never altered")

@@ -17,6 +17,7 @@ class PolygonHttpTransport:
 	def get(self, path: str, adjusted: bool) -> HttpResponse:
 		import json
 		import time
+		from decimal import Decimal
 		from urllib.error import HTTPError
 		from urllib.request import Request, urlopen
 
@@ -29,7 +30,7 @@ class PolygonHttpTransport:
 			request = Request(f"https://api.polygon.io{path}?adjusted={str(adjusted).lower()}&{query}", headers={"Authorization": f"Bearer {self.api_key}"})
 			try:
 				with urlopen(request, timeout=60) as response:
-					payload: object = json.loads(response.read())
+					payload: object = json.loads(response.read(), parse_float=Decimal)
 					return HttpResponse(response.status, payload)
 			except HTTPError as error:
 				status = error.code
