@@ -88,6 +88,7 @@ def test_workload_contains_all_dependencies_and_changes_when_source_changes(tmp_
 		availability[session.session_date] = cutoff.isoformat()
 	workload = workflow.build_workload(source, load_table_names(), calendar, raw, targets, files, availability)
 	assert workload["kind"] == "daily-maintenance"
+	assert workload["calendar_id"] == calendar.calendar_id
 	assert workload["zscore_sessions"] == [session.session_date.isoformat() for session in targets]
 	assert len(workload["targets"][-1]["zscore_dependencies"]) == 61
 	assert workload["targets"][-1]["derived_dependencies"][-1] == "2024-07-05"

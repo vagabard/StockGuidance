@@ -19,7 +19,7 @@ from stockguidance.calendar.exchange import ExchangeCalendar
 from stockguidance.calendar.protocols import SessionCalendar
 from stockguidance.calendar.sessions import TradingSession
 from stockguidance.config.paths import resolve_cli_path
-from stockguidance.config.source import DataConfiguration, PriceAdjustment, SourceConfig
+from stockguidance.config.source import DEFAULT_CALENDAR_ID, DataConfiguration, PriceAdjustment, SourceConfig
 from stockguidance.database.configuration import load_database_configuration
 from stockguidance.database.connections import MySQLConnectionFactory
 from stockguidance.database.table_names import TableNames, quote_identifier
@@ -136,7 +136,7 @@ def build_workload(source: SourceConfig, names: TableNames, calendar: SessionCal
 		dependencies = calendar.sessions(calendar.shift(session, -60).session_date, session.session_date) if session in targets else ()
 		target_entries.append({"session": session.session_date.isoformat(), "derived_dependencies": [prior.session_date.isoformat(), following.session_date.isoformat()],
 			"zscore_dependencies": [item.session_date.isoformat() for item in dependencies]})
-	root = {"schema_version": 1, "kind": "daily-maintenance", "data_root": str(source.data_root.resolve()),
+	root = {"schema_version": 1, "kind": "daily-maintenance", "data_root": str(source.data_root.resolve()), "calendar_id": calendar.calendar_id,
 		"source_key": data_configuration_key(source.data_configuration), "source": {"archive_source": asdict(source.identity)},
 		"authoritative_registry": {"schema_version": 1, "tables": names.tables(), "zscore_templates": names.templates()},
 		"files": files, "targets": target_entries, "mappings": {"ticker_mappings": []},
@@ -206,12 +206,13 @@ def run_daily_maintenance(arguments: argparse.Namespace) -> dict[str, object]:
 	publication = DailyPublicationPolicy(timedelta(minutes=arguments.publication_delay_minutes), arguments.publication_evidence)
 	correction = CorrectionPolicy(timedelta(days=arguments.recent_window_days), timedelta(hours=arguments.recent_refresh_hours),
 		timedelta(days=arguments.archive_refresh_days), arguments.correction_evidence)
-	calendar = ExchangeCalendar("XNYS", min(start, date(2005, 1, 1)), max(end, now.date()) + timedelta(days=14))
-	raw_sessions, targets = session_workload(calendar, start, end, now, publication)
 	database_path = resolve_cli_path(arguments.dbinfo_file, "dbinfo.id")
 	arguments.dbinfo_file = str(database_path)
 	configuration = load_database_configuration(database_path)
 	names = configuration.load_table_names()
+	data_configuration = configuration.load_data_configuration() if configuration.data_configuration_file is not None else None
+	calendar = ExchangeCalendar(DEFAULT_CALENDAR_ID if data_configuration is None else data_configuration.calendar_id, min(start, date(2005, 1, 1)), max(end, now.date()) + timedelta(days=14))
+	raw_sessions, targets = session_workload(calendar, start, end, now, publication)
 	connection = MySQLConnectionFactory()(database_path)
 	cursor = connection.cursor()
 	locked = False
@@ -220,9 +221,7 @@ def run_daily_maintenance(arguments: argparse.Namespace) -> dict[str, object]:
 		locked = cursor.fetchall() == [(1,)]
 		if not locked:
 			raise RuntimeError("Another maintenance process is running on this database server")
-		if configuration.data_configuration_file is not None:
-			data_configuration = configuration.load_data_configuration()
-		else:
+		if data_configuration is None:
 			cursor.execute(f"SELECT source_family, endpoint, market, universe, raw_price_split_adjusted, raw_price_dividend_adjusted, raw_price_vendor_defined_adjustment FROM {quote_identifier(names.source)} WHERE id = 1", ())
 			rows = cursor.fetchall()
 			if len(rows) != 1:

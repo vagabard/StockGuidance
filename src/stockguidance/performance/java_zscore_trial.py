@@ -9,6 +9,7 @@ import subprocess
 import traceback
 
 from stockguidance.database.table_names import quote_identifier
+from stockguidance.config.source import DEFAULT_CALENDAR_ID
 from stockguidance.market_data.identity import content_id
 from stockguidance.performance.candidates import _file_hash, _manifest_table_names
 from stockguidance.performance.mysql_candidates import MySQLTarget, load_manifest
@@ -135,7 +136,7 @@ class ZScoreTrial:
         )
         receipt = {str(session): (raw_id, available_at) for session, raw_id, available_at in imports}
         expected = {session: self.files[session].get("records_id") for session in self.dependencies}
-        calendar = ExchangeCalendar("XNYS", date.fromisoformat(self.dependencies[0]), date.fromisoformat(self.target_session))
+        calendar = ExchangeCalendar(str(self.manifest.get("calendar_id", DEFAULT_CALENDAR_ID)), date.fromisoformat(self.dependencies[0]), date.fromisoformat(self.target_session))
         sessions = tuple(calendar.session(date.fromisoformat(session)) for session in self.dependencies)
         observations: dict[int, tuple[ZScoreObservation, ...]] = {}
         for ticker_id in ticker_ids:
@@ -217,7 +218,7 @@ class ZScoreTrial:
         definition = {
             "schema_version": 1,
             "source_scope": content_id(self.manifest["source"]["archive_source"]),
-            "calendar_id": "XNYS",
+            "calendar_id": str(self.manifest.get("calendar_id", DEFAULT_CALENDAR_ID)),
             "family": family,
             "window": window,
             "calculation_version": "rolling-population-zscore-v1",

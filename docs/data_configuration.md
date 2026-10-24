@@ -10,6 +10,14 @@ The active data configuration is a separate JSON document referenced by
 not change the semantic configuration key. `market` is the broad market scope;
 security records retain their exchange metadata and stable identifiers.
 
+`calendar_id` is the fallback `exchange_calendars` calendar for broad jobs that
+do not specify ticker IDs. Explicit ticker queries resolve the calendar from
+the selected rows' `ticker_symbol.exchange` values in the database; mixed
+database exchanges are rejected because one query cannot use multiple session
+calendars. The setting must be a supported calendar name such as `XNYS` or
+`XNAS`, and existing configurations that omit it continue to use `XNYS`.
+It does not change the semantic data-configuration key.
+
 The raw-price basis is described independently by
 `raw_price_split_adjusted`, `raw_price_dividend_adjusted`, and the optional
 `raw_price_vendor_defined_adjustment` value.

@@ -4,6 +4,7 @@
   "endpoint": "/v2/aggs/grouped/locale/us/market/stocks/{date}",
   "market": "us-stocks",
   "universe": "us-stocks-excluding-otc",
+  "calendar_id": "XNYS",
   "interval": "1d",
   "raw_price_split_adjusted": true,
   "raw_price_dividend_adjusted": false,

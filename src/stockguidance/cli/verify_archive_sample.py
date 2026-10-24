@@ -8,20 +8,20 @@ from typing import Any
 from stockguidance.calendar.exchange import ExchangeCalendar
 from stockguidance.cli.archive_study import stratified_sample
 from stockguidance.cli.paths import resolve_cli_path
-from stockguidance.config.source import DataConfiguration
+from stockguidance.config.source import DEFAULT_CALENDAR_ID, DataConfiguration
 from stockguidance.market_data.atomic import atomic_write
 from stockguidance.market_data.identity import content_id, encode_json
 from stockguidance.market_data.providers.polygon import GROUPED_ENDPOINT, GROUPED_UNIVERSE
 from stockguidance.performance.archive_read import archive_records_id, inventory, read_archive
 
 
-def verify_sample(root: Path, attestation: str, seed: int = 20261019) -> dict[str, Any]:
+def verify_sample(root: Path, attestation: str, seed: int = 20261019, calendar_id: str = DEFAULT_CALENDAR_ID) -> dict[str, Any]:
 	if not attestation.strip():
 		raise ValueError("Operator source attestation is required")
 	paths = inventory(root)
 	selected = stratified_sample(paths, 9, seed)
 	first, last = date.fromisoformat(paths[0].stem), date.fromisoformat(paths[-1].stem)
-	calendar = ExchangeCalendar("XNYS", date(first.year, 1, 1), date(last.year, 12, 31))
+	calendar = ExchangeCalendar(calendar_id, date(first.year, 1, 1), date(last.year, 12, 31))
 	sessions = {session.session_date for session in calendar.sessions(first, last)}
 	results = []
 	for path in selected:
@@ -35,13 +35,14 @@ def verify_sample(root: Path, attestation: str, seed: int = 20261019) -> dict[st
 			result.update(passed=False, finding="Archive file failed content, timestamp, numeric or session validation")
 		results.append(result)
 	identity = DataConfiguration("polygon", GROUPED_ENDPOINT, "us-stocks", GROUPED_UNIVERSE, True, False).to_source_identity()
-	return {"schema_version": 1, "operation": "verify_archive_sample", "verified_at": datetime.now(timezone.utc).isoformat(), "seed": seed, "source_identity": asdict(identity), "provenance_kind": "operator_attested_retained_archive", "operator_attestation": attestation, "original_network_received_at": None, "inventory_id": content_id([str(path.relative_to(root)) for path in paths]), "inventory_count": len(paths), "samples": results, "source_accepted": all(result["passed"] for result in results), "all_files_adopted": False, "scope_note": "Passing samples establish provenance under the operator policy; each other file still requires validation. No original receipt time or independent market completeness is established."}
+	return {"schema_version": 1, "operation": "verify_archive_sample", "verified_at": datetime.now(timezone.utc).isoformat(), "seed": seed, "calendar_id": calendar.calendar_id, "source_identity": asdict(identity), "provenance_kind": "operator_attested_retained_archive", "operator_attestation": attestation, "original_network_received_at": None, "inventory_id": content_id([str(path.relative_to(root)) for path in paths]), "inventory_count": len(paths), "samples": results, "source_accepted": all(result["passed"] for result in results), "all_files_adopted": False, "scope_note": "Passing samples establish provenance under the operator policy; each other file still requires validation. No original receipt time or independent market completeness is established."}
 
 
-def recheck_sample(acceptance_file: Path, root: Path, java_comparison_file: Path, database_comparison_file: Path | None = None) -> dict[str, Any]:
+def recheck_sample(acceptance_file: Path, root: Path, java_comparison_file: Path, database_comparison_file: Path | None = None, calendar_id: str = DEFAULT_CALENDAR_ID) -> dict[str, Any]:
 	acceptance = json.loads(acceptance_file.read_text(encoding="utf-8"))
 	if acceptance.get("schema_version") != 1 or acceptance.get("source_accepted") is not True:
 		raise ValueError("An accepted source report is required")
+	calendar_id = acceptance.get("calendar_id", calendar_id)
 	samples = acceptance.get("samples")
 	if not isinstance(samples, list) or len(samples) != 9 or len({sample.get("session") for sample in samples}) != 9:
 		raise ValueError("Exactly nine distinct accepted samples are required")
@@ -58,7 +59,7 @@ def recheck_sample(acceptance_file: Path, root: Path, java_comparison_file: Path
 	if len(paths) != acceptance.get("inventory_count"):
 		findings.append({"type": "inventory_count_drift", "expected": acceptance.get("inventory_count"), "actual": len(paths)})
 	first, last = date.fromisoformat(paths[0].stem), date.fromisoformat(paths[-1].stem)
-	calendar = ExchangeCalendar("XNYS", date(first.year, 1, 1), date(last.year, 12, 31))
+	calendar = ExchangeCalendar(calendar_id, date(first.year, 1, 1), date(last.year, 12, 31))
 	sessions = {session.session_date for session in calendar.sessions(first, last)}
 	inventory_paths = {item.resolve() for item in paths}
 	checked: list[dict[str, Any]] = []
@@ -98,6 +99,7 @@ def recheck_sample(acceptance_file: Path, root: Path, java_comparison_file: Path
 def main(argv: list[str] | None = None) -> int:
 	parser = argparse.ArgumentParser(description="Check nine deterministic random retained Massive files without database access")
 	parser.add_argument("--data-root", default="data")
+	parser.add_argument("--calendar-id", default=DEFAULT_CALENDAR_ID, help="exchange_calendars calendar name, for example XNYS or XNAS")
 	parser.add_argument("--attestation")
 	parser.add_argument("--output", type=Path, default=Path("output/legacy-migration/source-acceptance.json"))
 	parser.add_argument("--recheck", action="store_true")
@@ -108,7 +110,7 @@ def main(argv: list[str] | None = None) -> int:
 	try:
 		if arguments.recheck:
 			acceptance_file = arguments.acceptance_file.resolve()
-			recheck = recheck_sample(acceptance_file, resolve_cli_path(arguments.data_root, "data"), arguments.java_comparison_file.resolve(), arguments.database_comparison_file.resolve())
+			recheck = recheck_sample(acceptance_file, resolve_cli_path(arguments.data_root, "data"), arguments.java_comparison_file.resolve(), arguments.database_comparison_file.resolve(), arguments.calendar_id)
 			acceptance = json.loads(acceptance_file.read_text(encoding="utf-8"))
 			acceptance["stage4_recheck"] = recheck
 			atomic_write(acceptance_file, encode_json(acceptance))
@@ -116,7 +118,7 @@ def main(argv: list[str] | None = None) -> int:
 			return 0 if recheck["source_accepted"] else 2
 		if not arguments.attestation:
 			parser.error("--attestation is required unless --recheck is used")
-		report = verify_sample(resolve_cli_path(arguments.data_root, "data"), arguments.attestation)
+		report = verify_sample(resolve_cli_path(arguments.data_root, "data"), arguments.attestation, calendar_id=arguments.calendar_id)
 		atomic_write(arguments.output, encode_json(report))
 		print(json.dumps({"source_accepted": report["source_accepted"], "report": str(arguments.output)}))
 		return 0 if report["source_accepted"] else 2

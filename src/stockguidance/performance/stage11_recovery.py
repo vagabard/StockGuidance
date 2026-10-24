@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from stockguidance.calendar.exchange import ExchangeCalendar
+from stockguidance.config.source import DEFAULT_CALENDAR_ID
 from stockguidance.legacy_migration.precision import ExactArchiveBar, exact_records_id, read_exact_archive
 from stockguidance.market_data.legacy_derived import DERIVED_COLUMNS
 from stockguidance.performance.candidates import _exact_derived_rows, _file_hash, _manifest_table_names
@@ -217,7 +218,7 @@ def _verify_derived(context: Stage11Context, target: MySQLTarget, names: Any, se
 
 def _zscore_inputs(target: MySQLTarget, names: Any, context: Stage11Context, dependency_dates: tuple[str, ...]) -> tuple[tuple[Any, ...], dict[int, dict[str, Decimal | None]], dict[int, dict[str, Decimal | None]], dict[str, int]]:
 	dates = tuple(date.fromisoformat(value) for value in dependency_dates)
-	calendar = ExchangeCalendar("XNYS", min(dates), max(dates))
+	calendar = ExchangeCalendar(str(context.manifest.get("calendar_id", DEFAULT_CALENDAR_ID)), min(dates), max(dates))
 	sessions = tuple(calendar.session(value) for value in dates)
 	connection = target.connect()
 	try:

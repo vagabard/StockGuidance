@@ -6,6 +6,7 @@ from stockguidance.calendar.exchange import ExchangeCalendar
 from stockguidance.cli.paths import resolve_cli_path
 from stockguidance.config.source import DataConfiguration, PriceAdjustment, SourceConfig, SourceIdentity
 from stockguidance.database.repositories.mysql_sessions import MySQLSessionRepository
+from stockguidance.database.repositories.mysql_tickers import read_ticker_calendar
 from stockguidance.database.repositories.mysql_validation import MySQLValidationRepository
 from stockguidance.database.repositories.mysql_zscores import MySQLZScoreRepository
 from stockguidance.database.connections import MySQLConnectionFactory
@@ -63,7 +64,8 @@ def assemble_and_validate(arguments: argparse.Namespace) -> ValidationResult:
 	if mode is SignalMode.ENTRY_OPEN and arguments.ticker_ids is None:
 		raise ValueError("Opening validation requires the full ordered universe and lookback")
 	order = (CloseFeature.RELATIVE_CLOSE,) if mode is SignalMode.PREVIOUS_CLOSE else (CloseFeature.RELATIVE_CLOSE, CloseFeature.ENTRY_OPEN_RETURN)
-	features = None if arguments.ticker_ids is None else FeatureSpec(tuple(int(value.strip()) for value in arguments.ticker_ids.split(",")), arguments.lookback_sessions, signal_mode=mode, feature_order=order, adjustment=identity.adjustment)
+	ticker_ids = None if arguments.ticker_ids is None else tuple(int(value.strip()) for value in arguments.ticker_ids.split(","))
+	features = None if ticker_ids is None else FeatureSpec(ticker_ids, arguments.lookback_sessions, signal_mode=mode, feature_order=order, adjustment=identity.adjustment)
 	cutoff = datetime.fromisoformat(arguments.as_of) if arguments.as_of else clock.now()
 	requested_start = date.fromisoformat(arguments.start_date) if arguments.start_date else None
 	requested_end = date.fromisoformat(arguments.end_date) if arguments.end_date else None
@@ -73,7 +75,10 @@ def assemble_and_validate(arguments: argparse.Namespace) -> ValidationResult:
 	if boundary is not None:
 		calendar_start = min(calendar_start, boundary.history_start)
 	calendar_end = max(cutoff.date(), requested_end or cutoff.date()) + timedelta(days=14)
-	calendar = ExchangeCalendar("XNYS", calendar_start, calendar_end)
+	calendar_id = data_configuration.calendar_id
+	if ticker_ids is not None:
+		calendar_id = read_ticker_calendar(source, MySQLConnectionFactory(), ticker_ids, table_names)
+	calendar = ExchangeCalendar(calendar_id, calendar_start, calendar_end)
 	local_inventories: list[LocalCoverageInventory] = []
 	manifest_store = ManifestStore(source.data_root)
 	manifest_inventory = manifest_store.inventory(identity, calendar, start=calendar.start, end=calendar.end)

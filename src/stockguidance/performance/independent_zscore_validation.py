@@ -2,6 +2,7 @@ from pathlib import Path
 from typing import Any
 import json
 
+from stockguidance.config.source import DEFAULT_CALENDAR_ID
 from stockguidance.database.table_names import TableRole, quote_identifier
 from stockguidance.performance.vectorized_zscore_validation import PipelineOptions, run_pipeline
 from stockguidance.market_data.identity import content_id
@@ -23,9 +24,10 @@ def _validate_metadata(connection: Any, names: Any, manifest: dict[str, Any], ta
 	if not isinstance(archive_source, dict):
 		raise ValueError("Maintenance workload has no source scope")
 	source_scope = content_id(archive_source)
+	calendar_id = str(manifest.get("calendar_id", DEFAULT_CALENDAR_ID))
 	expected_series: dict[str, tuple[str, int, tuple[Any, ...]]] = {}
 	for family, window in ((family, window) for family in ("price", "price_delta") for window in (20, 60)):
-		definition = {"schema_version": 1, "source_scope": source_scope, "calendar_id": "XNYS", "family": family, "window": window,
+		definition = {"schema_version": 1, "source_scope": source_scope, "calendar_id": calendar_id, "family": family, "window": window,
 			"calculation_version": "rolling-population-zscore-v1", "delta_definition": "close_ratio_to_prior_minus_one" if family == "price_delta" else "not_applicable",
 			"precision": "float32", "missing_value_policy": "null_status_v1"}
 		fields = tuple(definition[field] for field in ("schema_version", "source_scope", "calendar_id", "family", "window", "calculation_version", "delta_definition", "precision", "missing_value_policy"))

@@ -189,7 +189,7 @@ are never replaced with interpolated values or zeroes.
 ### Daily maintenance
 
 Run the maintenance frontend daily or after missed runs. It discovers published
-XNYS trading days in a two-calendar-year repair window, downloads missing,
+Configured exchange-calendar trading days in a two-calendar-year repair window, downloads missing,
 corrupt or refresh-due Massive source responses, and uses the production Java
 writers for raw rows, daily derived rows and z-score windows `20,60`. Independent
 Python validation checks each bounded batch, using the Stage 15 vectorized,

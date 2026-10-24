@@ -6,7 +6,7 @@ from typing import Callable, Sequence
 from stockguidance.calendar.clock import SystemClock
 from stockguidance.calendar.exchange import ExchangeCalendar
 from stockguidance.cli.paths import resolve_cli_path
-from stockguidance.config.source import DataConfiguration, PriceAdjustment, SourceConfig, SourceIdentity
+from stockguidance.config.source import DEFAULT_CALENDAR_ID, DataConfiguration, PriceAdjustment, SourceConfig, SourceIdentity
 from stockguidance.database.configuration import load_database_configuration
 from stockguidance.database.connections import MySQLConnectionFactory
 from stockguidance.database.repositories.mysql_sessions import ConnectionFactory, MySQLSessionRepository
@@ -42,11 +42,11 @@ def parser() -> argparse.ArgumentParser:
 	return arguments
 
 
-def _calendar(arguments: argparse.Namespace, clock: SystemClock) -> ExchangeCalendar:
+def _calendar(arguments: argparse.Namespace, clock: SystemClock, calendar_id: str = DEFAULT_CALENDAR_ID) -> ExchangeCalendar:
 	history_start = None if arguments.history_start is None else date.fromisoformat(arguments.history_start)
 	start = min(date(1970, 1, 1), *(item for item in (history_start,) if item is not None))
 	end = max(arguments.end_date, clock.now().date()) + timedelta(days=14)
-	return ExchangeCalendar("XNYS", start, end)
+	return ExchangeCalendar(calendar_id, start, end)
 
 
 def _boundary(
@@ -96,7 +96,7 @@ def assemble_and_update_zscores(arguments: argparse.Namespace) -> ZScoreUpdateRe
 	source = SourceConfig(identity, resolve_cli_path(arguments.data_root, "data"), database_path, "unused-by-local-z-score-update", _configuration=data_configuration)
 	table_names = database_configuration.load_table_names()
 	connect = MySQLConnectionFactory()
-	calendar = _calendar(arguments, clock)
+	calendar = _calendar(arguments, clock, data_configuration.calendar_id)
 	boundary = _boundary(arguments, source, calendar, clock, table_names, connect)
 	publication = DailyPublicationPolicy(timedelta(minutes=arguments.publication_delay_minutes), arguments.publication_evidence)
 	settings = ZScoreUpdateSettings(arguments.start_date, arguments.end_date, arguments.windows, publication, arguments.initialize_schema)

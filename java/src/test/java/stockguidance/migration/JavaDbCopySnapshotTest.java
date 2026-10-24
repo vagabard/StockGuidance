@@ -251,6 +251,7 @@ class JavaDbCopySnapshotTest {
         JsonObject root = JsonSupport.object();
         root.put("schema_version", 1);
         root.put("stage", 6);
+        root.put("calendar_id", "XNYS");
         root.put("corrected_schema_hash", "schema");
         JsonObject registry = JsonSupport.read(Path.of("../src/stockguidance/database/table_names.json"));
         root.put("authoritative_registry", registry);

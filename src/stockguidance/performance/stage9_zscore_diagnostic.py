@@ -7,6 +7,7 @@ from time import perf_counter
 from uuid import uuid4
 
 from stockguidance.calendar.exchange import ExchangeCalendar
+from stockguidance.config.source import DEFAULT_CALENDAR_ID
 from stockguidance.market_data.identity import content_id
 from stockguidance.legacy_migration.precision import exact_records_id, read_exact_archive
 from stockguidance.performance.mysql_candidates import load_manifest
@@ -22,7 +23,7 @@ from stockguidance.performance.sql_zscore_candidate import SQLZScoreCandidate
 def fixture_manifest(manifest: dict, directory: Path) -> Path:
 	directory.mkdir(parents=True, exist_ok=True)
 	fixture = deepcopy(manifest)
-	calendar = ExchangeCalendar("XNYS", date(2024, 1, 1), date(2024, 5, 1))
+	calendar = ExchangeCalendar(str(manifest.get("calendar_id", DEFAULT_CALENDAR_ID)), date(2024, 1, 1), date(2024, 5, 1))
 	sessions = calendar.sessions(date(2024, 1, 2), date(2024, 5, 1))[:61]
 	fixture["files"] = []
 	mappings = [{"id": identifier, "label": f"FIX{identifier}"} for identifier in range(1, 34)]

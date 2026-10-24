@@ -22,6 +22,7 @@ from stockguidance.market_data.atomic import atomic_write
 from stockguidance.market_data.identity import content_id, encode_json
 from stockguidance.market_data.legacy_derived import DERIVED_COLUMNS
 from stockguidance.performance.candidates import _exact_derived_rows
+from stockguidance.config.source import DEFAULT_CALENDAR_ID
 
 
 STAGE12_SCHEMA_VERSION = 1
@@ -560,7 +561,7 @@ def _pilot_sessions(manifest: dict[str, Any], data_root: Path, zscore_sample_cou
 	valid = {date.fromisoformat(str(item["session"])) for item in manifest.get("files", ()) if item.get("valid") is True and item.get("records_id")}
 	if not valid or zscore_sample_count < 1:
 		raise Stage12Error("Manifest has no valid sessions or the z-score sample count is invalid")
-	calendar = xcals.get_calendar("XNYS")
+	calendar = xcals.get_calendar(str(manifest.get("calendar_id", DEFAULT_CALENDAR_ID)))
 	all_expected = [item.date() for item in calendar.sessions_in_range(min(valid).isoformat(), max(valid).isoformat())]
 	def has_neighbors(candidate: list[date]) -> bool:
 		if not candidate:

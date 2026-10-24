@@ -18,6 +18,12 @@ def test_holiday_and_early_close_come_from_exchange_calendar(calendar):
 	assert calendar.sessions(date(2024, 7, 4), date(2024, 7, 4)) == ()
 
 
+def test_nasdaq_calendar_can_supply_authoritative_sessions():
+	calendar = ExchangeCalendar("XNAS", date(2024, 7, 1), date(2024, 7, 8))
+	assert calendar.calendar_id == "XNAS"
+	assert calendar.session(date(2024, 7, 5)).closes_at == datetime(2024, 7, 5, 20, tzinfo=timezone.utc)
+
+
 def test_dst_changes_actual_utc_times_without_changing_session_adjacency(calendar):
 	before = calendar.session(date(2024, 3, 8))
 	after = calendar.shift(before, 1)

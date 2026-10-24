@@ -13,6 +13,7 @@ from time import perf_counter, process_time
 from typing import Any, Iterable, Protocol
 
 from stockguidance.calendar.exchange import ExchangeCalendar
+from stockguidance.config.source import DEFAULT_CALENDAR_ID
 from stockguidance.database.configuration import MySQLDriver, load_database_configuration
 from stockguidance.database.table_names import TableNames, TableRole, load_table_names, quote_identifier
 from stockguidance.legacy_migration.precision import ExactArchiveBar, exact_records_id, read_exact_archive
@@ -110,10 +111,10 @@ def _manifest_table_names(manifest: dict[str, Any]) -> TableNames:
 	)
 
 
-def _calendar_sessions(data_root: Path) -> tuple[ExchangeCalendar, tuple[date, ...]]:
+def _calendar_sessions(data_root: Path, calendar_id: str = DEFAULT_CALENDAR_ID) -> tuple[ExchangeCalendar, tuple[date, ...]]:
 	paths = inventory(data_root)
 	first, last = date.fromisoformat(paths[0].stem), date.fromisoformat(paths[-1].stem)
-	calendar = ExchangeCalendar("XNYS", first, last)
+	calendar = ExchangeCalendar(calendar_id, first, last)
 	return calendar, tuple(path.stem for path in paths)
 
 
@@ -177,7 +178,7 @@ def _read_database_mappings(dbinfo_file: Path, names: TableNames, sessions: tupl
 		connection.close()
 
 
-def build_manifest(paths: ManifestPaths, output: Path, *, table_names: TableNames | None = None) -> dict[str, object]:
+def build_manifest(paths: ManifestPaths, output: Path, *, table_names: TableNames | None = None, calendar_id: str = DEFAULT_CALENDAR_ID) -> dict[str, object]:
 	data_root = paths.data_root.resolve()
 	plan = _json(paths.evaluation_plan)
 	precision = _json(paths.precision_report)
@@ -187,7 +188,7 @@ def build_manifest(paths: ManifestPaths, output: Path, *, table_names: TableName
 	if not isinstance(selected, list) or len(selected) != 25:
 		raise ValueError("Stage 6 requires the exact 25 Stage 2 targets")
 	entries_by_session = {str(item["session"]): item for item in precision.get("files", []) if isinstance(item, dict)}
-	calendar, _ = _calendar_sessions(data_root)
+	calendar, _ = _calendar_sessions(data_root, calendar_id)
 	fixed_dates = tuple(_session_date(item["session"]) for item in selected)
 	last_selected = max(fixed_dates)
 	chronological_dates = tuple(calendar.shift(calendar.session(last_selected), offset).session_date for offset in range(-19, 1))
@@ -273,6 +274,7 @@ def build_manifest(paths: ManifestPaths, output: Path, *, table_names: TableName
 		"stage": 6,
 		"protocol": "legacy-migration-stage6-candidates-v1",
 		"created_at": datetime.now(timezone.utc).isoformat(),
+		"calendar_id": calendar.calendar_id,
 		"source": _source_payload(audit),
 		"corrected_schema_hash": corrected_schema_hash,
 		"authoritative_registry": {"tables": names.tables(), "zscore_templates": names.templates()},
@@ -596,7 +598,7 @@ class PythonBaseline:
 		return ZScoreInput.from_values(family, sessions, {1: values}, dependency_sessions=dependencies, scored_sessions=sessions[-20:])
 
 	def _zscore_workload(self) -> dict[str, object]:
-		calendar, _ = _calendar_sessions(Path(self.manifest["inputs"]["data_root"]))
+		calendar, _ = _calendar_sessions(Path(self.manifest["inputs"]["data_root"]), str(self.manifest.get("calendar_id", DEFAULT_CALENDAR_ID)))
 		chronological = tuple(_session_date(value) for value in self.manifest["target_blocks"]["chronological_20"])
 		first = calendar.shift(calendar.session(chronological[0]), -60).session_date
 		context = calendar.sessions(first, chronological[-1])

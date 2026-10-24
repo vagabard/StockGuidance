@@ -140,7 +140,7 @@ public final class JavaWriterManifest {
     }
 
     public String calendarId() {
-        return "XNYS";
+        return requiredText(root, "calendar_id");
     }
 
     public Map<Long, String> tickerMappings() {

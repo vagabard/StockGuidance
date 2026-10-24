@@ -45,8 +45,9 @@ class ExchangeCalendar:
 		epoch = date(1970, 1, 1)
 		loaded_start, loaded_end = min(start, epoch), max(end, epoch)
 		library = import_module("exchange_calendars")
-		self._backend = cast(_ExchangeBackend, library.get_calendar(name, start=loaded_start.isoformat(), end=loaded_end.isoformat()))
-		self.calendar_id = self._backend.name
+		requested_name = name.strip()
+		self._backend = cast(_ExchangeBackend, library.get_calendar(requested_name, start=loaded_start.isoformat(), end=loaded_end.isoformat()))
+		self.calendar_id = "XNAS" if requested_name.upper() in {"XNAS", "NASDAQ"} and self._backend.name == "XNYS" else self._backend.name
 		self.version = version("exchange-calendars")
 		self.timezone = ZoneInfo(str(self._backend.tz))
 		labels: list[date] = []

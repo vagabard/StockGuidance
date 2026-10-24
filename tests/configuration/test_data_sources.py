@@ -41,6 +41,7 @@ def test_configuration_loader_reads_adjustment_policy_and_verification_policy(tm
 		"endpoint": "grouped-daily",
 		"market": "us-stocks",
 		"universe": "all-us-stocks",
+		"calendar_id": "XNAS",
 		"interval": "1d",
 		"raw_price_split_adjusted": True,
 		"raw_price_dividend_adjusted": True,
@@ -58,6 +59,15 @@ def test_configuration_loader_reads_adjustment_policy_and_verification_policy(tm
 	assert loaded.raw_price_split_adjusted and loaded.raw_price_dividend_adjusted
 	assert loaded.raw_price_vendor_defined_adjustment == "massive-v2"
 	assert loaded.verification_policy.source_family_mismatch is VerificationMode.GATE_WRITES
+	assert loaded.calendar_id == "XNAS"
+
+
+def test_calendar_does_not_change_the_semantic_data_configuration():
+	from stockguidance.market_data.identity import data_configuration_key
+
+	assert configuration().calendar_id == "XNYS"
+	assert configuration(calendar_id="NASDAQ").calendar_id == "XNAS"
+	assert data_configuration_key(configuration(calendar_id="XNYS")) == data_configuration_key(configuration(calendar_id="XNAS"))
 
 
 def test_sample_dates_are_deterministic_and_comparison_is_exact():

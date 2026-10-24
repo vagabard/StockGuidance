@@ -110,7 +110,7 @@ evidence repairs partial imports without downloading again. Rechecks can replace
 previously non-null values, add newly listed tickers, and remove withdrawn source
 keys. A complete response does not imply every ticker traded on every date.
 
-Exchange closures come only from XNYS calendar evidence. Empty `OK` responses,
+Exchange closures come only from the configured exchange calendar. Empty `OK` responses,
 missing count evidence, and pagination remain unverified, never inferred closures
 or completed imports. The grouped adapter does not follow continuation links.
 Explicit delayed empty responses retain `not_yet_published` status. A trusted

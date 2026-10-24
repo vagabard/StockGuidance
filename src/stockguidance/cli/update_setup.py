@@ -5,7 +5,7 @@ from pathlib import Path
 from stockguidance.calendar.clock import Clock, SystemClock
 from stockguidance.calendar.exchange import ExchangeCalendar
 from stockguidance.cli.paths import resolve_cli_path
-from stockguidance.config.source import DataConfiguration, PriceAdjustment, SourceConfig, SourceIdentity
+from stockguidance.config.source import DEFAULT_CALENDAR_ID, DataConfiguration, PriceAdjustment, SourceConfig, SourceIdentity
 from stockguidance.database.connections import MySQLConnectionFactory
 from stockguidance.database.configuration import load_database_configuration
 from stockguidance.database.repositories.mysql_market_data import MySQLMarketDataRepository
@@ -44,12 +44,12 @@ def _capability_from_cache(store: JsonHistoryStore, identity: SourceIdentity) ->
 		return None, f"Invalid cached provider capability: {error}"
 
 
-def _calendar_for_update(arguments: argparse.Namespace, boundary: HistoryBoundary | None, clock: Clock) -> ExchangeCalendar:
+def _calendar_for_update(arguments: argparse.Namespace, boundary: HistoryBoundary | None, clock: Clock, calendar_id: str = DEFAULT_CALENDAR_ID) -> ExchangeCalendar:
 	requested_start = None if arguments.start_date is None else date.fromisoformat(arguments.start_date)
 	requested_end = None if arguments.end_date is None else date.fromisoformat(arguments.end_date)
 	calendar_start = min([date(1970, 1, 1), *(item for item in (requested_start, None if boundary is None else boundary.history_start) if item is not None)])
 	calendar_end = max(clock.now().date(), requested_end or clock.now().date()) + timedelta(days=14)
-	return ExchangeCalendar("XNYS", calendar_start, calendar_end)
+	return ExchangeCalendar(calendar_id, calendar_start, calendar_end)
 
 
 def _local_inventory(source: SourceConfig, calendar: ExchangeCalendar, manifest_inventory: LocalCoverageInventory, connect: ConnectionFactory, table_names: TableNames, *, include_database: bool) -> LocalCoverageInventory:
@@ -104,7 +104,7 @@ def assemble_and_update(arguments: argparse.Namespace) -> UpdateResult:
 	repair_plan = None if repair_path is None else load_repair_plan(Path(repair_path))
 	history_store = JsonHistoryStore(source.data_root / "history")
 	boundary = history_store.load(identity)
-	calendar = _calendar_for_update(arguments, boundary, clock)
+	calendar = _calendar_for_update(arguments, boundary, clock, data_configuration.calendar_id)
 	manifest_store = ManifestStore(source.data_root)
 	manifest_inventory = manifest_store.inventory(identity, calendar, start=calendar.start, end=calendar.end)
 	include_database = arguments.dbinfo_file != "dbinfo.id" or arguments.data_root == "data" or bool(manifest_inventory.observations) or boundary is not None

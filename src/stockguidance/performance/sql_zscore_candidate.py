@@ -9,6 +9,7 @@ import traceback
 from time import perf_counter
 
 from stockguidance.calendar.exchange import ExchangeCalendar
+from stockguidance.config.source import DEFAULT_CALENDAR_ID
 from stockguidance.market_data.identity import content_id
 from stockguidance.performance.candidates import _file_hash, _manifest_table_names
 from stockguidance.performance.mysql_candidates import MySQLPythonBaseline, MySQLTarget, load_manifest
@@ -44,7 +45,7 @@ def _series_definition(manifest: dict, family: str, window: int) -> dict[str, ob
 	return {
 		"schema_version": 1,
 		"source_scope": content_id(manifest["source"]["archive_source"]),
-		"calendar_id": "XNYS",
+		"calendar_id": str(manifest.get("calendar_id", DEFAULT_CALENDAR_ID)),
 		"family": family,
 		"window": window,
 		"calculation_version": CALCULATION_VERSION,
@@ -315,7 +316,7 @@ class SQLZScoreCandidate:
 
 	def _sessions(self):
 		if self._sessions_value is None:
-			calendar = ExchangeCalendar("XNYS", date.fromisoformat(self.dependencies[0]), date.fromisoformat(self.dependencies[-1]))
+			calendar = ExchangeCalendar(str(self.manifest.get("calendar_id", DEFAULT_CALENDAR_ID)), date.fromisoformat(self.dependencies[0]), date.fromisoformat(self.dependencies[-1]))
 			self._sessions_value = tuple(calendar.session(date.fromisoformat(session)) for session in self.dependencies)
 		return self._sessions_value
 

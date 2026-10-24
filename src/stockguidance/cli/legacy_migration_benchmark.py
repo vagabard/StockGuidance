@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from typing import Sequence
 
+from stockguidance.config.source import DEFAULT_CALENDAR_ID
 from stockguidance.performance.candidates import ManifestPaths, WORKLOADS, aggregate_candidate_reports, build_manifest, run_python_baselines
 
 
@@ -46,6 +47,7 @@ def parser() -> argparse.ArgumentParser:
 	arguments.add_argument("--output", type=_path, default=Path("output/legacy-migration/benchmark/candidates/python-baselines.json"))
 	arguments.add_argument("--target", type=_path, default=Path("output/legacy-migration/benchmark/candidates/python-disposable.sqlite"), help="Offline database file, used only with --storage sqlite")
 	arguments.add_argument("--storage", choices=("mysql", "sqlite"), default="mysql")
+	arguments.add_argument("--calendar-id", default=DEFAULT_CALENDAR_ID, help="exchange_calendars calendar name, for example XNYS or XNAS")
 	arguments.add_argument("--disposable-schema")
 	arguments.add_argument("--workloads", default=",".join(WORKLOADS))
 	arguments.add_argument("--repetitions", type=int, default=4)
@@ -328,6 +330,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 				_resolve(arguments.dbinfo_file) if arguments.dbinfo_file else None,
 			),
 			_resolve(arguments.manifest),
+			calendar_id=arguments.calendar_id,
 		)
 		print(json.dumps({"successful": True, "operation": "build_manifest", "manifest": str(_resolve(arguments.manifest)), "manifest_id": manifest["manifest_id"]}))
 		return 0

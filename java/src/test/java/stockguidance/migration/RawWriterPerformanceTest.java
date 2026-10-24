@@ -170,6 +170,7 @@ class RawWriterPerformanceTest {
         JsonObject root = JsonSupport.object();
         root.put("schema_version", 1);
         root.put("stage", 6);
+        root.put("calendar_id", "XNYS");
         try (var input = getClass().getResourceAsStream("/stockguidance/database/table_names.json")) {
             root.put("authoritative_registry", JsonSupport.readObject(input));
         }

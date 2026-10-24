@@ -12,6 +12,7 @@ from time import perf_counter
 from typing import Any, Callable, Iterable
 
 from stockguidance.calendar.exchange import ExchangeCalendar
+from stockguidance.config.source import DEFAULT_CALENDAR_ID
 from stockguidance.legacy_migration.audit import ARCHIVE_SOURCE
 from stockguidance.legacy_migration.evidence import ArchiveEvidenceStore
 from stockguidance.legacy_migration.precision import ArchiveFileInventory, ExactArchiveBar, exact_records_id, read_exact_archive
@@ -426,7 +427,7 @@ class Stage11Store:
 		dates = tuple(sorted(date.fromisoformat(value) for value in sessions))
 		if not dates:
 			raise Stage11Error("Z-score integration requires dependency sessions")
-		calendar = ExchangeCalendar("XNYS", min(dates), max(dates))
+		calendar = ExchangeCalendar(str(self.context.manifest.get("calendar_id", DEFAULT_CALENDAR_ID)), min(dates), max(dates))
 		return tuple(calendar.session(value) for value in dates)
 
 	def write_zscores(self, session: str, *, interruption: str | None = None) -> dict[str, Any]:
@@ -498,7 +499,7 @@ class Stage11Store:
 		return {session: Decimal(str(by_id[identifier])) for session, identifier in date_ids.items() if by_id.get(identifier) is not None}
 
 	def _publish_zscores(self, connection: sqlite3.Connection, session: str, family: ZScoreFamily, window: int, rows: tuple[Any, ...], trading_sessions: tuple[Any, ...]) -> None:
-		definition = ZScoreSeriesDefinition(content_id(self.context.manifest["source"]["archive_source"]), "XNYS", family, window, "rolling-population-zscore-v1", "float32", DELTA_DEFINITION if family is ZScoreFamily.PRICE_DELTA else "not_applicable")
+		definition = ZScoreSeriesDefinition(content_id(self.context.manifest["source"]["archive_source"]), str(self.context.manifest.get("calendar_id", DEFAULT_CALENDAR_ID)), family, window, "rolling-population-zscore-v1", "float32", DELTA_DEFINITION if family is ZScoreFamily.PRICE_DELTA else "not_applicable")
 		date_id = self._date_id(connection, session)
 		tables = self.names.resolve_zscore_tables((window,))[window]
 		table = tables.price_delta if family is ZScoreFamily.PRICE_DELTA else tables.price

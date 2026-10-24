@@ -7,6 +7,17 @@ from stockguidance.config.validation import require_enum, require_text
 from stockguidance.market_data.intervals import ObservationInterval, require_daily_interval
 
 
+DEFAULT_CALENDAR_ID = "XNYS"
+CALENDAR_ALIASES = {"NASDAQ": "XNAS", "NYSE": "XNYS"}
+
+
+def canonical_calendar_id(value: str) -> str:
+	if not isinstance(value, str) or not value.strip():
+		raise ValueError("calendar_id must be nonempty text")
+	value = value.strip()
+	return CALENDAR_ALIASES.get(value.upper(), value)
+
+
 class PriceAdjustment(StrEnum):
 	ADJUSTED = "adjusted"
 	UNADJUSTED = "unadjusted"
@@ -55,14 +66,16 @@ class DataConfiguration:
 	raw_price_vendor_defined_adjustment: str | None = None
 	interval: ObservationInterval = ObservationInterval.DAILY
 	verification_policy: VerificationPolicy = field(default_factory=VerificationPolicy, repr=False)
+	calendar_id: str = DEFAULT_CALENDAR_ID
 
 	def __post_init__(self) -> None:
-		for name in ("source_family", "endpoint", "market", "universe"):
+		for name in ("source_family", "endpoint", "market", "universe", "calendar_id"):
 			value = getattr(self, name)
 			if not isinstance(value, str) or not value.strip():
 				raise ValueError(f"{name} must be nonempty text")
 			object.__setattr__(self, name, value.strip())
 		object.__setattr__(self, "source_family", canonical_source_family(self.source_family))
+		object.__setattr__(self, "calendar_id", canonical_calendar_id(self.calendar_id))
 		for name in ("raw_price_split_adjusted", "raw_price_dividend_adjusted"):
 			if type(getattr(self, name)) is not bool:
 				raise ValueError(f"{name} must be a boolean")
@@ -109,7 +122,7 @@ def _text(value: dict[str, object], name: str) -> str:
 def load_data_configuration(path: Path) -> DataConfiguration:
 	try:
 		payload = _mapping(json.loads(path.read_text(encoding="utf-8")), "data configuration")
-		if set(payload) != {"schema_version", "source_family", "endpoint", "market", "universe", "interval", "raw_price_split_adjusted", "raw_price_dividend_adjusted", "raw_price_vendor_defined_adjustment", "verification_policy"}:
+		if set(payload) - {"schema_version", "source_family", "endpoint", "market", "universe", "interval", "raw_price_split_adjusted", "raw_price_dividend_adjusted", "raw_price_vendor_defined_adjustment", "verification_policy", "calendar_id"}:
 			raise ValueError("Data configuration fields are incomplete or unknown")
 		if payload["schema_version"] != 1:
 			raise ValueError("Unsupported data configuration schema version")
@@ -125,6 +138,7 @@ def load_data_configuration(path: Path) -> DataConfiguration:
 				VerificationMode(policy_payload["source_family_mismatch"]), VerificationMode(policy_payload["endpoint_mismatch"]),
 				policy_payload["source_family_sample_days"], policy_payload["endpoint_sample_pulls"],
 			),
+			DEFAULT_CALENDAR_ID if "calendar_id" not in payload else _text(payload, "calendar_id"),
 		)
 	except (OSError, UnicodeError, TypeError, ValueError, json.JSONDecodeError):
 		raise ValueError("Cannot read the explicit data configuration JSON") from None
@@ -182,3 +196,7 @@ class SourceConfig:
 	def data_configuration(self) -> DataConfiguration:
 		assert self._configuration is not None
 		return self._configuration if self._configuration.to_source_identity() == self.identity else self.identity.to_data_configuration()
+
+	@property
+	def calendar_id(self) -> str:
+		return self.data_configuration.calendar_id

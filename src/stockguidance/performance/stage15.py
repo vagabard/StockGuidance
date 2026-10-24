@@ -19,6 +19,7 @@ from stockguidance.market_data.records import DailyBar
 from stockguidance.performance.archive_read import ArchiveBar, archive_records_id, read_archive
 from stockguidance.performance.stage12 import MIGRATION_COMPLETION, MIGRATION_RECEIPTS, _active_writers, _connect, _manifest_names
 from stockguidance.performance.stage13 import _database_revision
+from stockguidance.config.source import DEFAULT_CALENDAR_ID
 
 
 STAGE15_SCHEMA_VERSION = 1
@@ -481,9 +482,10 @@ def _zscore_metadata(connection: Any, names: TableNames, manifest: dict[str, Any
 	if not isinstance(archive_source, dict):
 		raise Stage15Error("Stage 14 manifest is missing its archive source scope")
 	source_scope = content_id(archive_source)
+	calendar_id = str(manifest.get("calendar_id", DEFAULT_CALENDAR_ID))
 	series_expected: dict[str, tuple[str, int, tuple[Any, ...]]] = {}
 	for family, window in ((family, window) for family in FAMILIES for window in WINDOWS):
-		definition = {"schema_version": 1, "source_scope": source_scope, "calendar_id": "XNYS", "family": family, "window": window, "calculation_version": "rolling-population-zscore-v1", "delta_definition": "close_ratio_to_prior_minus_one" if family == "price_delta" else "not_applicable", "precision": "float32", "missing_value_policy": "null_status_v1"}
+		definition = {"schema_version": 1, "source_scope": source_scope, "calendar_id": calendar_id, "family": family, "window": window, "calculation_version": "rolling-population-zscore-v1", "delta_definition": "close_ratio_to_prior_minus_one" if family == "price_delta" else "not_applicable", "precision": "float32", "missing_value_policy": "null_status_v1"}
 		expected_fields = tuple(definition[field] for field in ("schema_version", "source_scope", "calendar_id", "family", "window", "calculation_version", "delta_definition", "precision", "missing_value_policy"))
 		series_expected[content_id(definition)] = (family, window, expected_fields)
 	if operational:
