@@ -66,7 +66,7 @@ class MySQLMarketDataRepository:
 			for bar in download.response.records:
 				ticker_id = ticker_ids.get(bar.ticker)
 				if ticker_id is None:
-					ticker_id = self._ticker_id(cursor, bar.ticker)
+					ticker_id = self._ticker_id(cursor, bar.ticker, download.session.calendar_id)
 				rows.append((ticker_id, date_id, bar.open, bar.high, bar.low, bar.close, bar.volume, bar.vwap, bar.transactions))
 			for offset in range(0, len(rows), 1000):
 				cursor.executemany(f"INSERT INTO {quote_identifier(self.table_names.table(TableRole.PRICES))} (ticker_id, date_id, open, high, low, close, volume, vwap, transactions) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)", rows[offset:offset + 1000])
@@ -110,14 +110,16 @@ class MySQLMarketDataRepository:
 			raise ValueError("Date lookup must resolve exactly one ingested session")
 		return normalize_date_id(rows[0][0])
 
-	def _ticker_id(self, cursor: Cursor, ticker: str) -> int:
-		cursor.execute(f"SELECT id, label FROM {quote_identifier(self.table_names.table(TableRole.TICKERS))}", ())
-		rows = [row for row in cursor.fetchall() if len(row) == 2 and row[1] == ticker]
+	def _ticker_id(self, cursor: Cursor, ticker: str, exchange: str) -> int:
+		cursor.execute(f"SELECT id, label, exchange FROM {quote_identifier(self.table_names.table(TableRole.TICKERS))}", ())
+		rows = [row for row in cursor.fetchall() if len(row) == 3 and row[1] == ticker]
 		if rows:
-			if len(rows) != 1 or len(rows[0]) != 2:
+			if len(rows) != 1 or len(rows[0]) != 3 or (rows[0][2] is not None and rows[0][2] != exchange):
 				raise ValueError("Ticker lookup must resolve exactly one key")
+			if rows[0][2] is None:
+				cursor.execute(f"UPDATE {quote_identifier(self.table_names.table(TableRole.TICKERS))} SET exchange = %s WHERE id = %s", (exchange, rows[0][0]))
 			return normalize_date_id(rows[0][0])
-		cursor.execute(f"INSERT INTO {quote_identifier(self.table_names.table(TableRole.TICKERS))} (label) VALUES (%s)", (ticker,))
+		cursor.execute(f"INSERT INTO {quote_identifier(self.table_names.table(TableRole.TICKERS))} (label, exchange) VALUES (%s, %s)", (ticker, exchange))
 		cursor.execute(f"SELECT id FROM {quote_identifier(self.table_names.table(TableRole.TICKERS))} WHERE label = %s", (ticker,))
 		rows = cursor.fetchall()
 		if len(rows) != 1 or len(rows[0]) != 1:

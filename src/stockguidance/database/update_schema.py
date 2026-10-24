@@ -21,7 +21,8 @@ def _validate_windows(windows: Iterable[int]) -> tuple[int, ...]:
 
 
 def update_schema_statements(table_names: TableNames, *, case_sensitive_tickers: bool = True) -> tuple[str, ...]:
-	ticker_definition = "label VARCHAR(16) COLLATE utf8mb4_bin NOT NULL UNIQUE" if case_sensitive_tickers else "label VARCHAR(16) NOT NULL UNIQUE"
+	ticker_definition = ("label VARCHAR(16) COLLATE utf8mb4_bin NOT NULL UNIQUE, exchange VARCHAR(10) NULL"
+		if case_sensitive_tickers else "label VARCHAR(16) NOT NULL UNIQUE, exchange VARCHAR(10) NULL")
 	return (
 		f"CREATE TABLE IF NOT EXISTS {quote_identifier(table_names.table(TableRole.DATA_CONFIGURATION))} (id INT PRIMARY KEY, configuration_key CHAR(64) NOT NULL, source_key CHAR(64) NOT NULL, source_family VARCHAR(64) NOT NULL, endpoint VARCHAR(512) NOT NULL, market VARCHAR(64) NOT NULL, universe VARCHAR(128) NOT NULL, interval_code VARCHAR(8) NOT NULL, raw_price_split_adjusted TINYINT NOT NULL, raw_price_dividend_adjusted TINYINT NOT NULL, raw_price_vendor_defined_adjustment VARCHAR(128) NULL, created_at VARCHAR(40) NOT NULL) ENGINE=InnoDB",
 		f"CREATE TABLE IF NOT EXISTS {quote_identifier(table_names.sessions)} (id INT AUTO_INCREMENT PRIMARY KEY, transaction_date DATE NOT NULL UNIQUE) ENGINE=InnoDB",
