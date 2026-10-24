@@ -71,7 +71,12 @@ public final class JavaDailyMaintenanceMain {
             writer.validateTarget(connection);
             int completed = 0;
             for (LocalDate session : rawDates) {
+                markRawImportStarted(connection, session);
                 var result = writer.writeRaw(connection, session, null, JavaWriterCandidate.InterruptPoint.NONE);
+                if (!result.status().equals("complete") && !result.status().equals("reused")) {
+                    throw new IllegalStateException("Raw import did not complete for " + session + ": " + result.status());
+                }
+                clearRawImportStarted(connection, session);
                 if (!result.status().equals("reused")) changedRaw.add(session);
                 System.err.println("Raw " + (++completed) + "/" + rawDates.size() + " " + session + " " + result.status());
             }
@@ -132,6 +137,38 @@ public final class JavaDailyMaintenanceMain {
 
     private static ArchiveCandidateReader.SessionArchive empty(LocalDate date) {
         return new ArchiveCandidateReader.SessionArchive(null, date, null, Map.of(), ArchiveCandidateReader.recordsId(Map.of()));
+    }
+
+    private static void markRawImportStarted(Connection connection, LocalDate session) throws Exception {
+        boolean originalAutoCommit = connection.getAutoCommit();
+        String sql = "INSERT INTO stockguidance_daily_import_in_progress (session_date, started_at) VALUES (?, ?) "
+                + "ON DUPLICATE KEY UPDATE started_at = VALUES(started_at)";
+        try {
+            if (originalAutoCommit) connection.setAutoCommit(false);
+            try (PreparedStatement statement = connection.prepareStatement(sql)) {
+                statement.setDate(1, java.sql.Date.valueOf(session));
+                statement.setString(2, java.time.Instant.now().toString());
+                statement.executeUpdate();
+            }
+            connection.commit();
+        } finally {
+            if (originalAutoCommit) connection.setAutoCommit(true);
+        }
+    }
+
+    private static void clearRawImportStarted(Connection connection, LocalDate session) throws Exception {
+        boolean originalAutoCommit = connection.getAutoCommit();
+        try {
+            if (originalAutoCommit) connection.setAutoCommit(false);
+            try (PreparedStatement statement = connection.prepareStatement(
+                    "DELETE FROM stockguidance_daily_import_in_progress WHERE session_date = ?")) {
+                statement.setDate(1, java.sql.Date.valueOf(session));
+                statement.executeUpdate();
+            }
+            connection.commit();
+        } finally {
+            if (originalAutoCommit) connection.setAutoCommit(true);
+        }
     }
 
     private static List<LocalDate> dates(JsonObject root, String key) {

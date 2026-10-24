@@ -51,22 +51,26 @@ Java classes are unavailable.
 
 ## Writes and validation
 
-Python downloads and verifies source responses. Java transactionally reconciles
-raw rows, including removal of keys withdrawn by a corrected response, and
-repairs derived values from chronological neighbors. Source changes invalidate
-dependent z-score completion receipts. The shared Java pipeline recomputes the
-requested z-score dependencies and preserves matching output rows. Rechecking
-dependencies also repairs deleted or corrupted z-score materializations.
+Existing daily-maintenance archive files are treated as usable inputs without
+reloading and decoding their provider-response manifests. Existing database
+import receipts supply the source identity and availability for those sessions.
+Missing files are downloaded and archived. Java transactionally reconciles raw
+rows, including removal of keys withdrawn by a corrected response, and repairs
+derived values from chronological neighbors. Source changes invalidate
+dependent z-score completion receipts. The Java pipeline recomputes requested
+z-score dependencies and preserves matching output rows; rechecking dependencies
+also repairs deleted or corrupted z-score materializations.
 
 Operational raw record identities use the same version 2 canonical decimal
 contract as migration. OHLC values retain eight decimal places and VWAP retains
 22; HTTP JSON decimals are parsed without a binary floating-point round trip.
-Older version 1 source manifests are treated as incompatible and refetched, so
-the first operational run may download more than just recent dates.
+Older version 1 source manifests are bypassed when their daily-maintenance
+archive already exists. If that archive is missing, maintenance recreates it
+from a current provider response.
 
-Each Java batch is followed by independent Python source/raw/derived checks and
-the vectorized Stage 15 numerical/status/metadata checks. Numerical verification
-uses a fresh read-only snapshot on every invocation. A correctly stored
+Each Java batch is followed by independent Python numerical, status, and
+metadata checks for the materialized z-scores. These checks use a fresh
+read-only snapshot on every invocation. A correctly stored
 non-ready z-score is valid materialization evidence, but remains unavailable for
 training; the existing range validity guardian must still warn about selected
 non-ready observations. Successful maintenance does not make every ticker valid
@@ -75,11 +79,13 @@ on every date.
 ## Recovery and readiness
 
 Downloaded responses, generated workload descriptions and per-session committed
-receipts survive interruption. Rerun the same command to reconcile committed
-content and finish remaining work. Workload identities prevent stale checkpoints
-from being reused after source changes. Validation snapshots are deliberately
-fresh so an old passing report cannot hide subsequent database damage. An
-advisory database lock prevents concurrent maintenance coordinators.
+receipts survive interruption. Java records each raw date as in progress before
+writing it and removes the marker after commit. On restart, maintenance deletes
+raw and derived rows and the import receipt for marked dates, then imports them
+again from the retained archive. Workload identities prevent stale checkpoints
+from being reused after source changes. Validation snapshots are fresh so an old
+passing report cannot hide subsequent database damage. An advisory database
+lock prevents concurrent maintenance coordinators.
 
 Progress and phase estimates appear on stderr; stdout contains the final JSON
 report. Exit 0 means the requested range passed both validators. Nonzero means

@@ -9,9 +9,10 @@ DEFAULT_ARCHIVE_REFRESH_DAYS = 30.0
 DEFAULT_CORRECTION_EVIDENCE = "Default daily maintenance correction policy"
 
 
-def add_update_policy_arguments(arguments: argparse.ArgumentParser, *, include_schema_initialization: bool = True) -> None:
-	arguments.add_argument("--history-start")
-	arguments.add_argument("--history-evidence")
+def add_update_policy_arguments(arguments: argparse.ArgumentParser, *, include_schema_initialization: bool = True, include_history_boundary: bool = True) -> None:
+	if include_history_boundary:
+		arguments.add_argument("--history-start")
+		arguments.add_argument("--history-evidence")
 	arguments.add_argument("--adjustment", choices=("adjusted", "unadjusted"), default="adjusted")
 	arguments.add_argument("--publication-delay-minutes", type=float, default=DEFAULT_PUBLICATION_DELAY_MINUTES)
 	arguments.add_argument("--publication-evidence", default=DEFAULT_PUBLICATION_EVIDENCE)

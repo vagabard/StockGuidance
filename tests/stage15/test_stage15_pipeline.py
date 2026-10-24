@@ -7,7 +7,7 @@ import pytest
 
 from stockguidance.database.table_names import load_table_names
 from stockguidance.performance.stage15 import _semantic_score
-from stockguidance.performance.stage15_pipeline import CELL, SERIES, PipelineOptions, _plans, _reference, _reset, _validate, run_pipeline
+from stockguidance.performance.vectorized_zscore_validation import CELL, SERIES, PipelineOptions, _plans, _reference, _reset, _validate, run_pipeline
 
 
 def _fixture(ticker_count=9):
@@ -165,7 +165,7 @@ def test_spawn_pipeline_partial_resume_matches_uninterrupted_and_rejects_changed
 	payload = json.loads(checkpoint.read_text())
 	payload["mismatch_count"] = 123
 	checkpoint.write_text(json.dumps(payload))
-	with pytest.raises(ValueError, match="Invalid Stage 15 batch checkpoint"):
+	with pytest.raises(ValueError, match="Invalid independent z-score validation checkpoint"):
 		run_pipeline(connection, names, connection.manifest, connection.date_ids, connection.verified, tmp_path, {"revision": "fixture"}, options)
 
 
@@ -173,7 +173,7 @@ def test_loader_failure_reaches_single_result_consumer_and_cleans_up(tmp_path, m
 	connection = Connection()
 	def fail(*arguments, **keywords):
 		raise RuntimeError("fixture database read failed")
-	monkeypatch.setattr("stockguidance.performance.stage15_pipeline._load", fail)
+	monkeypatch.setattr("stockguidance.performance.vectorized_zscore_validation._load", fail)
 	with pytest.raises(RuntimeError, match="fixture database read failed"):
 		run_pipeline(connection, load_table_names(), connection.manifest, connection.date_ids, connection.verified, tmp_path, {}, PipelineOptions(workers=2, vector_size=3))
 	assert not list(tmp_path.glob("*/batch-*.json"))

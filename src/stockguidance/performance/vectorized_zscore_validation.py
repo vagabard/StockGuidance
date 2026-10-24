@@ -11,15 +11,16 @@ from queue import Empty, Full
 from threading import Thread
 from time import perf_counter
 import traceback
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 
 from stockguidance.database.table_names import quote_identifier
-from stockguidance.market_data.identity import content_id
+from stockguidance.market_data.atomic import atomic_write
+from stockguidance.market_data.identity import content_id, encode_json
 
 
-ENGINE_VERSION = "stage15-independent-numpy-shared-v2"
+ENGINE_VERSION = "independent-numpy-shared-v2"
 SERIES = (("price", 20), ("price", 60), ("price_delta", 20), ("price_delta", 60))
 CELL = np.dtype([("close", "f8"), ("ratio", "f8"), ("close_present", "?"), ("ratio_present", "?"), ("scores", "f4", (4,)), ("statuses", "i1", (4,))])
 
@@ -38,11 +39,11 @@ class PipelineOptions:
 		for name, lower, upper in (("workers", 1, 10), ("vector_size", 1, 1000), ("fetch_size", 1, 10000), ("sessions_per_batch", 1, 256), ("cache_slots", 1, 3)):
 			value = getattr(self, name)
 			if type(value) is not int or not lower <= value <= upper:
-				raise ValueError(f"Stage 15 {name} must be between {lower} and {upper}")
+				raise ValueError(f"Independent z-score validation {name} must be between {lower} and {upper}")
 		if self.max_batches is not None and (type(self.max_batches) is not int or self.max_batches < 1):
-			raise ValueError("Stage 15 max_batches must be positive")
+			raise ValueError("Independent z-score validation max_batches must be positive")
 		if not math.isfinite(self.progress_seconds) or self.progress_seconds <= 0:
-			raise ValueError("Stage 15 progress interval must be positive")
+			raise ValueError("Independent z-score validation progress interval must be positive")
 
 
 def _reset(cache: np.ndarray) -> None:
@@ -91,7 +92,7 @@ def _load(connection: Any, names: Any, cache: np.ndarray, plan: dict[str, Any], 
 			cursor.execute(f"SELECT date_id, ticker_id, {columns} FROM {quote_identifier(table)} WHERE date_id IN ({','.join('%s' for _ in identifiers)}){ticker_clause}", identifiers + filtered)
 			while True:
 				if stopped is not None and stopped.is_set():
-					raise RuntimeError("Stage 15 cache loader cancelled")
+			raise RuntimeError("Independent z-score validation cache loader cancelled")
 				batch = cursor.fetchmany(fetch_size)
 				if not batch:
 					break
@@ -235,14 +236,14 @@ def _reference(cache: np.ndarray, indexes: list[int], verified: np.ndarray, fami
 
 
 def _validate(cache: np.ndarray, plan: dict[str, Any], tickers: tuple[int, ...], verified: np.ndarray, *, scalar: bool = False) -> dict[str, Any]:
-	from stockguidance.performance.stage15 import _semantic_score
-
 	started = perf_counter()
 	counts = np.zeros((len(plan["targets"]), 4, 6), dtype=np.int64)
 	actual_rows = np.zeros(4, dtype=np.int64)
 	mismatches = []
 	values: dict[tuple[int, int], tuple[object | None, object | None]] = {}
 	if scalar:
+		from stockguidance.performance.stage15 import _semantic_score
+
 		values = {(date_index + 1, ticker): (float(cell["close"]) if cell["close_present"] else None, float(cell["ratio"]) if cell["ratio_present"] else None) for date_index, row in enumerate(cache) for ticker, cell in zip(tickers, row, strict=True)}
 		date_ids = {session: index + 1 for index, session in enumerate(plan["dates"])}
 		verified_ids = {index + 1: bool(value) for index, value in enumerate(verified)}
@@ -303,8 +304,9 @@ def _eta(seconds: float) -> str:
 	return str(timedelta(seconds=max(0, round(seconds))))
 
 
-def run_pipeline(connection: Any, names: Any, manifest: dict[str, Any], date_ids: dict[str, int], verified_by_id: dict[int, bool], directory: Path, binding: dict[str, Any], options: PipelineOptions, *, published_metadata: list[dict[str, Any]] | None = None) -> dict[str, Any]:
-	from stockguidance.performance.stage15 import _write_json, _zscore_metadata
+def run_pipeline(connection: Any, names: Any, manifest: dict[str, Any], date_ids: dict[str, int], verified_by_id: dict[int, bool], directory: Path, binding: dict[str, Any], options: PipelineOptions, *, published_metadata: list[dict[str, Any]] | None = None, metadata_validator: Callable[..., dict[str, Any]] | None = None, progress_label: str = "Independent z-score validation") -> dict[str, Any]:
+	def write_json(path: Path, value: dict[str, Any]) -> None:
+		atomic_write(path.resolve(), encode_json(value))
 
 	cursor = connection.cursor()
 	try:
@@ -313,7 +315,7 @@ def run_pipeline(connection: Any, names: Any, manifest: dict[str, Any], date_ids
 	finally:
 		cursor.close()
 	if not tickers:
-		raise ValueError("Stage 15 ticker mapping is empty")
+		raise ValueError("Independent z-score validation has no ticker mappings")
 	plans = _plans(manifest, options)
 	identity = content_id({"engine": ENGINE_VERSION, "binding": binding, "date_ids": date_ids, "tickers": tickers, "verified": verified_by_id, "vector_size": options.vector_size, "sessions_per_batch": options.sessions_per_batch})
 	directory = directory / identity
@@ -325,10 +327,10 @@ def run_pipeline(connection: Any, names: Any, manifest: dict[str, Any], date_ids
 			checkpoint = json.load(stream)
 		digest = checkpoint.pop("sha256", None)
 		if content_id(checkpoint) != digest or checkpoint.get("identity") != identity:
-			raise ValueError(f"Invalid Stage 15 batch checkpoint: {path}")
+			raise ValueError(f"Invalid independent z-score validation checkpoint: {path}")
 		key = (int(checkpoint["session_batch"]), int(checkpoint["ticker_start"]))
 		if key in completed:
-			raise ValueError("Duplicate Stage 15 checkpoint")
+			raise ValueError("Duplicate independent z-score validation checkpoint")
 		completed[key] = checkpoint
 	pending = [(plan, start, min(start + options.vector_size, len(tickers))) for plan in plans for start in range(0, len(tickers), options.vector_size) if (plan["index"], start) not in completed]
 	if options.max_batches is not None:
@@ -384,7 +386,7 @@ def run_pipeline(connection: Any, names: Any, manifest: dict[str, Any], date_ids
 			for worker in workers:
 				worker.start()
 			loader.start()
-			print(f"Stage 15: {len(completed)}/{len(plans) * jobs_per_plan} batches resumed; {options.workers} workers, vector size {options.vector_size}, fetch size {options.fetch_size}, shared cache {memory.size / 2**20:.1f} MiB", flush=True)
+			print(f"{progress_label}: {len(completed)}/{len(plans) * jobs_per_plan} batches resumed; {options.workers} workers, vector size {options.vector_size}, fetch size {options.fetch_size}, shared cache {memory.size / 2**20:.1f} MiB", flush=True)
 			received = 0
 			last_progress = 0.0
 			last_result_at = started
@@ -399,7 +401,7 @@ def run_pipeline(connection: Any, names: Any, manifest: dict[str, Any], date_ids
 					slot = result.pop("slot")
 					result["identity"] = identity
 					result["sha256"] = content_id(result)
-					_write_json(directory / f"batch-{result['session_batch']:04d}-{result['ticker_start']:06d}.json", result)
+					write_json(directory / f"batch-{result['session_batch']:04d}-{result['ticker_start']:06d}.json", result)
 					completed[(result["session_batch"], result["ticker_start"])] = result
 					received += 1
 					last_result_at = perf_counter()
@@ -412,10 +414,10 @@ def run_pipeline(connection: Any, names: Any, manifest: dict[str, Any], date_ids
 					estimate = _eta(elapsed / received * remaining) if received >= min(jobs_per_plan, len(pending)) else "estimating after first session batch"
 					if received and perf_counter() - last_result_at > max(30.0, 1.5 * elapsed / received * jobs_per_plan):
 						estimate = f"re-estimating: no completed batch for {perf_counter() - last_result_at:.0f}s"
-					print(f"Stage 15: {len(completed)}/{len(plans) * jobs_per_plan} batches; {received / elapsed:.2f} batches/s; elapsed {_eta(elapsed)}; ETA {estimate}; {loader_state['phase']}; loaded {loader_state['rows_loaded']:,} rows", flush=True)
+					print(f"{progress_label}: {len(completed)}/{len(plans) * jobs_per_plan} batches; {received / elapsed:.2f} batches/s; elapsed {_eta(elapsed)}; ETA {estimate}; {loader_state['phase']}; loaded {loader_state['rows_loaded']:,} rows", flush=True)
 					last_progress = elapsed
 				if any(worker.exitcode not in (None, 0) for worker in workers):
-					raise RuntimeError("Stage 15 validation worker exited unexpectedly")
+				raise RuntimeError("Independent z-score validation worker exited unexpectedly")
 		finally:
 			stopped.set()
 			if loader.ident is not None:
@@ -434,7 +436,7 @@ def run_pipeline(connection: Any, names: Any, manifest: dict[str, Any], date_ids
 				memory.close()
 				memory.unlink()
 			else:
-				raise RuntimeError("Stage 15 loader did not stop; database connection must be discarded")
+				raise RuntimeError("Independent z-score validation loader did not stop; discard its database connection")
 	targets = [target for plan in plans for target in plan["targets"]]
 	expected_counts = {(date_ids[target["session"]], family, window): {code: 0 for code in range(6)} for target in targets if target["session"] in date_ids for family, window in SERIES}
 	actual_rows = np.zeros(4, dtype=np.int64)
@@ -451,5 +453,13 @@ def run_pipeline(connection: Any, names: Any, manifest: dict[str, Any], date_ids
 		actual_rows += checkpoint["actual_rows"]
 		mismatches.extend(checkpoint["mismatches"])
 	complete = len(completed) == len(plans) * jobs_per_plan
-	metadata = _zscore_metadata(connection, names, manifest, {date_ids[target["session"]]: target for target in targets if target["session"] in date_ids}, expected_counts, len(tickers), published_metadata) if complete else {}
+	if complete:
+		validator = metadata_validator
+		if validator is None:
+			from stockguidance.performance.stage15 import _zscore_metadata
+
+			validator = _zscore_metadata
+		metadata = validator(connection, names, manifest, {date_ids[target["session"]]: target for target in targets if target["session"] in date_ids}, expected_counts, len(tickers), published_metadata)
+	else:
+		metadata = {}
 	return {"status": "complete" if complete else "partial", "engine": ENGINE_VERSION, "checkpoint_identity": identity, "checkpoint_directory": str(directory), "target_sessions": len(targets), "ticker_count": len(tickers), "expected_rows": len(targets) * len(tickers), "actual_rows": {f"{family}/{window}": int(actual_rows[index]) for index, (family, window) in enumerate(SERIES)}, "mismatches": mismatches, "mismatch_count": len(mismatches), "batch_count": len(completed), "total_batches": len(plans) * jobs_per_plan, "remaining_batches": len(plans) * jobs_per_plan - len(completed), "metadata": metadata, "elapsed_seconds": perf_counter() - started}

@@ -67,7 +67,7 @@ def assemble_and_validate(arguments: argparse.Namespace) -> ValidationResult:
 	cutoff = datetime.fromisoformat(arguments.as_of) if arguments.as_of else clock.now()
 	requested_start = date.fromisoformat(arguments.start_date) if arguments.start_date else None
 	requested_end = date.fromisoformat(arguments.end_date) if arguments.end_date else None
-	calendar_start = date(1970, 1, 1)
+	calendar_start = requested_start or date(1970, 1, 1)
 	calendar_end = max(cutoff.date(), requested_end or cutoff.date()) + timedelta(days=14)
 	calendar = ExchangeCalendar("XNYS", calendar_start, calendar_end)
 	store = JsonHistoryStore(source.data_root / "history")

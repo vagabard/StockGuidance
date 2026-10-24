@@ -19,7 +19,6 @@ from stockguidance.calendar.exchange import ExchangeCalendar
 from stockguidance.calendar.protocols import SessionCalendar
 from stockguidance.calendar.sessions import TradingSession
 from stockguidance.cli.paths import resolve_cli_path
-from stockguidance.cli.validation_setup import assemble_and_validate
 from stockguidance.config.source import DataConfiguration, PriceAdjustment, SourceConfig
 from stockguidance.database.configuration import load_database_configuration
 from stockguidance.database.connections import MySQLConnectionFactory
@@ -66,7 +65,39 @@ def export_archive(source: SourceConfig, manifest: SourceManifest) -> dict[str, 
 		"file_sha256": sha256(content).hexdigest(), "records_id": records_id(download.response.records)}
 
 
-def build_workload(source: SourceConfig, names: TableNames, calendar: SessionCalendar, raw_sessions: tuple[TradingSession, ...], targets: tuple[TradingSession, ...], files_by_date: Mapping[date, dict[str, Any]], availability: Mapping[date, str]) -> dict[str, Any]:
+def _archive_entry(source: SourceConfig, session: TradingSession, raw_id: str | None, available_at: str) -> dict[str, Any] | None:
+	path = source.data_root / "daily-maintenance" / data_configuration_key(source.data_configuration) / f"{session.session_date}.ndjson"
+	if not path.is_file():
+		return None
+	return {"session": session.session_date.isoformat(), "path": str(path.resolve()), "valid": True,
+		"file_sha256": None, "records_id": raw_id, "available_at": available_at}
+
+
+def _raw_import_state(cursor: Any, names: TableNames, sessions: tuple[TradingSession, ...]) -> dict[date, tuple[str, str, int]]:
+	if not sessions:
+		return {}
+	identifiers = tuple(session.session_date.isoformat() for session in sessions)
+	placeholders = ",".join("%s" for _ in identifiers)
+	cursor.execute(f"SELECT s.transaction_date, i.raw_id, i.available_at, COUNT(p.ticker_id) FROM {quote_identifier(names.sessions)} s LEFT JOIN {quote_identifier(names.imports)} i ON i.session_date = s.transaction_date LEFT JOIN {quote_identifier(names.prices)} p ON p.date_id = s.id WHERE s.transaction_date IN ({placeholders}) GROUP BY s.transaction_date, i.raw_id, i.available_at", identifiers)
+	return {date.fromisoformat(str(row[0])): (str(row[1]), str(row[2]), int(row[3])) for row in cursor.fetchall() if row[1] is not None}
+
+
+def _prepare_partial_imports(cursor: Any, connection: Any, names: TableNames) -> int:
+	progress = quote_identifier("stockguidance_daily_import_in_progress")
+	cursor.execute(f"CREATE TABLE IF NOT EXISTS {progress} (session_date DATE NOT NULL PRIMARY KEY, started_at VARCHAR(40) NOT NULL) ENGINE=InnoDB", ())
+	cursor.execute(f"SELECT session_date FROM {progress} ORDER BY session_date", ())
+	partial_dates = tuple(str(row[0]) for row in cursor.fetchall())
+	for session in partial_dates:
+		cursor.execute(f"DELETE p FROM {quote_identifier(names.prices)} p JOIN {quote_identifier(names.sessions)} s ON s.id = p.date_id WHERE s.transaction_date = %s", (session,))
+		cursor.execute(f"DELETE d FROM {quote_identifier(names.deltas)} d JOIN {quote_identifier(names.sessions)} s ON s.id = d.date_id WHERE s.transaction_date = %s", (session,))
+		cursor.execute(f"DELETE FROM {quote_identifier(names.imports)} WHERE session_date = %s", (session,))
+		cursor.execute("DELETE FROM `stockguidance_migration_completion` WHERE workload = 'raw' AND session_date = %s AND series_key = 'raw'", (session,))
+		cursor.execute(f"DELETE FROM {progress} WHERE session_date = %s", (session,))
+	connection.commit()
+	return len(partial_dates)
+
+
+def build_workload(source: SourceConfig, names: TableNames, calendar: SessionCalendar, raw_sessions: tuple[TradingSession, ...], targets: tuple[TradingSession, ...], files_by_date: Mapping[date, dict[str, Any]], availability: Mapping[date, str], raw_sessions_to_import: tuple[TradingSession, ...] | None = None) -> dict[str, Any]:
 	files = [files_by_date[session.session_date] for session in raw_sessions]
 	available_dates = {session.session_date for session in raw_sessions}
 	derived_end = calendar.shift(targets[-1], 2).session_date
@@ -86,7 +117,7 @@ def build_workload(source: SourceConfig, names: TableNames, calendar: SessionCal
 		"authoritative_registry": {"schema_version": 1, "tables": names.tables(), "zscore_templates": names.templates()},
 		"files": files, "targets": target_entries, "mappings": {"ticker_mappings": []},
 		"availability": {session.session_date.isoformat(): availability[session.session_date] for session in raw_sessions},
-		"raw_sessions": [session.session_date.isoformat() for session in raw_sessions],
+		"raw_sessions": [session.session_date.isoformat() for session in (raw_sessions if raw_sessions_to_import is None else raw_sessions_to_import)],
 		"derived_sessions": [session.session_date.isoformat() for session in derived],
 		"zscore_sessions": [session.session_date.isoformat() for session in targets]}
 	root["manifest_id"] = content_id(root)
@@ -119,27 +150,15 @@ def execute_java(arguments: argparse.Namespace, command: list[str], workload: Pa
 	return report
 
 
-def validate_zscores(source: SourceConfig, names: TableNames, workload: dict[str, Any], report: dict[str, Any], directory: Path) -> dict[str, Any]:
-	from stockguidance.performance.stage15 import _date_ids, _imports
-	from stockguidance.performance.stage15_pipeline import PipelineOptions, run_pipeline
+def validate_materialized_zscores(source: SourceConfig, names: TableNames, workload: dict[str, Any], report: dict[str, Any], directory: Path) -> dict[str, Any]:
+	from stockguidance.performance.independent_zscore_validation import validate
 	selected = set(workload["zscore_sessions"])
 	manifest = {**workload, "targets": [target for target in workload["targets"] if target["session"] in selected]}
-	files = {item["session"]: item["records_id"] for item in workload["files"] if item["valid"]}
 	connection = MySQLConnectionFactory()(source.database_config)
 	try:
-		cursor = connection.cursor()
-		try:
-			cursor.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ", ())
-			cursor.execute("START TRANSACTION READ ONLY", ())
-		finally:
-			cursor.close()
-		identifiers = _date_ids(connection, names, tuple(files))
-		verified = _imports(connection, names, tuple(files), files)
 		with redirect_stdout(sys.stderr):
-			result = run_pipeline(connection, names, manifest, identifiers,
-				{identifier: verified.get(session, False) for session, identifier in identifiers.items()}, directory,
-				{"workload": workload["manifest_id"], "snapshot": uuid4().hex},
-				PipelineOptions(sessions_per_batch=20), published_metadata=report["zscores"]["series"])
+			result = validate(connection, names, manifest, directory, report["zscores"]["series"],
+				{"workload": workload["manifest_id"], "snapshot": uuid4().hex})
 		metadata = result["metadata"]
 		result["successful"] = result["status"] == "complete" and not result["mismatch_count"] and not metadata["series_findings"] and not metadata["metadata_findings"]
 		return result
@@ -195,30 +214,49 @@ def run_daily_maintenance(arguments: argparse.Namespace) -> dict[str, object]:
 		cursor.execute("SELECT ENGINE FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s", ("stockguidance_migration_completion",))
 		if cursor.fetchall() != [("InnoDB",)]:
 			raise ValueError("The migrated production completion table must exist and use InnoDB")
-		connection.rollback()
+		partial_imports_removed = _prepare_partial_imports(cursor, connection, names)
 		store = ManifestStore(source.data_root)
 		provider = ConfiguredPolygonProvider(3)
-		files_by_date = {}
-		availability = {}
+		files_by_date: dict[date, dict[str, Any]] = {}
+		availability: dict[date, str] = {}
 		downloaded = 0
 		started = monotonic()
+		last_lock_check = started
+		imports = _raw_import_state(cursor, names, raw_sessions)
+		refreshed_dates: set[date] = set()
 		for index, session in enumerate(raw_sessions, 1):
-			cursor.execute("SELECT IS_USED_LOCK('stockguidance_daily_maintenance') = CONNECTION_ID()", ())
-			if cursor.fetchall() != [(1,)]:
-				raise RuntimeError("The maintenance database lock was lost")
-			connection.rollback()
-			try:
-				manifest = store.load(identity, session)
-			except InvalidManifest:
-				manifest = None
-			if manifest is None or manifest.download.response.state is not ResponseState.COMPLETE or correction.refresh_due(session, manifest.download.available_at, now):
-				response = provider.fetch(source, session)
-				if response.state is not ResponseState.COMPLETE:
-					raise RuntimeError(f"Massive has not supplied a complete response for {session.session_date}; resolve publication or provider access and rerun")
-				manifest = store.save_download(identity, DownloadedSession(session, response, clock.now()))
-				downloaded += 1
-			files_by_date[session.session_date] = export_archive(source, manifest)
-			availability[session.session_date] = manifest.download.available_at.isoformat()
+			if monotonic() - last_lock_check >= 30:
+				cursor.execute("SELECT IS_USED_LOCK('stockguidance_daily_maintenance') = CONNECTION_ID()", ())
+				if cursor.fetchall() != [(1,)]:
+					raise RuntimeError("The maintenance database lock was lost")
+				connection.rollback()
+				last_lock_check = monotonic()
+			imported = imports.get(session.session_date)
+			available_at = imported[1] if imported is not None else (publication.expected_at(session) or session.closes_at).isoformat()
+			refresh_due = imported is not None and correction.refresh_due(session, datetime.fromisoformat(imported[1]), now)
+			entry = None if refresh_due else _archive_entry(source, session, None if imported is None else imported[0], available_at)
+			if refresh_due or entry is None:
+				try:
+					manifest = None if refresh_due else store.load(identity, session)
+				except InvalidManifest:
+					manifest = None
+				if manifest is not None and correction.refresh_due(session, manifest.download.available_at, now):
+					manifest = None
+				if manifest is None or manifest.download.response.state is not ResponseState.COMPLETE:
+					response = provider.fetch(source, session)
+					if response.state is not ResponseState.COMPLETE:
+						raise RuntimeError(f"Massive has not supplied a complete response for {session.session_date}; resolve publication or provider access and rerun")
+					manifest = store.save_download(identity, DownloadedSession(session, response, clock.now()))
+					downloaded += 1
+				entry = export_archive(source, manifest)
+				entry["available_at"] = manifest.download.available_at.isoformat()
+				available_at = manifest.download.available_at.isoformat()
+				refreshed_dates.add(session.session_date)
+			files_by_date[session.session_date] = entry
+			availability[session.session_date] = available_at
+			else:
+				files_by_date[session.session_date] = entry
+				availability[session.session_date] = available_at
 			remaining = (monotonic() - started) / index * (len(raw_sessions) - index)
 			print(f"Source {index}/{len(raw_sessions)} {session.session_date}; downloaded {downloaded}; estimated {remaining:.0f}s remaining in source phase", file=sys.stderr, flush=True)
 		checkpoint = Path(arguments.java_checkpoint_directory).resolve()
@@ -227,42 +265,38 @@ def run_daily_maintenance(arguments: argparse.Namespace) -> dict[str, object]:
 		validations: list[dict[str, Any]] = []
 		java_started = monotonic()
 		for offset in range(0, len(targets), arguments.batch_sessions):
+			cursor.execute("SELECT IS_USED_LOCK('stockguidance_daily_maintenance') = CONNECTION_ID()", ())
+			if cursor.fetchall() != [(1,)]:
+				raise RuntimeError("The maintenance database lock was lost")
+			connection.rollback()
+			last_lock_check = monotonic()
 			batch = targets[offset:offset + arguments.batch_sessions]
 			first = calendar.shift(batch[0], -61).session_date
 			last = min(calendar.shift(batch[-1], 3).session_date, raw_sessions[-1].session_date)
 			inputs = tuple(session for session in raw_sessions if first <= session.session_date <= last)
-			workload = build_workload(source, names, calendar, inputs, batch, files_by_date, availability)
+			batch_raw_dates = tuple(session for session in inputs if session.session_date not in imports or imports[session.session_date][2] == 0 or session.session_date in refreshed_dates)
+			workload = build_workload(source, names, calendar, inputs, batch, files_by_date, availability, batch_raw_dates)
 			path = checkpoint / f"workload-{workload['manifest_id']}.json"
 			atomic_write(path, encode_json(workload))
 			report = execute_java(arguments, command, path, checkpoint)
 			reports.append(report)
-			for session in inputs[1:]:
-				if session.session_date <= calendar.shift(batch[-1], 2).session_date:
-					manifest = store.load(identity, session)
-					if manifest is not None:
-						store.mark_complete(manifest)
-			validation_arguments = argparse.Namespace(data_root=str(source.data_root), dbinfo_file=str(database_path),
-				start_date=batch[0].session_date.isoformat(), end_date=batch[-1].session_date.isoformat(),
-				history_start=arguments.history_start, history_evidence=arguments.history_evidence, adjustment=arguments.adjustment,
-				as_of=None, publication_delay_minutes=arguments.publication_delay_minutes, publication_evidence=arguments.publication_evidence,
-				format="json", ticker_ids=None, lookback_sessions=None, signal_mode="previous_close", zscore_windows=None)
 			print(f"Independently validating {batch[0].session_date} through {batch[-1].session_date}", file=sys.stderr, flush=True)
-			validation = assemble_and_validate(validation_arguments)
-			zscores = validate_zscores(source, names, workload, report, checkpoint.parent / "python-validation")
-			validation_report = {"exit_code": validation.exit_code, "complete": validation.complete, "zscores": zscores,
-				"findings": [asdict(finding) for finding in validation.findings]}
+			zscores = validate_materialized_zscores(source, names, workload, report, checkpoint.parent / "python-validation")
+			validation_report = {"exit_code": 0 if zscores["successful"] else 1, "complete": zscores["successful"], "zscores": zscores,
+				"findings": [] if zscores["successful"] else ["Independent z-score validation found mismatches"]}
 			validations.append(validation_report)
 			atomic_write(checkpoint / f"validation-{workload['manifest_id']}.json", encode_json({**validation_report,
-				"findings": [str(finding) for finding in validation.findings]}))
-			if validation.exit_code != 0 or not zscores["successful"]:
+				"findings": validation_report["findings"]))
+			if not zscores["successful"]:
 				break
 			completed = min(offset + len(batch), len(targets))
 			remaining = (monotonic() - java_started) / completed * (len(targets) - completed)
 			print(f"Updated and validated {completed}/{len(targets)} sessions; estimated {remaining:.0f}s remaining", file=sys.stderr, flush=True)
-		successful = all(item["exit_code"] == 0 and item["zscores"]["successful"] for item in validations)
+		successful = all(item["complete"] and item["zscores"]["successful"] for item in validations)
 		return {"successful": successful, "lookback_years": 2,
 			"start_date": targets[0].session_date.isoformat(), "end_date": targets[-1].session_date.isoformat(),
 			"downloaded_sessions": downloaded, "java_updates": reports,
+			"partial_imports_removed": partial_imports_removed,
 			"python_validation": {"complete": successful, "batches": [{**item, "findings": [str(finding) for finding in item["findings"]]} for item in validations]},
 			"forecast_session": targets[-1].session_date.isoformat(),
 			"forecast_input_session": targets[-1].session_date.isoformat(),

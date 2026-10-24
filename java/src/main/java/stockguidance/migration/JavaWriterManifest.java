@@ -77,7 +77,7 @@ public final class JavaWriterManifest {
             throw new IllegalArgumentException("Stage 5 audit identity changed");
         }
         String sourceKey = snapshot.get("source_key") == null ? null : optionalText(snapshot, "source_key");
-        Map<LocalDate, FileEntry> files = readFiles(array(root, "files"), path);
+        Map<LocalDate, FileEntry> files = readFiles(array(root, "files"), path, false);
         Map<LocalDate, TargetEntry> targets = readTargets(array(root, "targets"));
         if (files.isEmpty() || targets.isEmpty()) throw new IllegalArgumentException("Manifest has no candidate sessions");
         return new JavaWriterManifest(path.toAbsolutePath().normalize(), root, names, manifestId, sourceKey,
@@ -94,7 +94,7 @@ public final class JavaWriterManifest {
         }
         JsonObject registry = object(root, "authoritative_registry");
         TableNames names = TableNames.decode(registry);
-        Map<LocalDate, FileEntry> files = readFiles(array(root, "files"), path);
+        Map<LocalDate, FileEntry> files = readFiles(array(root, "files"), path, true);
         Map<LocalDate, TargetEntry> targets = readTargets(array(root, "targets"));
         JsonObject unsigned = (JsonObject) JsonSupport.deepCopy(root);
         unsigned.remove("manifest_id");
@@ -183,10 +183,10 @@ public final class JavaWriterManifest {
         if (!entry.valid()) throw new InvalidSourceException("Archive session is not adoptable: " + session);
         if (entry.path() == null) throw new InvalidSourceException("Archive path is unavailable: " + session);
         ArchiveCandidateReader.SessionArchive archive = ArchiveCandidateReader.read(entry.path(), session);
-        if (entry.fileSha256() == null || !entry.fileSha256().equals(archive.fileSha256())) {
+        if (entry.fileSha256() != null && !entry.fileSha256().equals(archive.fileSha256())) {
             throw new IllegalArgumentException("Changed Stage 6 input: " + session);
         }
-        if (entry.recordsId() == null || !entry.recordsId().equals(archive.recordsId())) {
+        if (entry.recordsId() != null && !entry.recordsId().equals(archive.recordsId())) {
             throw new IllegalArgumentException("Changed Stage 6 record identity: " + session);
         }
         return archive;
@@ -194,9 +194,10 @@ public final class JavaWriterManifest {
 
     public void verifyArchiveIdentity(ArchiveCandidateReader.SessionArchive archive) {
         FileEntry entry = file(archive.session());
-        if (!entry.valid() || entry.path() == null || entry.fileSha256() == null || entry.recordsId() == null
-                || !entry.fileSha256().equals(archive.fileSha256()) || !entry.recordsId().equals(archive.recordsId())
-                || !entry.fileSha256().equals(hash(entry.path()))) {
+        if (!entry.valid() || entry.path() == null
+                || (entry.fileSha256() != null && !entry.fileSha256().equals(archive.fileSha256()))
+                || (entry.recordsId() != null && !entry.recordsId().equals(archive.recordsId()))
+                || (entry.fileSha256() != null && !entry.fileSha256().equals(hash(entry.path())))) {
             throw new IllegalArgumentException("Changed Stage 6 input: " + archive.session());
         }
     }
@@ -205,7 +206,7 @@ public final class JavaWriterManifest {
         return file(session).valid();
     }
 
-    private static Map<LocalDate, FileEntry> readFiles(JsonArray value, Path manifestPath) {
+    private static Map<LocalDate, FileEntry> readFiles(JsonArray value, Path manifestPath, boolean operational) {
         Map<LocalDate, FileEntry> result = new HashMap<>();
         for (Object rawItem : value) {
             if (!(rawItem instanceof JsonObject item)) throw new IllegalArgumentException("Manifest file must be an object");
@@ -216,7 +217,7 @@ public final class JavaWriterManifest {
             String hash = optionalText(item, "file_sha256");
             String recordsId = optionalText(item, "records_id");
             boolean valid = JsonSupport.booleanOrDefault(item.get("valid"), false);
-            if (valid && (archivePath == null || hash == null || recordsId == null)) {
+            if (valid && (archivePath == null || (!operational && (hash == null || recordsId == null)))) {
                 throw new IllegalArgumentException("Valid manifest source lacks an identity");
             }
             result.put(session, new FileEntry(session, archivePath, valid, hash, recordsId));

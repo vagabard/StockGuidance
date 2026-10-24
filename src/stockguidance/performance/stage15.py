@@ -548,7 +548,7 @@ def run_stage15(
 	benchmark_only: bool = False,
 	progress_seconds: float = 10.0,
 ) -> dict[str, Any]:
-	from stockguidance.performance.stage15_pipeline import PipelineOptions, benchmark, run_pipeline
+	from stockguidance.performance.vectorized_zscore_validation import PipelineOptions, benchmark, run_pipeline
 
 	options = PipelineOptions(workers, zscore_batch_size, fetch_size, sessions_per_batch, cache_slots, max_batches, progress_seconds)
 	if not data_root.resolve().is_dir():
@@ -599,7 +599,7 @@ def run_stage15(
 		if state.get("zscore", {}).get("status") != "complete" or state.get("zscore", {}).get("metadata", {}).get("validation_version") != 2:
 			state["zscore"] = {"status": "running", "batch_size": zscore_batch_size}
 			_write_json(output, state)
-			state["zscore"] = run_pipeline(connection, names, context.zscore_manifest, date_ids, verified_by_id, output.parent / "stage15-checkpoints", {"inputs": context.input_hashes, "database_revision": revision_before}, options, published_metadata=context.zscore["series"])
+			state["zscore"] = run_pipeline(connection, names, context.zscore_manifest, date_ids, verified_by_id, output.parent / "stage15-checkpoints", {"inputs": context.input_hashes, "database_revision": revision_before}, options, published_metadata=context.zscore["series"], metadata_validator=_zscore_metadata)
 			_write_json(output, state)
 			if state["zscore"]["status"] != "complete":
 				state["status"] = "partial"
