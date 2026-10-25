@@ -10,6 +10,7 @@ from stockguidance.calendar.exchange import ExchangeCalendar
 from stockguidance.config.source import SourceConfig, SourceIdentity
 from stockguidance.database.configuration import load_database_configuration
 from stockguidance.database.connections import MySQLConnectionFactory
+from stockguidance.database.table_names import load_table_names, quote_identifier, TableRole
 from stockguidance.database.repositories.archive_catalog import ArchiveCatalog
 from stockguidance.market_data.archive import archive_content, decode_archive
 from hashlib import sha256
@@ -22,6 +23,7 @@ from stockguidance.market_data.atomic import atomic_write
 from stockguidance.market_data.identity import encode_json
 from stockguidance.market_data.consolidation import candidates
 from stockguidance.market_data.cleanup import ArchiveCleanup
+from stockguidance.market_data.reimport import apply_reimport, plan as reimport_plan
 
 
 def configured_source(arguments: argparse.Namespace) -> SourceConfig:
@@ -158,6 +160,34 @@ def cleanup(arguments: argparse.Namespace) -> dict[str, Any]:
 	return report
 
 
+def reimport(arguments: argparse.Namespace) -> dict[str, Any]:
+	source = configured_source(arguments)
+	connect = MySQLConnectionFactory()
+	names = load_table_names()
+	connection = connect(source.database_config)
+	try:
+		cursor = connection.cursor()
+		try:
+			cursor.execute(f"SELECT MAX(session_date) FROM {quote_identifier(names.table(TableRole.IMPORTS))}", ())
+			rows = cursor.fetchall()
+			row = rows[0] if rows else None
+		finally:
+			cursor.close()
+	finally:
+		connection.close()
+	if row is None or row[0] is None:
+		raise ValueError("Cannot determine the database's latest imported session")
+	end = date.fromisoformat(str(row[0]))
+	calendar = ExchangeCalendar(source.calendar_id, arguments.reimport_from, end)
+	plan_value = reimport_plan(source.data_root, arguments.reimport_from, end, calendar)
+	report: dict[str, Any] = {"operation": "reimport", "applied": False, "start": plan_value.start.isoformat(), "end": plan_value.end.isoformat(), "derived_start": plan_value.derived_start.isoformat(), "canonical_dates": len(plan_value.files), "requested_dates": len(plan_value.canonical_dates), "missing_dates": [item.isoformat() for item in plan_value.missing_dates], "missing_count": len(plan_value.missing_dates), "files": [{"date": item.day.isoformat(), "path": str(item.path), "sha256": item.content_id, "rows": item.row_count} for item in plan_value.files], "warning": "Apply is blocked until every database session in the reimport range has a validated market_summary archive."}
+	if arguments.apply:
+		with market_update_lock(source, connect):
+			report = apply_reimport(source, connect, names, "reimport", arguments.backup_confirmation or "", plan_value)
+	atomic_write(arguments.output / "reimport-report.json", encode_json(report))
+	return report
+
+
 def main(argv: list[str] | None = None) -> int:
 	parser = argparse.ArgumentParser(description="Audit and explicitly consolidate daily archives without guessing adjustment provenance")
 	parser.add_argument("--data-root", type=Path, default=Path("data"))
@@ -168,13 +198,18 @@ def main(argv: list[str] | None = None) -> int:
 	parser.add_argument("--retire-legacy", action="store_true", help="Move old source directories into a recoverable backup after complete canonical verification")
 	parser.add_argument("--consolidate", action="store_true", help="Consolidate verified daily data, delete redundant copies, and quarantine unresolved files")
 	parser.add_argument("--cleanup-conflicts", action="store_true", help="Reevaluate quarantined files; delete only verified duplicates or explicitly approved superseded sources")
+	parser.add_argument("--reimport-from", type=date.fromisoformat, help="Reset and reimport database sessions from this date through the latest imported session")
+	parser.add_argument("--backup-confirmation", help="Required with reimport --apply: describe the completed database backup")
 	parser.add_argument("--dbinfo-file", type=Path, default=Path("dbinfo.id"))
 	parser.add_argument("--apply", action="store_true", help="Apply the selected operation; cleanup can permanently delete verified redundant files")
 	arguments = parser.parse_args(argv)
 	try:
-		if sum((arguments.decisions is not None, arguments.export_catalog is not None, arguments.retire_legacy, arguments.consolidate or arguments.cleanup_conflicts)) > 1:
+		operations = (arguments.decisions is not None, arguments.export_catalog is not None, arguments.retire_legacy, arguments.consolidate or arguments.cleanup_conflicts, arguments.reimport_from is not None)
+		if sum(operations) > 1:
 			raise ValueError("Choose one consolidation operation")
-		if arguments.consolidate or arguments.cleanup_conflicts:
+		if arguments.reimport_from is not None:
+			report = reimport(arguments)
+		elif arguments.consolidate or arguments.cleanup_conflicts:
 			report = cleanup(arguments)
 		elif arguments.export_catalog is not None:
 			report = export_catalog(arguments)

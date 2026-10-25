@@ -318,3 +318,39 @@ Apply operations acquire the same update lock as normal writers. Source
 checksums are rechecked immediately before deletion or movement, verified
 canonical coverage is rechecked before deletion, and links/path escapes are
 rejected. A preview is not authorization to delete a file that changes later.
+
+## Reset and reimport the recent database range
+
+The current database receipts identify `2024-07-30` as the beginning of the
+recent update set. To replace that range with unadjusted `market_summary` data,
+first preview the controlled in-place reset:
+
+```powershell
+.\.venv\Scripts\python.exe -m stockguidance.cli.consolidate_market_data `
+  --dbinfo-file replacement-dbinfo.id --reimport-from 2024-07-30
+```
+
+The latest imported database session determines the end date. The preview lists
+the canonical files, missing sessions, rows to remove from raw/derived tables,
+and the warmup range for rebuilding rolling calculations. Apply is blocked while
+any requested session lacks a validated `market_summary` archive. Do not use
+the adjusted `daily-maintenance` or `market_data` copies to fill those gaps.
+The JSON result is also written to `output/storage-consolidation/reimport-report.json`.
+
+After obtaining or freshly downloading the missing canonical sessions, confirm
+the database backup and apply:
+
+```powershell
+.\.venv\Scripts\python.exe -m stockguidance.cli.consolidate_market_data `
+  --dbinfo-file replacement-dbinfo.id --reimport-from 2024-07-30 `
+  --backup-confirmation "Backup completed and verified" --apply
+```
+
+The operation deletes only the selected raw date range and its dependent
+receipts/materializations, preserves older raw rows, imports each canonical
+archive atomically, records adoption receipts in the archive catalog, and then
+switches the source configuration to unadjusted. It also invalidates rolling
+derived rows with the required warmup period. Re-run the normal bounded derived
+data and z-score rebuild/validation workflows afterward; the migration report
+must pass before legacy-file cleanup is applied. Review the same
+`output/storage-consolidation/reimport-report.json` after applying.
