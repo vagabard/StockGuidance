@@ -152,6 +152,7 @@ public final class JavaDailyMaintenanceMain {
         int derivedChanged = 0;
         int archiveReads = 0;
         try (Connection connection = new MySqlConnectionFactory().open(configuration)) {
+            connection.setAutoCommit(false);
             try (PreparedStatement statement = connection.prepareStatement("SELECT configuration_key, source_key FROM "
                     + SqlIdentifiers.quote(manifest.tableNames().source(), "source") + " WHERE id = 1");
                  ResultSet rows = statement.executeQuery()) {
@@ -168,9 +169,10 @@ public final class JavaDailyMaintenanceMain {
             List<LocalDate> missing = new ArrayList<>();
             for (LocalDate session : inputs) {
                 var receipt = receipts.get(session);
+				var previous = fingerprints.get(session);
+				if (receipt != null && !refreshed.contains(session) && (previous == null || !previous.pending())) continue;
                 Path path = manifest.file(session).path();
                 var fingerprint = path != null && Files.isRegularFile(path) ? OperationalDatabase.Fingerprint.read(path) : null;
-                var previous = fingerprints.get(session);
                 var action = OperationalDatabase.planInput(receipt, previous == null ? null : previous.fingerprint(), fingerprint,
                         refreshed.contains(session) || (previous != null && previous.pending()));
                 if (action == OperationalDatabase.InputAction.MISSING) {
@@ -183,6 +185,11 @@ public final class JavaDailyMaintenanceMain {
                     continue;
                 }
                 var archive = ArchiveCandidateReader.readForImport(path, session);
+				var metadata = "year/date".equals(manifest.root().get("archive_layout"))
+						? OperationalDatabase.archiveMetadata(connection, manifest.sourceKey(), session) : null;
+				if (metadata != null && !metadata.checksum().equals(archive.fileSha256())) {
+					throw new IllegalArgumentException("Canonical archive publication is incomplete or changed: " + session);
+				}
                 archiveReads++;
                 if (!fingerprint.equals(OperationalDatabase.Fingerprint.read(path))) {
                     throw new IllegalArgumentException("Source changed while reading: " + session);
@@ -191,7 +198,7 @@ public final class JavaDailyMaintenanceMain {
                     OperationalDatabase.saveFingerprint(connection, manifest.sourceKey(), session, fingerprint);
                     continue;
                 }
-                String available = java.time.Instant.ofEpochSecond(Math.floorDiv(fingerprint.modifiedNs(), 1_000_000_000L),
+                String available = metadata != null ? metadata.availableAt() : java.time.Instant.ofEpochSecond(Math.floorDiv(fingerprint.modifiedNs(), 1_000_000_000L),
                         Math.floorMod(fingerprint.modifiedNs(), 1_000_000_000L)).toString();
                 manifest.availableAt(session, available);
                 markRawImportStarted(connection, session);

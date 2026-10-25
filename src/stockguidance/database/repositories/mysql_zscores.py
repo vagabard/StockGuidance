@@ -20,6 +20,9 @@ from stockguidance.market_data.quality import QualityFlag, QualityPolicy, Qualit
 import json
 from stockguidance.market_data.identity import content_id, source_key
 from stockguidance.market_data.manifests import InvalidManifest, ManifestStore, SourceManifest
+from stockguidance.market_data.canonical_store import CanonicalArchiveStore, archive_store
+from stockguidance.market_data.identity import data_configuration_key
+from stockguidance.market_data.securities import security_metadata, is_test_security
 from stockguidance.market_data.providers.contracts import ResponseState
 from stockguidance.market_data.records import records_id
 from stockguidance.zscores.inputs import InputState, ZScoreInput, ZScoreObservation
@@ -114,7 +117,7 @@ class MySQLZScoreRepository(ZScoreRepository):
 	def __init__(self, source: SourceConfig, connect: WriteConnectionFactory, table_names: TableNames | None = None, manifest_store: ManifestStore | None = None, *, quality_policy: QualityPolicy = QualityPolicy()) -> None:
 		self.source, self.connect = source, connect
 		self.table_names = table_names or load_table_names()
-		self.manifests = manifest_store or ManifestStore(source.data_root)
+		self.manifests = manifest_store or archive_store(source, connect)
 		self.quality_policy = quality_policy
 
 	@contextmanager
@@ -312,8 +315,13 @@ class MySQLZScoreRepository(ZScoreRepository):
 			except (TypeError, ValueError, OverflowError):
 				evidence[session_date].receipt_invalid = True
 
+		cursor.execute(f"SELECT session_date FROM stockguidance_daily_import_in_progress WHERE session_date IN ({_placeholders(dates)}) UNION SELECT session_date FROM stockguidance_daily_source_files WHERE source_key = %s AND download_pending = 1 AND session_date IN ({_placeholders(dates)})", (*dates, data_configuration_key(self.source.data_configuration), *dates))
+		for row in cursor.fetchall():
+			item = evidence[normalize_session_date(row[0])]
+			item.receipt = None
+			item.receipt_invalid = True
 		for item in evidence.values():
-			if len(sessions) > 32:
+			if len(sessions) > 32 or isinstance(self.manifests, CanonicalArchiveStore):
 				continue
 			try:
 				item.manifest = self.manifests.load(self.source.identity, next(session for session in sessions if session.session_date == item.session_date))
@@ -323,18 +331,22 @@ class MySQLZScoreRepository(ZScoreRepository):
 
 	def _close_values(self, query: ZScoreInputQuery, evidence: Mapping[date, _SessionEvidence], labels: Mapping[int, str]) -> dict[TradingSession, dict[int, _CloseValue]]:
 		result: dict[TradingSession, dict[int, _CloseValue]] = {}
+		securities = security_metadata(self.source.data_root)
 		for session in query.scope.sessions:
 			item = evidence[session.session_date]
 			manifest = item.manifest
 			manifest_records = {} if manifest is None else {bar.ticker: bar for bar in manifest.download.response.records}
 			verified = manifest is not None and not item.manifest_invalid and manifest.download.response.state in {ResponseState.COMPLETE, ResponseState.NO_TRADING} and item.receipt is not None and not item.receipt_invalid and item.receipt[0] == records_id(manifest.download.response.records)
 			available = verified and item.receipt is not None and item.receipt[1] <= query.scope.as_of and manifest is not None and manifest.download.available_at <= query.scope.as_of
-			if len(query.scope.sessions) > 32:
+			if len(query.scope.sessions) > 32 or isinstance(self.manifests, CanonicalArchiveStore):
 				verified = item.receipt is not None and not item.receipt_invalid
 				available = verified and item.receipt is not None and item.receipt[1] <= query.scope.as_of
 			values: dict[int, _CloseValue] = {}
 			for ticker_id in query.ticker_ids:
 				label = labels.get(ticker_id)
+				if label is not None and is_test_security(securities, label, session.session_date):
+					values[ticker_id] = _CloseValue(InputState.INVALID, None)
+					continue
 				quality = item.quality.get(ticker_id)
 				if quality is not None and item.receipt is not None and not item.receipt_invalid:
 					if item.receipt[1] > query.scope.as_of:

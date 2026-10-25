@@ -10,6 +10,7 @@ from stockguidance.database.table_names import TableNames, TableRole, quote_iden
 from stockguidance.market_data.legacy_derived import DERIVED_COLUMNS, LegacyDerivedRow
 from stockguidance.market_data.records import DailyBar, count_value, decimal_price, decimal_quantity, decimal_vwap
 from stockguidance.market_data.records import records_id
+from stockguidance.market_data.identity import data_configuration_key
 from stockguidance.market_data.quality import QualityPolicy, HistoryMode, decode_values, invalid_fields
 from stockguidance.database.repositories.quality import read_quality
 
@@ -80,7 +81,7 @@ def _receipts(cursor: Cursor, dates: tuple[date, ...], table_names: TableNames) 
 	return receipts
 
 
-def read_metadata(cursor: Cursor, query: SessionQuery, table_names: TableNames, *, force_verify: bool = False) -> tuple[SessionMetadata, ...]:
+def read_metadata(cursor: Cursor, query: SessionQuery, table_names: TableNames, *, force_verify: bool = False, metadata_only: bool = False) -> tuple[SessionMetadata, ...]:
 	ids = _dates(cursor, query, table_names)
 	by_date = {session.session_date: session for session in query.sessions}
 	receipts = _receipts(cursor, tuple(by_date), table_names)
@@ -89,10 +90,14 @@ def read_metadata(cursor: Cursor, query: SessionQuery, table_names: TableNames, 
 	cursor.execute(f"SELECT session_date FROM stockguidance_daily_import_in_progress WHERE session_date IN ({date_placeholders})", requested_dates)
 	for row in cursor.fetchall():
 		receipts.pop(normalize_session_date(row[0]), None)
+	if metadata_only:
+		cursor.execute(f"SELECT session_date FROM stockguidance_daily_source_files WHERE source_key = %s AND download_pending = 1 AND session_date IN ({date_placeholders})", (data_configuration_key(query.boundary.source), *requested_dates))
+		for row in cursor.fetchall():
+			receipts.pop(normalize_session_date(row[0]), None)
 	date_ids = tuple(ids)
 	if not date_ids:
 		return ()
-	if len(query.sessions) > 32 and not force_verify:
+	if (metadata_only or len(query.sessions) > 32) and not force_verify:
 		return tuple(SessionMetadata(by_date[session_date], date_id, receipts.get(session_date), None, None, ()) for date_id, session_date in ids.items())
 	placeholders = ",".join("%s" for _ in date_ids)
 	counts: dict[int, list[int]] = {date_id: [0, 0] for date_id in date_ids}

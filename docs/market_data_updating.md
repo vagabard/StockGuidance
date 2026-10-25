@@ -1,5 +1,10 @@
 # Recoverable daily market-data updating
 
+For the canonical unadjusted archive, database-first load rules, explicit
+refreshes, and migration from duplicate storage, see [Market storage](market_storage.md).
+The historical response/manifest layout described later in this document is
+retained for read-only compatibility; canonical update commands no longer write it.
+
 For independent read-only checks and explicit validation repair plans, see
 [database validation](database_validation.md). The updater shares its readiness
 and integrity checks; `--repair-plan validation.json` applies automatic proposals

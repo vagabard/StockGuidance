@@ -12,6 +12,7 @@ from stockguidance.database.table_names import TableNames, TableRole, quote_iden
 from stockguidance.market_data.legacy_derived import DERIVED_COLUMNS, LegacyDerivedRow
 from stockguidance.market_data.records import DailyBar
 from stockguidance.market_data.records import records_id
+from stockguidance.market_data.identity import data_configuration_key
 from stockguidance.database.repositories.quality import read_quality
 from stockguidance.market_data.quality import QualityPolicy, HistoryMode, decode_values
 from stockguidance.validation.findings import FindingCategory, ValidationCheck, ValidationFinding
@@ -73,6 +74,11 @@ def inspect_rows(cursor: Cursor, query: SessionQuery, table_names: TableNames) -
 				receipts[decoded_date] = receipt
 		except (ValueError, TypeError, OverflowError):
 			findings.append(ValidationFinding(FindingCategory.INVALID, ValidationCheck.IMPORT, "Invalid import receipt identity or availability", session_date))
+	cursor.execute(f"SELECT session_date FROM stockguidance_daily_import_in_progress WHERE session_date IN ({placeholders}) UNION SELECT session_date FROM stockguidance_daily_source_files WHERE source_key = %s AND download_pending = 1 AND session_date IN ({placeholders})", (*dates, data_configuration_key(query.boundary.source), *dates))
+	for row in cursor.fetchall():
+		session_date = normalize_session_date(row[0])
+		receipts.pop(session_date, None)
+		findings.append(ValidationFinding(FindingCategory.UNVERIFIED, ValidationCheck.IMPORT, "Raw import or archive replacement is pending", session_date))
 	sessions = {session.session_date: session for session in query.sessions}
 	snapshots: list[SessionSnapshot] = []
 	quality = read_quality(cursor, tuple(ids))

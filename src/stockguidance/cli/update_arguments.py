@@ -20,5 +20,6 @@ def add_update_policy_arguments(arguments: argparse.ArgumentParser, *, include_s
 	arguments.add_argument("--recent-refresh-hours", type=float, default=DEFAULT_RECENT_REFRESH_HOURS)
 	arguments.add_argument("--archive-refresh-days", type=float, default=DEFAULT_ARCHIVE_REFRESH_DAYS)
 	arguments.add_argument("--correction-evidence", default=DEFAULT_CORRECTION_EVIDENCE)
+	arguments.add_argument("--refresh-source", action="store_true", help="Explicitly refresh provider data within supplied start/end bounds; completed dates are otherwise reused")
 	if include_schema_initialization:
 		arguments.add_argument("--initialize-schema", action="store_true", help="Explicitly create missing updater/quality tables and date-first indexes; existing financial columns are preserved")

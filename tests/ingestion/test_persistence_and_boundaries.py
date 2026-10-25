@@ -119,7 +119,7 @@ def test_policy_provenance_and_revision_are_persisted_without_configuration_secr
 	import json
 
 	result = harness.run()
-	paths = list(harness.source.data_root.rglob("runs/*.json"))
+	paths = list((harness.source.data_root.parent / "output" / "market-data").rglob("runs/*.json"))
 	assert len(paths) == 1
 	payload = json.loads(paths[0].read_text())
 	assert payload["data_revision"] == result.data_revision

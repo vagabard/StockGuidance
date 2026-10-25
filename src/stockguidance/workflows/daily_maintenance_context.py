@@ -81,7 +81,7 @@ def raw_import_state(cursor: Any, names: TableNames, sessions: tuple[TradingSess
 		return {}
 	identifiers = tuple(session.session_date.isoformat() for session in sessions)
 	placeholders = ",".join("%s" for _ in identifiers)
-	cursor.execute(f"SELECT s.transaction_date, i.raw_id, i.available_at FROM {quote_identifier(names.sessions)} s JOIN {quote_identifier(names.imports)} i ON i.session_date = s.transaction_date WHERE s.transaction_date IN ({placeholders}) ORDER BY s.transaction_date", identifiers)
+	cursor.execute(f"SELECT s.transaction_date, i.raw_id, i.available_at FROM {quote_identifier(names.sessions)} s JOIN {quote_identifier(names.imports)} i ON i.session_date = s.transaction_date WHERE s.transaction_date IN ({placeholders}) AND NOT EXISTS (SELECT 1 FROM stockguidance_daily_import_in_progress p WHERE p.session_date = s.transaction_date) AND NOT EXISTS (SELECT 1 FROM stockguidance_daily_source_files f WHERE f.session_date = s.transaction_date AND f.download_pending = 1) ORDER BY s.transaction_date", identifiers)
 	return {date.fromisoformat(str(row[0])): (str(row[1]), str(row[2])) for row in cursor.fetchall() if row[1] is not None}
 
 
@@ -95,11 +95,13 @@ def open_maintenance(
 	assert_source: Callable[..., Any] = default_assert_source,
 	assert_transactional_tables: Callable[..., Any] = default_assert_transactional_tables,
 	assert_zscore_tables: Callable[..., Any] = default_assert_zscore_tables,
-	prepare_partial_imports: Callable[[Any, Any, TableNames], int] | None = None,
+	prepare_partial_imports: Callable[..., int] | None = None,
 ) -> Iterator[MaintenanceSession]:
 	now = clock.now()
 	default_start, default_end = maintenance_range(now.date())
 	start, end = arguments.start_date or default_start, arguments.end_date or default_end
+	if getattr(arguments, "refresh_source", False) and (arguments.start_date is None or arguments.end_date is None):
+		raise ValueError("--refresh-source requires explicit --start-date and --end-date")
 	if start > end or start < date(2006, 11, 16):
 		raise ValueError("Maintenance bounds must be ordered and start on or after 2006-11-16")
 	publication = DailyPublicationPolicy(timedelta(minutes=arguments.publication_delay_minutes), arguments.publication_evidence)
@@ -128,6 +130,8 @@ def open_maintenance(
 		if arguments.adjustment is not None and PriceAdjustment(arguments.adjustment) is not data_configuration.adjustment:
 			raise ValueError("Requested adjustment conflicts with the database data configuration")
 		arguments.adjustment = data_configuration.adjustment.value
+		if data_configuration.raw_price_split_adjusted or data_configuration.raw_price_dividend_adjusted or data_configuration.raw_price_vendor_defined_adjustment is not None:
+			raise ValueError("Canonical market_summary requires unadjusted data; migrate the adjusted database before maintenance")
 		identity = data_configuration.to_source_identity()
 		source = SourceConfig(identity, resolve_cli_path(arguments.data_root, "data"), database_path,
 			"Configured Massive/Polygon credential", _configuration=data_configuration)
@@ -141,10 +145,10 @@ def open_maintenance(
 			DEFAULT_CALENDAR_ID if data_configuration is None else data_configuration.calendar_id,
 			min(start, date(2005, 1, 1)), max(end, now.date()) + timedelta(days=14))
 		raw_sessions, targets = session_workload(calendar, start, end, now, publication)
-		cursor.execute("SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME IN (%s, %s) AND ENGINE = 'InnoDB'", ("stockguidance_daily_source_files", "stockguidance_daily_import_in_progress"))
-		if {row[0] for row in cursor.fetchall()} != {"stockguidance_daily_source_files", "stockguidance_daily_import_in_progress"}:
+		cursor.execute("SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME IN (%s, %s, %s) AND ENGINE = 'InnoDB'", ("stockguidance_daily_source_files", "stockguidance_daily_import_in_progress", "stockguidance_archive_files"))
+		if {row[0] for row in cursor.fetchall()} != {"stockguidance_daily_source_files", "stockguidance_daily_import_in_progress", "stockguidance_archive_files"}:
 			raise ValueError("Daily maintenance metadata is missing; run explicit update schema initialization first")
-		partial_imports_removed = prepare_partial_imports(cursor, connection, names) if getattr(arguments, "stage", None) in (None, "source") and prepare_partial_imports is not None else 0
+		partial_imports_removed = prepare_partial_imports(cursor, connection, names, raw_sessions) if getattr(arguments, "stage", None) in (None, "source") and prepare_partial_imports is not None else 0
 		imports = raw_import_state(cursor, names, raw_sessions)
 		context = MaintenanceContext(arguments, clock, now, database_path, source, names, calendar, raw_sessions, targets, publication, correction)
 		yield MaintenanceSession(context, connection, cursor, imports, partial_imports_removed)

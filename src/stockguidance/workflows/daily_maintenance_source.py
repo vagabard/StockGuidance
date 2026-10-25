@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date
 from hashlib import sha256
 import json
 from pathlib import Path
@@ -9,14 +9,17 @@ from typing import Any
 
 from stockguidance.calendar.sessions import TradingSession
 from stockguidance.config.source import SourceConfig
-from stockguidance.market_data.atomic import atomic_write
-from stockguidance.market_data.identity import data_configuration_key, encode_json
+from stockguidance.market_data.identity import data_configuration_key
 from stockguidance.market_data.manifests import SourceManifest
 from stockguidance.market_data.providers.configured_polygon import ConfiguredPolygonProvider
 from stockguidance.market_data.providers.contracts import DownloadedSession, ResponseState
-from stockguidance.market_data.records import bar_payload, decode_bar, records_id
+from stockguidance.market_data.records import decode_bar, records_id
 from stockguidance.workflows.daily_maintenance_context import MaintenanceSession
 from stockguidance.market_data.quality import invalid_fields
+from stockguidance.market_data.archive import archive_path
+from stockguidance.market_data.canonical_store import CanonicalArchiveStore
+from stockguidance.database.repositories.archive_catalog import ArchiveCatalog
+from stockguidance.database.connections import MySQLConnectionFactory
 
 
 @dataclass
@@ -30,26 +33,15 @@ class SourceStageResult:
 def export_archive(source: SourceConfig, download: DownloadedSession | SourceManifest) -> dict[str, Any]:
 	if isinstance(download, SourceManifest):
 		download = download.download
-	timestamps = dict(download.response.source_timestamps)
-	rows = []
-	for bar in download.response.records:
-		if bar.ticker not in timestamps:
-			raise ValueError(f"Source timestamp is missing for {download.session.session_date}: {bar.ticker}")
-		rows.append(encode_json({**bar_payload(bar), "t": timestamps[bar.ticker]}))
-	for ticker, values in download.response.bad_records:
-		if ticker not in timestamps:
-			raise ValueError(f"Source timestamp is missing for {download.session.session_date}: {ticker}")
-		rows.append(encode_json({"T": ticker, **dict(zip(("o", "h", "l", "c", "v", "vw", "n"), values)), "t": timestamps[ticker]}))
-	content = b"".join(rows)
-	path = source.data_root / "daily-maintenance" / data_configuration_key(source.data_configuration) / f"{download.session.session_date}.ndjson"
-	if not path.exists() or path.read_bytes() != content:
-		atomic_write(path, content)
+	store = CanonicalArchiveStore(source.data_root, ArchiveCatalog(source, MySQLConnectionFactory()))
+	manifest = store.save_download(source.identity, download)
+	path = store.path_for(source.identity, download.session)
 	return {"session": download.session.session_date.isoformat(), "path": str(path.resolve()), "valid": True,
-		"file_sha256": sha256(content).hexdigest(), "records_id": records_id(download.response.records)}
+		"file_sha256": manifest.content_id, "records_id": records_id(download.response.records)}
 
 
 def archive_entry(source: SourceConfig, session: TradingSession, raw_id: str | None, available_at: str) -> dict[str, Any] | None:
-	path = source.data_root / "daily-maintenance" / data_configuration_key(source.data_configuration) / f"{session.session_date}.ndjson"
+	path = archive_path(source.data_root, session.session_date)
 	if not path.is_file():
 		return None
 	return {"session": session.session_date.isoformat(), "path": str(path.resolve()), "valid": True,
@@ -101,10 +93,19 @@ def run_source_stage(maintenance: MaintenanceSession) -> SourceStageResult:
 			last_lock_check = monotonic()
 		imported = maintenance.imports.get(session.session_date)
 		available_at = imported[1] if imported is not None else (context.publication.expected_at(session) or session.closes_at).isoformat()
-		refresh_due = imported is not None and context.correction.refresh_due(session, datetime.fromisoformat(imported[1]), context.now)
-		entry = None if refresh_due else archive_entry(context.source, session, None if imported is None else imported[0], available_at)
-		if entry is None and imported is not None and not refresh_due:
+		refresh_due = getattr(getattr(context, "arguments", None), "refresh_source", False) and session in context.targets
+		entry = None
+		if imported is not None and not refresh_due:
 			entry = {"session": session.session_date.isoformat(), "path": None, "valid": True, "records_id": imported[0]}
+		elif not refresh_due:
+			store = CanonicalArchiveStore(context.source.data_root, ArchiveCatalog(context.source, MySQLConnectionFactory()))
+			try:
+				manifest = store.load(context.source.identity, session)
+			except ValueError:
+				manifest = None
+			if manifest is not None:
+				available_at = manifest.download.available_at.isoformat()
+				entry = archive_entry(context.source, session, manifest.content_id, available_at)
 		if refresh_due or entry is None:
 			response = provider.fetch(context.source, session)
 			if response.state is not ResponseState.COMPLETE:

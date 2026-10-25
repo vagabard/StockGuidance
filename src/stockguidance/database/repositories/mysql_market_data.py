@@ -19,7 +19,7 @@ from stockguidance.market_data.providers.contracts import DownloadedSession, Res
 from stockguidance.market_data.records import records_id
 from stockguidance.market_data.quality import ObservedBar, QualityFlag, QualityRecord, invalid_fields
 from stockguidance.database.repositories.quality import CURRENT, SCANS, save_quality, derived_quality, read_quality
-from stockguidance.market_data.identity import content_id
+from stockguidance.market_data.identity import content_id, data_configuration_key
 from stockguidance.database.repositories.mysql_quality import reconcile_quality
 from stockguidance.workflows.progress import ProgressReporter
 from stockguidance.database.repositories.timed_cursor import TimedCursor
@@ -33,6 +33,8 @@ class MySQLMarketDataRepository:
 		self.table_names = table_names or load_table_names()
 		self.reporter = reporter or ProgressReporter()
 		self.force_verify = False
+		self.metadata_only = False
+		self.legacy_read_only = False
 
 	@contextmanager
 	def _transaction(self, query: SessionQuery, *, write: bool = False, commit_when: Callable[[], bool] | None = None) -> Iterator[WriteCursor]:
@@ -89,7 +91,7 @@ class MySQLMarketDataRepository:
 
 	def inspect_metadata(self, query: SessionQuery, *, force_verify: bool = False) -> tuple[SessionMetadata, ...]:
 		with self._transaction(query) as cursor:
-			return self.reporter.measure("database session metadata", lambda: read_metadata(cursor, query, self.table_names, force_verify=force_verify or self.force_verify))
+			return self.reporter.measure("database session metadata", lambda: read_metadata(cursor, query, self.table_names, force_verify=force_verify or self.force_verify, metadata_only=self.metadata_only))
 
 	def scan_quality(self, query: SessionQuery) -> tuple[date, ...]:
 		key = content_id([self.source.data_configuration.semantic_payload(), query.boundary.calendar_id, [session.session_date.isoformat() for session in query.sessions]])
@@ -153,6 +155,17 @@ class MySQLMarketDataRepository:
 				cursor.executemany(f"INSERT INTO {quote_identifier(self.table_names.table(TableRole.PRICES))} (ticker_id, date_id, open, high, low, close, volume, vwap, transactions) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)", rows[offset:offset + 1000])
 			cursor.execute(f"DELETE FROM {quote_identifier(self.table_names.table(TableRole.IMPORTS))} WHERE session_date = %s", (download.session.session_date,))
 			cursor.execute(f"INSERT INTO {quote_identifier(self.table_names.table(TableRole.IMPORTS))} (session_date, raw_id, available_at) VALUES (%s,%s,%s)", (download.session.session_date, records_id(download.response.records), download.available_at.isoformat()))
+			cursor.execute("DELETE FROM stockguidance_daily_import_in_progress WHERE session_date = %s", (download.session.session_date,))
+			cursor.execute("UPDATE stockguidance_daily_source_files SET download_pending = 0 WHERE source_key = %s AND session_date = %s", (data_configuration_key(self.source.data_configuration), download.session.session_date))
+
+	def acknowledge_archive(self, query: SessionQuery, download: DownloadedSession) -> None:
+		with self._transaction(query, write=True) as cursor:
+			cursor.execute(f"SELECT raw_id FROM {quote_identifier(self.table_names.imports)} WHERE session_date = %s FOR UPDATE", (download.session.session_date,))
+			rows = cursor.fetchall()
+			if len(rows) != 1 or rows[0][0] != records_id(download.response.records):
+				raise ValueError("Cannot acknowledge an archive without its matching committed raw receipt")
+			cursor.execute("DELETE FROM stockguidance_daily_import_in_progress WHERE session_date = %s", (download.session.session_date,))
+			cursor.execute("UPDATE stockguidance_daily_source_files SET download_pending = 0 WHERE source_key = %s AND session_date = %s", (data_configuration_key(self.source.data_configuration), download.session.session_date))
 
 	def replace_derived(self, query: SessionQuery, update: DerivedUpdate) -> None:
 		local_query = SessionQuery(query.boundary, tuple(session for session in query.sessions if abs(session.sequence - update.snapshot.session.sequence) <= 1), query.as_of)

@@ -281,7 +281,7 @@ def study(arguments: argparse.Namespace) -> dict[str, Any]:
 	environment = dict(os.environ)
 	for name in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
 		environment[name] = "1"
-	modes = ("files",) if arguments.files_only else tuple(arguments.modes)
+	modes = ("canonical",) if arguments.canonical else ("files",) if arguments.files_only else tuple(arguments.modes)
 	runs: list[dict[str, Any]] = []
 	report: dict[str, Any] = {"schema_version": 1, "created_at": datetime.now(timezone.utc).isoformat(), "seed": arguments.seed, "archive_file_count": len(paths), "selected_paths": [str(path) for path in selected], "largest_file": str(largest), "complete": False, "parity": None, "runs": runs, "limitations": ["First invocation is not an OS-cache-cold measurement.", "Each worker uses its own read-only transaction; database must remain idle for cross-worker consistency.", "RSS sampling includes runtime and child processes; OS thread counts include housekeeping.", "No derived-computation or write benchmark is included; write-backend selection remains pending.", "All repeats must have identical digests before speed results are usable."]}
 	report_path = output / "study.json"
@@ -326,6 +326,7 @@ def main(argv: list[str] | None = None) -> int:
 	parser.add_argument("--sample-count", type=int, default=24)
 	parser.add_argument("--seed", type=int, default=20261019)
 	parser.add_argument("--files-only", action="store_true")
+	parser.add_argument("--canonical", action="store_true", help="Compare exact operational NDJSON decoders, including retained bad rows")
 	parser.add_argument("--modes", nargs="+", choices=("files", "database", "reconcile"), default=("files", "database", "reconcile"))
 	parser.add_argument("--derived-only", action="store_true")
 	parser.add_argument("--study-report", default="output/legacy-migration/benchmark/study.json")

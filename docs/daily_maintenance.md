@@ -1,5 +1,12 @@
 # Daily maintenance
 
+Daily archives now use `data/market_summary/YYYY/YYYY-MM-DD.ndjson`. Completed
+database dates are reused until an explicit bounded `--refresh-source` request.
+An adjusted database requires migration before running new maintenance writes.
+See [Market storage](market_storage.md) for schema setup, conflict rules,
+benchmark commands, recoverable retirement and cutover instructions. Older
+storage and scheduled-refresh descriptions below document the previous layout.
+
 Run from the repository root after installing the Python package with database
 dependencies and building Java 26:
 

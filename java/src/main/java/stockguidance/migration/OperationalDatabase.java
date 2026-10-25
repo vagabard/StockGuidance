@@ -28,6 +28,20 @@ final class OperationalDatabase {
 
     record SourceFile(Fingerprint fingerprint, boolean pending) { }
 
+    record ArchiveMetadata(String checksum, String availableAt) { }
+
+    static ArchiveMetadata archiveMetadata(Connection connection, String sourceKey, LocalDate session) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("SELECT metadata FROM stockguidance_archive_files WHERE source_key = ? AND session_date = ?")) {
+            statement.setString(1, sourceKey);
+            statement.setObject(2, session);
+            try (ResultSet rows = statement.executeQuery()) {
+                if (!rows.next()) throw new IllegalArgumentException("Archive provenance is unresolved for " + session + "; run source recovery or archive migration");
+                var metadata = stockguidance.json.JsonSupport.parse(rows.getString(1));
+                return new ArchiveMetadata(metadata.get("content_id").toString(), metadata.get("available_at").toString());
+            }
+        }
+    }
+
     record Fingerprint(long size, long modifiedNs) {
         static Fingerprint read(Path path) throws IOException {
             BasicFileAttributes attributes = Files.readAttributes(path, BasicFileAttributes.class);
@@ -85,6 +99,11 @@ final class OperationalDatabase {
             statement.setObject(2, session);
             statement.setLong(3, fingerprint.size());
             statement.setLong(4, fingerprint.modifiedNs());
+            statement.executeUpdate();
+        }
+        try (PreparedStatement statement = connection.prepareStatement("UPDATE stockguidance_archive_files SET metadata = JSON_SET(metadata, '$.pending', CAST('false' AS JSON)) WHERE source_key = ? AND session_date = ?")) {
+            statement.setString(1, sourceKey);
+            statement.setObject(2, session);
             statement.executeUpdate();
         }
     }

@@ -114,7 +114,7 @@ def _plan_from_discovery(source: SourceConfig, settings: ValidationSettings, dis
 	)
 
 
-def validate_database(source: SourceConfig, settings: ValidationSettings, boundary: HistoryBoundary | None, calendar: SessionCalendar, repository: ValidationRepository, clock: Clock, *, openings: OpeningRepository | None = None, discovery: CoverageDiscoveryResult | None = None, zscore_repository: ZScoreRepository | None = None) -> ValidationResult:
+def validate_database(source: SourceConfig, settings: ValidationSettings, boundary: HistoryBoundary | None, calendar: SessionCalendar, repository: ValidationRepository, clock: Clock, *, openings: OpeningRepository | None = None, discovery: CoverageDiscoveryResult | None = None, zscore_repository: ZScoreRepository | None = None, manifest_store: ManifestStore | None = None) -> ValidationResult:
 	if settings.features is not None and (settings.features.adjustment is not source.identity.adjustment or settings.features.interval is not source.identity.interval):
 		raise ValueError("Validation feature specification and source differ")
 	cutoff = decision_cutoff(clock, settings.as_of)
@@ -142,7 +142,10 @@ def validate_database(source: SourceConfig, settings: ValidationSettings, bounda
 	eligible = tuple(snapshot for snapshot in snapshots if snapshot.receipt is not None and snapshot.receipt.available_at <= cutoff)
 	index = SnapshotIndex(eligible)
 	by_date = {snapshot.session.session_date: snapshot for snapshot in snapshots}
-	store = ManifestStore(source.data_root)
+	from stockguidance.market_data.canonical_store import archive_store
+
+	connect = getattr(repository, "connect", None)
+	store = manifest_store or (ManifestStore(source.data_root) if connect is None else archive_store(source, connect))
 	manifests: list[SourceManifest] = []
 	for item in plan.sessions:
 		manifest = None

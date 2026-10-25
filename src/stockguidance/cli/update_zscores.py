@@ -16,6 +16,7 @@ from stockguidance.database.update_schema import initialize_zscore_schema
 from stockguidance.market_data.history import HistoryBoundary, HistoryProvenance, UnknownHistoryBoundary
 from stockguidance.market_data.history_store import JsonHistoryStore
 from stockguidance.market_data.manifests import ManifestStore
+from stockguidance.market_data.canonical_store import archive_store
 from stockguidance.market_data.providers.polygon import GROUPED_ENDPOINT, GROUPED_UNIVERSE
 from stockguidance.market_data.publication import DailyPublicationPolicy
 from stockguidance.workflows.update_zscores import ZScoreUpdateResult, ZScoreUpdateSettings, update_zscores
@@ -69,7 +70,7 @@ def _boundary(
 	if stored is not None:
 		stored.validate_for(source.identity, calendar)
 		return stored
-	manifest_inventory = ManifestStore(source.data_root).inventory(source.identity, calendar, start=calendar.start, end=calendar.end)
+	manifest_inventory = archive_store(source, connect).inventory(source.identity, calendar, start=calendar.start, end=calendar.end)
 	database_inventory_error: Exception | None = None
 	try:
 		database_inventory = MySQLSessionRepository(source, connect, table_names).inventory(calendar.start, calendar.end, calendar.calendar_id)
@@ -106,7 +107,7 @@ def assemble_and_update_zscores(arguments: argparse.Namespace) -> ZScoreUpdateRe
 	settings = ZScoreUpdateSettings(arguments.start_date, arguments.end_date, arguments.windows, publication, arguments.initialize_schema, policy)
 	if settings.initialize_schema:
 		initialize_zscore_schema(source, connect, settings.windows, table_names)
-	repository = MySQLZScoreRepository(source, connect, table_names, ManifestStore(source.data_root), quality_policy=policy)
+	repository = MySQLZScoreRepository(source, connect, table_names, archive_store(source, connect), quality_policy=policy)
 	return update_zscores(source, settings, boundary, calendar, repository, clock, initialized_schema=settings.initialize_schema)
 
 

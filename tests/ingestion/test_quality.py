@@ -16,6 +16,7 @@ from stockguidance.database.repositories.mysql_zscores import MySQLZScoreReposit
 from stockguidance.database.update_schema import initialize_zscore_schema
 from stockguidance.zscores.storage import ZScoreSeriesDefinition
 from stockguidance.market_data.identity import source_key
+from stockguidance.market_data.records import records_id
 from support.ingestion import FakeConnection, FakeCursor
 from stockguidance.market_data.providers.contracts import DownloadedSession
 from stockguidance.workflows.daily_maintenance_source import export_archive, archive_identity
@@ -176,15 +177,15 @@ def test_published_zscores_round_trip_sticky_quality(harness, calendar):
 
 
 def test_source_export_preserves_bad_rows_and_timestamps(harness, calendar):
+	from stockguidance.market_data.archive import publish_archive
 	session = calendar.session(date(2024, 7, 2))
 	timestamp = int(session.opens_at.timestamp() * 1000)
 	response = ProviderResponse(ResponseState.COMPLETE, (), 200, "OK", (("resultsCount", 1),), source_timestamps=(("TTE", timestamp),), bad_records=(("TTE", (0, 0, 0, 0, 0, None, 0)),))
-	entry = export_archive(harness.source, DownloadedSession(session, response, harness.clock.now()))
-	path = Path(entry["path"])
+	path, checksum = publish_archive(harness.source.data_root, DownloadedSession(session, response, harness.clock.now()))
 	content = path.read_bytes()
 	row = json.loads(content)
-	assert row == {"T": "TTE", "o": 0, "h": 0, "l": 0, "c": 0, "v": 0, "vw": None, "n": 0, "t": timestamp}
-	assert archive_identity(path) == (entry["file_sha256"], entry["records_id"])
+	assert row == {"T": "TTE", "o": "0", "h": "0", "l": "0", "c": "0", "v": "0", "vw": None, "n": "0", "t": timestamp}
+	assert archive_identity(path) == (checksum, records_id(response.records))
 	assert path.read_bytes() == content
 
 

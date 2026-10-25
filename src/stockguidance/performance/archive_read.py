@@ -1,5 +1,6 @@
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
+from functools import lru_cache
 from datetime import date, datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP, localcontext
 from hashlib import sha256
@@ -18,10 +19,18 @@ from stockguidance.database.table_names import quote_identifier
 from stockguidance.market_data.identity import encode_json
 from stockguidance.market_data.legacy_derived import DERIVED_COLUMNS, LegacyDerivedRow, derived_study_id, legacy_rows
 from stockguidance.market_data.records import DailyBar, count_value, records_id
+from stockguidance.market_data.archive import decode_archive
+from stockguidance.market_data.records import canonical_decimal
+from stockguidance.calendar.exchange import ExchangeCalendar
 from stockguidance.validation.derived import differing_columns
 
 
 DERIVED_BATCH_SIZE = 1
+
+
+@lru_cache(maxsize=32)
+def _archive_calendar(year: int) -> ExchangeCalendar:
+	return ExchangeCalendar("XNYS", date(year, 1, 1), date(year, 12, 31))
 
 
 @dataclass(frozen=True)
@@ -52,7 +61,7 @@ def archive_price(value: Any) -> Decimal:
 
 def decode_archive_bar(row: dict[str, Any]) -> ArchiveBar:
 	value = row["v"]
-	if isinstance(value, bool) or not isinstance(value, (Decimal, int, float)):
+	if isinstance(value, bool) or not isinstance(value, (Decimal, int, float, str)):
 		raise ValueError("Invalid archive volume")
 	volume = Decimal(str(value))
 	if not volume.is_finite() or not 0 <= volume <= Decimal(2**63 - 1):
@@ -351,7 +360,7 @@ def run_chunk(arguments: tuple[list[str], str, str | None]) -> dict[str, Any]:
 	started, cpu_started = perf_counter(), process_time()
 	results: list[dict[str, Any]] = []
 	try:
-		if mode != "files":
+		if mode not in {"files", "canonical"}:
 			if configuration is None:
 				raise ValueError("Database mode requires configuration")
 			connection = streaming_connection(Path(configuration))
@@ -364,6 +373,15 @@ def run_chunk(arguments: tuple[list[str], str, str | None]) -> dict[str, Any]:
 		for name in paths:
 			path = Path(name)
 			result: dict[str, Any] = {"session": path.stem}
+			if mode == "canonical":
+				session_date = date.fromisoformat(path.stem)
+				calendar = _archive_calendar(session_date.year)
+				content = path.read_bytes()
+				response = decode_archive(content, calendar.session(session_date))
+				result.update(file_sha256=sha256(content).hexdigest(), archive_id=records_id(response.records), archive_count=len(response.records) + len(response.bad_records),
+					bad_records={ticker: [None if value is None else canonical_decimal(Decimal(str(value))) for value in values] for ticker, values in response.bad_records})
+				results.append(result)
+				continue
 			if mode != "database":
 				bars, file_hash = read_archive(path)
 				result.update(file_sha256=file_hash, archive_id=archive_records_id(bars), archive_count=len(bars))
@@ -387,7 +405,7 @@ def run_request(request: dict[str, Any]) -> dict[str, Any]:
 	if type(workers) is not int or not 1 <= workers <= 3:
 		raise ValueError("Workers must be between one and three")
 	mode = request["mode"]
-	if mode not in {"files", "database", "reconcile", "derived"}:
+	if mode not in {"files", "canonical", "database", "reconcile", "derived"}:
 		raise ValueError("Unsupported study mode")
 	paths = request["paths"]
 	if not paths or len(set(paths)) != len(paths):

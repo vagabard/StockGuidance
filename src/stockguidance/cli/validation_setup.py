@@ -16,6 +16,7 @@ from stockguidance.market_data.discovery import DiscoveryRequest, HistoryOverrid
 from stockguidance.market_data.history import InventoryIssue, LocalCoverageInventory, UnknownHistoryBoundary
 from stockguidance.market_data.history_store import JsonHistoryStore
 from stockguidance.market_data.manifests import ManifestStore
+from stockguidance.market_data.canonical_store import archive_store
 from stockguidance.market_data.providers.polygon import GROUPED_ENDPOINT, GROUPED_UNIVERSE
 from stockguidance.market_data.providers.contracts import CapabilityState, ProviderCapability
 from stockguidance.market_data.publication import DailyPublicationPolicy
@@ -80,7 +81,7 @@ def assemble_and_validate(arguments: argparse.Namespace) -> ValidationResult:
 		calendar_id = read_ticker_calendar(source, MySQLConnectionFactory(), ticker_ids, table_names)
 	calendar = ExchangeCalendar(calendar_id, calendar_start, calendar_end)
 	local_inventories: list[LocalCoverageInventory] = []
-	manifest_store = ManifestStore(source.data_root)
+	manifest_store = archive_store(source, MySQLConnectionFactory())
 	manifest_inventory = manifest_store.inventory(identity, calendar, start=calendar.start, end=calendar.end)
 	local_inventories.append(manifest_inventory)
 	if arguments.dbinfo_file != "dbinfo.id" or arguments.data_root == "data" or manifest_inventory.observations:
@@ -110,5 +111,5 @@ def assemble_and_validate(arguments: argparse.Namespace) -> ValidationResult:
 	if discovery.effective_start is None or discovery.effective_end is None:
 		raise UnknownHistoryBoundary("Supported history is unknown")
 	settings = ValidationSettings(requested_start, requested_end, publication, cutoff, features, zscore_windows=getattr(arguments, "zscore_windows", None))
-	zscore_repository = None if settings.zscore_windows is None else MySQLZScoreRepository(source, MySQLConnectionFactory(), table_names, ManifestStore(source.data_root))
-	return validate_database(source, settings, boundary, calendar, MySQLValidationRepository(source, MySQLConnectionFactory(), table_names), clock, discovery=discovery, zscore_repository=zscore_repository)
+	zscore_repository = None if settings.zscore_windows is None else MySQLZScoreRepository(source, MySQLConnectionFactory(), table_names, manifest_store)
+	return validate_database(source, settings, boundary, calendar, MySQLValidationRepository(source, MySQLConnectionFactory(), table_names), clock, discovery=discovery, zscore_repository=zscore_repository, manifest_store=manifest_store)

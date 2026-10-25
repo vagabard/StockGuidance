@@ -17,16 +17,17 @@ from stockguidance.validation.derived import derived_values_match
 
 
 class SnapshotCoverageReader:
-	def __init__(self, repository: MarketDataRepository, *, force_verify: bool = False) -> None:
+	def __init__(self, repository: MarketDataRepository, *, force_verify: bool = False, database_first: bool = False) -> None:
 		self.repository = repository
 		self.force_verify = force_verify
+		self.database_first = database_first
 		self.metadata: tuple[SessionMetadata, ...] = ()
 		self.snapshots: tuple[SessionSnapshot, ...] = ()
 		self.cleaned_dates: tuple[date, ...] = ()
 		self.has_orphans = False
 
 	def read(self, query: SessionQuery) -> tuple[StoredSession, ...]:
-		self.has_orphans = len(query.sessions) <= 32 and self.repository.has_orphans(query)
+		self.has_orphans = not self.database_first and len(query.sessions) <= 32 and self.repository.has_orphans(query)
 		self.metadata = self.repository.inspect_metadata(query, force_verify=self.force_verify)
 		self.snapshots = ()
 		return tuple(StoredSession(item.date_id, item.session.session_date, CoverageState.UNVERIFIED, "Source manifests and dependent rows require reconciliation", None if item.receipt is None else item.receipt.available_at) for item in self.metadata)
@@ -53,13 +54,29 @@ def _fetch_authorized(plan: CoveragePlan, session: TradingSession) -> bool:
 	return (plan.fetchable_start is None or session.session_date >= plan.fetchable_start) and (plan.fetchable_end is None or session.session_date <= plan.fetchable_end)
 
 
-def plan_updates(plan: CoveragePlan, metadata: tuple[SessionMetadata, ...], store: ManifestStore, correction: CorrectionPolicy, now: datetime, force_refresh_dates: frozenset[date] = frozenset()) -> tuple[UpdateWork, ...]:
+def plan_updates(plan: CoveragePlan, metadata: tuple[SessionMetadata, ...], store: ManifestStore, correction: CorrectionPolicy, now: datetime, force_refresh_dates: frozenset[date] = frozenset(), *, database_first: bool = False, force_verify: bool = False) -> tuple[UpdateWork, ...]:
 	by_date = {item.session.session_date: item for item in metadata}
 	work: list[UpdateWork] = []
 	for item in plan.sessions:
 		if item.state is CoverageState.NOT_YET_AVAILABLE or item.expected_available_at is None:
 			continue
 		stored = by_date.get(item.session.session_date)
+		if database_first:
+			if stored is not None and stored.receipt is not None and stored.receipt.available_at > now:
+				continue
+			if item.session.session_date in force_refresh_dates:
+				work.append(UpdateWork(item.session, None, True, "Explicit source refresh"))
+				continue
+			if stored is not None and stored.receipt is not None and not force_verify:
+				if stored.receipt.derived_content_id is None or stored.receipt.derived_dependency_id is None:
+					work.append(UpdateWork(item.session, None, False, "Raw import is complete; derived calculations require reconciliation"))
+				continue
+			try:
+				manifest = store.load(plan.request.source, item.session)
+			except InvalidManifest:
+				manifest = None
+			work.append(UpdateWork(item.session, manifest, manifest is None, "Canonical archive verification or missing raw import"))
+			continue
 		if stored is not None and stored.raw_count is None and stored.receipt is not None and stored.receipt.available_at <= now and item.session.session_date not in force_refresh_dates:
 			try:
 				header = store.load_metadata(plan.request.source, item.session)

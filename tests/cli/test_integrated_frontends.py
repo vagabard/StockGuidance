@@ -17,7 +17,7 @@ from stockguidance.market_data.history_store import JsonHistoryStore
 POLICIES = ["--publication-delay-minutes", "15", "--publication-evidence", "Fixture-only", "--recent-window-days", "30", "--recent-refresh-hours", "720", "--archive-refresh-days", "30", "--correction-evidence", "Fixture-only"]
 
 
-def test_default_validation_and_explicit_updater_repair_round_trip_detect_a_leading_gap(harness, monkeypatch, tmp_path, capsys):
+def test_adjusted_legacy_validation_detects_gap_but_requires_migration_before_updates(harness, monkeypatch, tmp_path, capsys):
 	assert harness.run().successful
 	JsonHistoryStore(harness.source.data_root / "history").save(harness.boundary)
 	harness.database.sql("DELETE FROM raw_stock_data WHERE date_id = (SELECT id FROM transaction_dates WHERE transaction_date = ?)", ("2024-07-01",))
@@ -35,10 +35,9 @@ def test_default_validation_and_explicit_updater_repair_round_trip_detect_a_lead
 	assert harness.database.commits == commits
 	path = tmp_path / "repair.json"
 	path.write_text(json.dumps(repair), encoding="utf-8")
-	assert update_main([*common, *POLICIES, "--repair-plan", str(path)]) == 0
-	assert json.loads(capsys.readouterr().out)["successful"]
-	assert validate_main(validation) == 0
-	assert json.loads(capsys.readouterr().out)["complete"]
+	assert update_main([*common, *POLICIES, "--adjustment", "adjusted", "--repair-plan", str(path)]) == 1
+	assert not json.loads(capsys.readouterr().out)["successful"]
+	assert harness.database.commits == commits
 
 
 @pytest.mark.parametrize("allocation", ["alternate_sessions", "staggered_halves"])

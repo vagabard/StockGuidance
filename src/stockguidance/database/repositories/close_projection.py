@@ -9,7 +9,7 @@ from stockguidance.validation.findings import ValidationCheck
 from stockguidance.market_data.quality import QualityFlag
 
 
-def project_closes(query: CloseQuery, inspection: DatabaseInspection, manifests: tuple[SourceManifest, ...]) -> CloseData:
+def project_closes(query: CloseQuery, inspection: DatabaseInspection, manifests: tuple[SourceManifest, ...], *, trust_database: bool = False) -> CloseData:
 	snapshots = {snapshot.session: snapshot for snapshot in inspection.snapshots}
 	by_session = {manifest.download.session: manifest for manifest in manifests}
 	symbols = dict(inspection.ticker_symbols)
@@ -38,9 +38,10 @@ def project_closes(query: CloseQuery, inspection: DatabaseInspection, manifests:
 				state, detail = PriceState.MISSING, "Expected session is missing from storage"
 			elif (snapshot.receipt is not None and snapshot.receipt.available_at > query.scope.as_of) or (manifest is not None and manifest.download.available_at > query.scope.as_of):
 				state, detail = PriceState.NOT_YET_AVAILABLE, "Actual source/import receipt is after the cutoff"
-			elif manifest is not None and manifest.source == query.scope.boundary.source and manifest.download.response.state in {ResponseState.COMPLETE, ResponseState.NO_TRADING} and snapshot.raw_verified and snapshot.receipt is not None and records_id(manifest.download.response.records) == (snapshot.original_content_id or snapshot.raw_content_id):
+			elif snapshot.raw_verified and snapshot.receipt is not None and (trust_database or (manifest is not None and manifest.source == query.scope.boundary.source and manifest.download.response.state in {ResponseState.COMPLETE, ResponseState.NO_TRADING} and records_id(manifest.download.response.records) == (snapshot.original_content_id or snapshot.raw_content_id))):
 				if symbol is not None and symbol in bars:
-					observations.append(CloseObservation(ticker_id, float(bars[symbol].close), ObservationTiming(session, session.closes_at, max(snapshot.receipt.available_at, manifest.download.available_at)), snapshot.raw_content_id))
+					available_at = snapshot.receipt.available_at if manifest is None else max(snapshot.receipt.available_at, manifest.download.available_at)
+					observations.append(CloseObservation(ticker_id, float(bars[symbol].close), ObservationTiming(session, session.closes_at, available_at), snapshot.raw_content_id))
 					continue
 				state, detail = PriceState.EXPECTED_ABSENCE, "Ticker absent from a verified provider response; no synthetic price or lifetime is inferred"
 			issues.append(CloseIssue(ticker_id, session, state, detail))

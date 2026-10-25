@@ -103,7 +103,10 @@ public final class JavaWriterManifest {
             Path directory = absolutePath(requiredText(root, "archive_directory"), path);
             for (Object value : array(root, "input_sessions")) {
                 LocalDate session = LocalDate.parse(requiredText(value));
-                if (files.putIfAbsent(session, new FileEntry(session, directory.resolve(session + ".ndjson"), false, null, null)) != null) {
+                Path archive = "year/date".equals(root.get("archive_layout"))
+                        ? directory.resolve(Integer.toString(session.getYear())).resolve(session + ".ndjson")
+                        : directory.resolve(session + ".ndjson");
+                if (files.putIfAbsent(session, new FileEntry(session, archive, false, null, null)) != null) {
                     throw new IllegalArgumentException("Duplicate database input session");
                 }
             }

@@ -9,6 +9,7 @@ from stockguidance.market_data.identity import data_configuration_key
 from stockguidance.market_data.legacy_derived import DERIVED_COLUMNS
 from stockguidance.database.table_names import TableNames, TableRole, load_table_names, quote_identifier
 from stockguidance.database.verification import VerificationStatus, VerificationType, register_verification, verification_allows
+from stockguidance.database.repositories.archive_catalog import ARCHIVE_DDL
 
 
 _UPDATE_TABLE_ROLES = (TableRole.DATA_CONFIGURATION, TableRole.SESSIONS, TableRole.TICKERS, TableRole.PRICES, TableRole.DELTAS, TableRole.IMPORTS, TableRole.VERIFICATIONS, TableRole.VERIFICATION_SAMPLES)
@@ -35,6 +36,7 @@ def update_schema_statements(table_names: TableNames, *, case_sensitive_tickers:
 		"CREATE TABLE IF NOT EXISTS stockguidance_daily_import_in_progress (session_date DATE NOT NULL PRIMARY KEY, started_at VARCHAR(40) NOT NULL) ENGINE=InnoDB",
 		f"CREATE TABLE IF NOT EXISTS {quote_identifier(table_names.table(TableRole.VERIFICATIONS))} (id INT AUTO_INCREMENT PRIMARY KEY, comparison_type VARCHAR(32) NOT NULL, baseline_key CHAR(64) NOT NULL, candidate_key CHAR(64) NOT NULL, status VARCHAR(16) NOT NULL, requested_count INT NOT NULL, completed_count INT NOT NULL, random_seed BIGINT NOT NULL, registered_at VARCHAR(40) NOT NULL, completed_at VARCHAR(40) NULL, detail VARCHAR(512) NULL) ENGINE=InnoDB",
 		f"CREATE TABLE IF NOT EXISTS {quote_identifier(table_names.table(TableRole.VERIFICATION_SAMPLES))} (verification_id INT NOT NULL, sample_date DATE NOT NULL, status VARCHAR(16) NOT NULL, baseline_digest CHAR(64) NULL, candidate_digest CHAR(64) NULL, mismatch_count INT NOT NULL, detail VARCHAR(512) NULL, PRIMARY KEY (verification_id, sample_date)) ENGINE=InnoDB",
+		ARCHIVE_DDL,
 	) + quality_schema_statements()
 
 

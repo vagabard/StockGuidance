@@ -53,14 +53,14 @@ public final class ArchiveStudyMain {
         int workers = JsonSupport.integerOrDefault(request.get("workers"));
         int repeats = JsonSupport.integerOrDefault(request.get("repeats"), 4);
         String mode = JsonSupport.stringOrEmpty(request.get("mode"));
-        if (workers < 1 || workers > 3 || repeats < 1 || repeats > 10 || !List.of("files", "database", "reconcile", "derived").contains(mode)) {
+        if (workers < 1 || workers > 3 || repeats < 1 || repeats > 10 || !List.of("files", "canonical", "database", "reconcile", "derived").contains(mode)) {
             throw new IllegalArgumentException("Invalid study settings");
         }
         List<Path> paths = new ArrayList<>();
         JsonArray pathValues = JsonSupport.requireArray(request.get("paths"), "Study paths are required");
         for (Object item : pathValues) paths.add(Path.of(JsonSupport.stringOrEmpty(item)));
         if (paths.isEmpty() || paths.stream().distinct().count() != paths.size()) throw new IllegalArgumentException("Distinct paths required");
-        DatabaseConfiguration configuration = mode.equals("files") ? null : DatabaseConfiguration.load(Path.of(JsonSupport.stringOrEmpty(request.get("dbinfo_file"))));
+        DatabaseConfiguration configuration = List.of("files", "canonical").contains(mode) ? null : DatabaseConfiguration.load(Path.of(JsonSupport.stringOrEmpty(request.get("dbinfo_file"))));
         if (mode.equals("derived")) return runDerived(request, configuration);
         JsonObject report = JsonSupport.object();
         report.put("schema_version", 1); report.put("backend", "java"); report.put("workers", workers); report.put("mode", mode);
@@ -396,6 +396,20 @@ public final class ArchiveStudyMain {
             for (Path path : paths) {
                 LocalDate session = LocalDate.parse(path.getFileName().toString().replace(".ndjson", ""));
                 JsonObject result = JsonSupport.object(); result.put("session", session.toString());
+                if (mode.equals("canonical")) {
+                    var archive = stockguidance.migration.ArchiveCandidateReader.readForImport(path, session);
+                    result.put("file_sha256", archive.fileSha256());
+                    result.put("archive_id", archive.recordsId());
+                    result.put("archive_count", archive.bars().size());
+                    JsonObject bad = JsonSupport.putObject(result, "bad_records");
+                    for (var entry : archive.badRecords().entrySet()) {
+                        JsonArray values = JsonSupport.array();
+                        for (var value : entry.getValue()) values.add(value == null ? null : value.signum() == 0 ? "0" : value.stripTrailingZeros().toPlainString());
+                        bad.put(entry.getKey(), values);
+                    }
+                    results.add(result);
+                    continue;
+                }
                 if (!mode.equals("database")) {
                     TreeMap<String, StudyBar> bars = new TreeMap<>();
                     MessageDigest digest = MessageDigest.getInstance("SHA-256");

@@ -11,6 +11,7 @@ from stockguidance.database.configuration import load_database_configuration
 from stockguidance.database.repositories.mysql_market_data import MySQLMarketDataRepository
 from stockguidance.database.repositories.mysql_sessions import ConnectionFactory, MySQLSessionRepository
 from stockguidance.database.table_names import TableNames
+from stockguidance.database.table_names import quote_identifier
 from stockguidance.database.update_schema import initialize_update_schema, register_configuration_verification
 from stockguidance.market_data.corrections import CorrectionPolicy
 from stockguidance.market_data.discovery import CoverageDiscoveryResult, DiscoveryRequest, HistoryOverride, discover_coverage
@@ -25,6 +26,8 @@ from stockguidance.validation.repair import load_repair_plan
 from stockguidance.workflows.update_market_data import UpdateSettings, update_market_data
 from stockguidance.workflows.update_result import UpdateResult
 from stockguidance.workflows.progress import ProgressReporter
+from stockguidance.market_data.canonical_store import CanonicalArchiveStore
+from stockguidance.database.repositories.archive_catalog import ArchiveCatalog
 
 
 def _capability_from_cache(store: JsonHistoryStore, identity: SourceIdentity) -> tuple[ProviderCapability | None, str | None]:
@@ -88,6 +91,10 @@ def assemble_and_update(arguments: argparse.Namespace) -> UpdateResult:
 		data_configuration = DataConfiguration("polygon", GROUPED_ENDPOINT, "us-stocks", GROUPED_UNIVERSE, PriceAdjustment(arguments.adjustment) is PriceAdjustment.ADJUSTED, False)
 	else:
 		data_configuration = database_configuration.load_data_configuration()
+	if data_configuration.raw_price_split_adjusted or data_configuration.raw_price_dividend_adjusted or data_configuration.raw_price_vendor_defined_adjustment is not None:
+		raise ValueError("Canonical market_summary requires unadjusted data. Audit and migrate the adjusted database before switching configuration.")
+	if getattr(arguments, "refresh_source", False) and (arguments.start_date is None or arguments.end_date is None):
+		raise ValueError("--refresh-source requires explicit --start-date and --end-date")
 	identity = data_configuration.to_source_identity()
 	source = SourceConfig(
 		identity,
@@ -97,7 +104,25 @@ def assemble_and_update(arguments: argparse.Namespace) -> UpdateResult:
 		_configuration=data_configuration,
 	)
 	table_names = database_configuration.load_table_names()
+	if arguments.data_root != "data" and arguments.start_date is None and arguments.history_start is None and JsonHistoryStore(source.data_root / "history").load(identity) is None and not any((source.data_root / "market_summary").glob("*/*.ndjson")):
+		raise UnknownHistoryBoundary("No supported-history evidence exists in the selected data root")
 	connect = MySQLConnectionFactory()
+	if database_configuration.data_configuration_file is None and not arguments.initialize_schema:
+		connection = connect(source.database_config)
+		try:
+			cursor = connection.cursor()
+			try:
+				cursor.execute(f"SELECT raw_price_split_adjusted, raw_price_dividend_adjusted, raw_price_vendor_defined_adjustment FROM {quote_identifier(table_names.source)} WHERE id = 1", ())
+				rows = cursor.fetchall()
+				if rows and (bool(rows[0][0]) or bool(rows[0][1]) or rows[0][2] is not None):
+					raise ValueError("The selected database contains adjusted data; migrate it before canonical updates")
+			finally:
+				connection.rollback()
+				cursor.close()
+		finally:
+			connection.close()
+	if arguments.initialize_schema:
+		reporter.measure("initialize updater schema", lambda: initialize_update_schema(source, connect, table_names))
 	if not arguments.initialize_schema:
 		try:
 			register_configuration_verification(source, connect, table_names)
@@ -108,7 +133,7 @@ def assemble_and_update(arguments: argparse.Namespace) -> UpdateResult:
 	history_store = JsonHistoryStore(source.data_root / "history")
 	boundary = history_store.load(identity)
 	calendar = _calendar_for_update(arguments, boundary, clock, data_configuration.calendar_id)
-	manifest_store = ManifestStore(source.data_root)
+	manifest_store = CanonicalArchiveStore(source.data_root, ArchiveCatalog(source, connect))
 	manifest_inventory = reporter.measure("inventory source manifests", lambda: manifest_store.inventory(identity, calendar, start=calendar.start, end=calendar.end))
 	include_database = arguments.dbinfo_file != "dbinfo.id" or arguments.data_root == "data" or bool(manifest_inventory.observations) or boundary is not None
 	local_inventory = reporter.measure("inventory database coverage", lambda: _local_inventory(source, calendar, manifest_inventory, connect, table_names, include_database=include_database))
@@ -156,14 +181,14 @@ def assemble_and_update(arguments: argparse.Namespace) -> UpdateResult:
 			timedelta(days=arguments.archive_refresh_days), arguments.correction_evidence,
 		),
 		repair_plan, discovery, getattr(arguments, "scan_quality", False), getattr(arguments, "force_verify", False),
+		True, getattr(arguments, "refresh_source", False),
 	)
-	if arguments.initialize_schema:
-		reporter.measure("initialize updater schema", lambda: initialize_update_schema(source, connect, table_names))
 	if arguments.history_start is not None and boundary is None and discovery.history_boundary is not None:
 		history_store.save(discovery.history_boundary)
 	repository = MySQLMarketDataRepository(source, connect, table_names, reporter=reporter)
 	repository.force_verify = settings.force_verify
-	result = update_market_data(source, settings, query_boundary, calendar, provider, repository, clock, reporter=reporter)
+	repository.metadata_only = True
+	result = update_market_data(source, settings, query_boundary, calendar, provider, repository, clock, reporter=reporter, manifest_store=manifest_store)
 	history_store.save_discovery_metadata(discovery.metadata())
 	reporter.finish(successful=result.successful, failures=len(result.failures))
 	return result

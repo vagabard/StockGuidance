@@ -18,6 +18,7 @@ def parser() -> argparse.ArgumentParser:
 	arguments.add_argument("--end-date")
 	arguments.add_argument("--repair-plan", help="Explicitly apply automatic repairs from validation JSON; manual review items are rejected")
 	add_update_policy_arguments(arguments)
+	arguments.set_defaults(adjustment="unadjusted")
 	arguments.add_argument("--max-retries", type=int, default=3)
 	arguments.add_argument("--verbose", action="store_true", help="Write updater phases, timings, and detailed failures to stderr")
 	arguments.add_argument("--scan-quality", action="store_true", help="Resume the initial database quality scan and interpolate bounded bad-data gaps")

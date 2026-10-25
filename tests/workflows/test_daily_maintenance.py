@@ -62,8 +62,23 @@ def test_historical_range_loads_following_context_without_adding_training_target
 
 
 def source_fixture(tmp_path):
-	configuration = DataConfiguration("polygon", GROUPED_ENDPOINT, "us-stocks", GROUPED_UNIVERSE, True, False)
+	configuration = DataConfiguration("polygon", GROUPED_ENDPOINT, "us-stocks", GROUPED_UNIVERSE, False, False)
 	return SourceConfig(configuration.to_source_identity(), tmp_path / "data", tmp_path / "dbinfo.id", "test", _configuration=configuration)
+
+
+@pytest.fixture(autouse=True)
+def memory_archive_catalog(monkeypatch, request):
+	if request.node.name.startswith("test_real_java_mysql"):
+		return
+	entries = {}
+	class MemoryCatalog:
+		def __init__(self, source, connect):
+			self.source = source
+		def put(self, session_date, metadata):
+			entries[(self.source.data_root, session_date)] = metadata
+		def get(self, session_date):
+			return entries.get((self.source.data_root, session_date))
+	monkeypatch.setattr(source_stage, "ArchiveCatalog", MemoryCatalog)
 
 
 def response_fixture(session, close="11"):
@@ -116,11 +131,11 @@ class FakeCursor:
 		if "GET_LOCK" in self.query or "IS_USED_LOCK" in self.query:
 			return [(1,)]
 		if "SELECT TABLE_NAME FROM information_schema.TABLES" in self.query:
-			return [("stockguidance_daily_source_files",), ("stockguidance_daily_import_in_progress",)]
+			return [("stockguidance_daily_source_files",), ("stockguidance_daily_import_in_progress",), ("stockguidance_archive_files",)]
 		if "information_schema.TABLES" in self.query:
 			return [("InnoDB",)]
 		if "SELECT source_family" in self.query:
-			return [("polygon_massive", GROUPED_ENDPOINT, "us-stocks", GROUPED_UNIVERSE, 1, 0, None)]
+			return [("polygon_massive", GROUPED_ENDPOINT, "us-stocks", GROUPED_UNIVERSE, 0, 0, None)]
 		if "SELECT session_date FROM" in self.query or "SELECT s.transaction_date" in self.query:
 			return []
 		return []
@@ -169,7 +184,7 @@ def test_workflow_resumes_downloads_before_validation(tmp_path, monkeypatch):
 
 	def validate(source, names, workload, report, directory):
 		assert not fail_java[0]
-		assert arguments.adjustment == "adjusted"
+		assert arguments.adjustment == "unadjusted"
 		assert arguments.start_date == date(2024, 7, 1)
 		assert arguments.end_date == date(2024, 7, 3)
 		return {"successful": True}
@@ -238,7 +253,7 @@ def test_source_refresh_records_pending_work_before_publishing_download(tmp_path
 	cutoff = datetime(2024, 7, 5, 22, tzinfo=timezone.utc)
 	events = []
 	context = SimpleNamespace(source=source, raw_sessions=(session,), now=cutoff, clock=SimpleNamespace(now=lambda: cutoff),
-		publication=DailyPublicationPolicy(timedelta(minutes=15), "test"), correction=SimpleNamespace(refresh_due=lambda *args: True))
+		publication=DailyPublicationPolicy(timedelta(minutes=15), "test"), correction=SimpleNamespace(refresh_due=lambda *args: True), arguments=SimpleNamespace(refresh_source=True), targets=(session,))
 	def execute(query, parameters):
 		assert "download_pending = 1" in query
 		assert parameters[1] == session.session_date
@@ -353,6 +368,7 @@ def test_real_java_mysql_update_resume_correction_and_vectorized_validation(tmp_
 		test_cursor.close()
 		connection.close()
 		corrected[0] = True
+		arguments.refresh_source = True
 		original_execute = java_stage.execute_java
 		def interrupt_after_commit(*args):
 			original_execute(*args)
@@ -361,6 +377,7 @@ def test_real_java_mysql_update_resume_correction_and_vectorized_validation(tmp_
 		with pytest.raises(RuntimeError, match="coordinator interrupted"):
 			workflow.run_daily_maintenance(arguments)
 		monkeypatch.setattr(java_stage, "execute_java", original_execute)
+		arguments.refresh_source = False
 		third = workflow.run_daily_maintenance(arguments)
 		assert third["successful"], third["python_validation"]
 		assert sum(report["raw_changed"] for report in third["java_updates"]) == 0

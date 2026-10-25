@@ -1,11 +1,11 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from time import perf_counter
 from datetime import date, datetime, timedelta
 
 from stockguidance.calendar.clock import Clock, decision_cutoff
 from stockguidance.calendar.protocols import SessionCalendar
 from stockguidance.calendar.sessions import TradingSession
-from stockguidance.config.source import SourceConfig
+from stockguidance.config.source import PriceAdjustment, SourceConfig
 from stockguidance.config.validation import require_date
 from stockguidance.database.repositories.market_data import MarketDataRepository
 from stockguidance.database.repositories.sessions import SessionQuery
@@ -45,6 +45,8 @@ class UpdateSettings:
 	discovery: CoverageDiscoveryResult | None = None
 	scan_quality: bool = False
 	force_verify: bool = False
+	database_first: bool = False
+	refresh_source: bool = False
 
 	def __post_init__(self) -> None:
 		require_date(self.start, "update start")
@@ -62,7 +64,26 @@ def _failure(code: FailureCode, session_date: date | None = None) -> StageFailur
 	return StageFailure(WorkflowStage.REFRESH, code, "Required market-data reconciliation failed" + suffix, True)
 
 
-def update_market_data(source: SourceConfig, settings: UpdateSettings, boundary: HistoryBoundary | None, calendar: SessionCalendar, provider: MarketDataProvider, repository: MarketDataRepository, clock: Clock, *, reporter: ProgressReporter | None = None) -> UpdateResult:
+def update_market_data(source: SourceConfig, settings: UpdateSettings, boundary: HistoryBoundary | None, calendar: SessionCalendar, provider: MarketDataProvider, repository: MarketDataRepository, clock: Clock, *, reporter: ProgressReporter | None = None, manifest_store: ManifestStore | None = None) -> UpdateResult:
+	from stockguidance.market_data.canonical_store import archive_store
+	from stockguidance.workflows.market_lock import market_update_lock
+
+	connect = getattr(repository, "connect", None)
+	if boundary is not None and boundary.source != source.identity:
+		raise StageExecutionError(_failure(FailureCode.INVALID_REQUEST))
+	if getattr(repository, "legacy_read_only", False):
+		settings = replace(settings, database_first=True)
+		setattr(repository, "metadata_only", True)
+	if source.identity.adjustment is PriceAdjustment.UNADJUSTED and connect is not None:
+		settings = replace(settings, database_first=True)
+		setattr(repository, "metadata_only", True)
+		manifest_store = manifest_store or archive_store(source, connect)
+		with market_update_lock(source, connect):
+			return _update_market_data(source, settings, boundary, calendar, provider, repository, clock, reporter=reporter, manifest_store=manifest_store)
+	return _update_market_data(source, settings, boundary, calendar, provider, repository, clock, reporter=reporter, manifest_store=manifest_store)
+
+
+def _update_market_data(source: SourceConfig, settings: UpdateSettings, boundary: HistoryBoundary | None, calendar: SessionCalendar, provider: MarketDataProvider, repository: MarketDataRepository, clock: Clock, *, reporter: ProgressReporter | None = None, manifest_store: ManifestStore | None = None) -> UpdateResult:
 	"""Reconcile a live snapshot; historical cutoffs belong to read-only planners."""
 	started = decision_cutoff(clock)
 	reporter = reporter or ProgressReporter()
@@ -76,7 +97,7 @@ def update_market_data(source: SourceConfig, settings: UpdateSettings, boundary:
 			capability_resolved=capability_resolved,
 		)
 	request = MarketDataRequest(source.identity, settings.start, settings.end, started)
-	reader = SnapshotCoverageReader(repository, force_verify=settings.force_verify)
+	reader = SnapshotCoverageReader(repository, force_verify=settings.force_verify, database_first=settings.database_first)
 	try:
 		plan = reporter.measure("plan coverage and read session metadata", lambda: plan_coverage(
 			source, request, boundary, calendar, settings.publication, reader, clock,
@@ -90,7 +111,7 @@ def update_market_data(source: SourceConfig, settings: UpdateSettings, boundary:
 		raise StageExecutionError(_failure(FailureCode.INVALID_REQUEST)) from None
 	except Exception:
 		raise StageExecutionError(_failure(FailureCode.STORAGE)) from None
-	store = ManifestStore(source.data_root)
+	store = manifest_store or ManifestStore(source.data_root)
 	quality_changed = ()
 	if settings.scan_quality and plan.query is not None:
 		quality_changed = reporter.measure("scan existing database quality", lambda: repository.scan_quality(plan.query))
@@ -102,8 +123,14 @@ def update_market_data(source: SourceConfig, settings: UpdateSettings, boundary:
 		failures.append(_failure(FailureCode.STORAGE))
 		failed_dates.update(item.session.session_date for item in plan.sessions)
 	try:
-		force_refresh_dates = (frozenset(repair.session_date for repair in settings.repair_plan.items if repair.action is RepairAction.REFRESH_SOURCE) if settings.repair_plan is not None else frozenset()) | frozenset(quality_changed)
-		work = reporter.measure("build update plan", lambda: plan_updates(plan, reader.metadata, store, settings.corrections, started, force_refresh_dates))
+		force_refresh_dates = frozenset(repair.session_date for repair in settings.repair_plan.items if repair.action is RepairAction.REFRESH_SOURCE) if settings.repair_plan is not None else frozenset()
+		if not settings.database_first:
+			force_refresh_dates |= frozenset(quality_changed)
+		if settings.refresh_source:
+			force_refresh_dates |= frozenset(item.session.session_date for item in plan.sessions)
+		work = reporter.measure("build update plan", lambda: plan_updates(plan, reader.metadata, store, settings.corrections, started, force_refresh_dates, database_first=settings.database_first, force_verify=settings.force_verify))
+		if work and getattr(repository, "legacy_read_only", False):
+			raise ValueError("Legacy adjusted history requires canonical migration before source updates or repairs")
 	except Exception:
 		raise StageExecutionError(_failure(FailureCode.STORAGE)) from None
 	target_query = _target_query(plan.boundary, plan.query, tuple(item.session for item in work if not item.needs_download and not (item.refresh_blocked and item.manifest is None)), started)
@@ -146,6 +173,9 @@ def update_market_data(source: SourceConfig, settings: UpdateSettings, boundary:
 				if not trusted_unchanged and import_if_needed(repository, query, manifest.download, by_date.get(item.session.session_date)):
 					changed_dates.add(item.session.session_date)
 				store.mark_imported(manifest)
+				acknowledge = getattr(repository, "acknowledge_archive", None)
+				if settings.database_first and acknowledge is not None:
+					acknowledge(query, manifest.download)
 		except Exception as error:
 			failures.append(error.failure if isinstance(error, StageExecutionError) else _failure(FailureCode.STORAGE, item.session.session_date))
 			failed_dates.add(item.session.session_date)
@@ -157,7 +187,7 @@ def update_market_data(source: SourceConfig, settings: UpdateSettings, boundary:
 		quality_dependencies = reporter.measure("refresh interpolation dependencies", lambda: repository.reconcile_quality_dependencies(scope.query, frozenset(affected_dates)))
 		affected_dates.update(quality_dependencies)
 	final_query = _dependency_query(plan.boundary, scope.query, affected_dates, decision_cutoff(clock))
-	full_verify = settings.force_verify or len(plan.sessions) <= _FULL_VERIFY_SESSION_LIMIT
+	full_verify = settings.force_verify or (not settings.database_first and len(plan.sessions) <= _FULL_VERIFY_SESSION_LIMIT)
 	if full_verify and scope.query is not None:
 		final_query = scope.query
 	try:
@@ -180,7 +210,7 @@ def update_market_data(source: SourceConfig, settings: UpdateSettings, boundary:
 	completed = decision_cutoff(clock)
 	final_request = MarketDataRequest(source.identity, request.start, request.end, completed)
 	try:
-		final_reader = SnapshotCoverageReader(repository, force_verify=settings.force_verify)
+		final_reader = SnapshotCoverageReader(repository, force_verify=settings.force_verify, database_first=settings.database_first)
 		final_plan = plan_coverage(
 			source, final_request, boundary, calendar, settings.publication, final_reader, clock,
 			fetchable_start=None if capability is None else capability.fetchable_start,
@@ -213,6 +243,11 @@ def update_market_data(source: SourceConfig, settings: UpdateSettings, boundary:
 			try:
 				snapshot = by_date.get(assessment.session.session_date)
 				metadata = metadata_by_date.get(assessment.session.session_date)
+				if settings.database_first and not settings.force_verify and metadata is not None and metadata.receipt is not None and metadata.receipt.available_at <= completed and assessment.session.session_date not in failed_dates:
+					complete = metadata.receipt.derived_content_id is not None and metadata.receipt.derived_dependency_id is not None
+					blocking = any(finding.blocking and finding.session_date in {None, assessment.session.session_date} for finding in integrity)
+					assessments.append(SessionCoverage(assessment.session, CoverageState.COMPLETE if complete and not blocking else CoverageState.INCOMPLETE, "Database completion receipts verified" if complete and not blocking else "Derived completion or database integrity requires repair"))
+					continue
 				if assessment.session.session_date in stale_refreshes and assessment.session.session_date not in affected_dates and metadata is not None and metadata.raw_count is None:
 					assessments.append(SessionCoverage(assessment.session, CoverageState.UNVERIFIED, "Database completion is retained, but scheduled provider refresh could not be authorized"))
 					continue

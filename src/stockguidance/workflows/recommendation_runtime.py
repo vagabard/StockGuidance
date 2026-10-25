@@ -2,6 +2,7 @@ from datetime import timedelta
 
 from stockguidance.artifacts.contracts import ArtifactReference
 from stockguidance.calendar.clock import SystemClock
+from stockguidance.config.source import PriceAdjustment
 from stockguidance.calendar.decisions import DecisionTiming
 from stockguidance.calendar.exchange import ExchangeCalendar
 from stockguidance.recommendations.jobs import RecommendationConfiguration
@@ -61,5 +62,7 @@ def assemble_and_recommend(configuration: RecommendationConfiguration, arguments
 	validation = MySQLValidationRepository(job.source, connect, table_names)
 	closes = VerifiedCloseRepository(job.source, validation)
 	opening_store = OpeningStore(job.source.data_root)
-	services = RecommendationServices(ConfiguredPolygonProvider(arguments.max_retries), MySQLMarketDataRepository(job.source, connect, table_names), validation, SignalRepository(closes, opening_store), VerifiedEligibilityRepository(closes), OpeningRefresh(job.source, opening_store, ConfiguredOpeningProvider(arguments.max_retries), closes))
+	market_data = MySQLMarketDataRepository(job.source, connect, table_names)
+	market_data.legacy_read_only = job.source.identity.adjustment is PriceAdjustment.ADJUSTED
+	services = RecommendationServices(ConfiguredPolygonProvider(arguments.max_retries), market_data, validation, SignalRepository(closes, opening_store), VerifiedEligibilityRepository(closes), OpeningRefresh(job.source, opening_store, ConfiguredOpeningProvider(arguments.max_retries), closes))
 	return recommend(job, boundary, calendar, services, clock, portfolio=portfolio, execution=ExecutionPolicy(decimal_text(arguments.fee_per_fill)))

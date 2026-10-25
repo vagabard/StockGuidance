@@ -3,7 +3,7 @@ from datetime import date
 from pathlib import Path
 from typing import Protocol
 
-from stockguidance.config.source import SourceConfig
+from stockguidance.config.source import PriceAdjustment, SourceConfig
 from stockguidance.market_data.history import EvidenceQuality, InventoryIssue, LocalCoverageInventory, LocalObservation
 from stockguidance.database.dates import normalize_date_id, normalize_session_date
 from stockguidance.database.repositories.sessions import SessionQuery, StoredSession
@@ -47,6 +47,12 @@ class MySQLSessionRepository:
 			"WHERE t.transaction_date BETWEEN %s AND %s "
 			"GROUP BY t.id, t.transaction_date ORDER BY t.transaction_date ASC, t.id ASC"
 		)
+		if self.source.identity.adjustment is PriceAdjustment.UNADJUSTED:
+			sql = (
+				f"SELECT t.id, t.transaction_date, CASE WHEN i.raw_id IS NULL THEN 0 ELSE 1 END FROM {quote_identifier(self.table_names.sessions)} t "
+				f"LEFT JOIN {quote_identifier(self.table_names.imports)} i ON i.session_date = t.transaction_date "
+				"WHERE t.transaction_date BETWEEN %s AND %s ORDER BY t.transaction_date ASC, t.id ASC"
+			)
 		connection = self.connect(self.source.database_config)
 		try:
 			cursor = connection.cursor()

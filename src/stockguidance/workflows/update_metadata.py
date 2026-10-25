@@ -4,7 +4,7 @@ from datetime import timezone
 from stockguidance.config.source import SourceConfig
 from stockguidance.market_data.atomic import atomic_write
 from stockguidance.market_data.corrections import CorrectionPolicy
-from stockguidance.market_data.identity import encode_json, source_key
+from stockguidance.market_data.identity import encode_json
 from stockguidance.market_data.legacy_derived import LEGACY_DERIVED_SPEC
 from stockguidance.market_data.publication import DailyPublicationPolicy
 from stockguidance.workflows.update_result import UpdateResult
@@ -32,5 +32,5 @@ def persist_update_result(source: SourceConfig, publication: DailyPublicationPol
 		},
 	}
 	stamp = request.as_of.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-	path = source.data_root / "market_data" / source_key(source.identity) / "runs" / f"{stamp}-{result.data_revision}.json"
+	path = source.data_root.parent / "output" / "market-data" / "runs" / f"{stamp}-{result.data_revision}.json"
 	atomic_write(path, encode_json(metadata))

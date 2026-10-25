@@ -28,10 +28,11 @@ class JavaStageResult:
 	validations: list[dict[str, Any]]
 
 
-def prepare_partial_imports(cursor: Any, connection: Any, names: TableNames) -> int:
+def prepare_partial_imports(cursor: Any, connection: Any, names: TableNames, sessions: tuple[TradingSession, ...] | None = None) -> int:
 	progress = quote_identifier("stockguidance_daily_import_in_progress")
 	cursor.execute(f"SELECT session_date FROM {progress} ORDER BY session_date", ())
-	partial_dates = tuple(str(row[0]) for row in cursor.fetchall())
+	allowed = None if sessions is None else {session.session_date.isoformat() for session in sessions}
+	partial_dates = tuple(str(row[0]) for row in cursor.fetchall() if allowed is None or str(row[0]) in allowed)
 	for session in partial_dates:
 		cursor.execute(f"DELETE p FROM {quote_identifier(names.prices)} p JOIN {quote_identifier(names.sessions)} s ON s.id = p.date_id WHERE s.transaction_date = %s", (session,))
 		cursor.execute(f"DELETE d FROM {quote_identifier(names.deltas)} d JOIN {quote_identifier(names.sessions)} s ON s.id = d.date_id WHERE s.transaction_date = %s", (session,))
@@ -52,7 +53,7 @@ def build_workload(source: SourceConfig, names: TableNames, calendar: SessionCal
 		target_entries.append({"session": session.session_date.isoformat(), "derived_dependencies": [prior.session_date.isoformat(), following.session_date.isoformat()],
 			"zscore_dependencies": [item.session_date.isoformat() for item in dependencies]})
 	root = {"schema_version": 2, "kind": "daily-maintenance", "input_mode": "database", "data_root": str(source.data_root.resolve()), "calendar_id": calendar.calendar_id,
-		"archive_directory": str((source.data_root / "daily-maintenance" / data_configuration_key(source.data_configuration)).resolve()),
+		"archive_directory": str((source.data_root / "market_summary").resolve()), "archive_layout": "year/date",
 		"source_key": data_configuration_key(source.data_configuration), "source": {"archive_source": asdict(source.identity)},
 		"authoritative_registry": {"schema_version": 1, "tables": names.tables(), "zscore_templates": names.templates()},
 		"input_sessions": [session.session_date.isoformat() for session in raw_sessions],

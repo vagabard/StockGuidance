@@ -55,6 +55,11 @@ def test_fractional_adjusted_volume_is_preserved(tmp_path: Path) -> None:
 	assert archive_records_id(bars) != archive_records_id(read_archive(write_file(tmp_path, [record(v=14982)]))[0])
 
 
+def test_canonical_decimal_string_volume_is_accepted(tmp_path: Path) -> None:
+	bars, digest = read_archive(write_file(tmp_path, [record(v="14982.40000001")]))
+	assert bars[0].volume == Decimal("14982.40000001")
+
+
 def test_large_adjusted_price_is_not_clipped_to_legacy_schema(tmp_path: Path) -> None:
 	bars, digest = read_archive(write_file(tmp_path, [record(o="1702500000000000", h="1728750000000000", l="1522500000000000", c="1590000000000000")]))
 	assert str(bars[0].open) == "1702500000000000.0000"
