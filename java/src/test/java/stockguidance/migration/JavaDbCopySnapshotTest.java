@@ -30,6 +30,51 @@ class JavaDbCopySnapshotTest {
     @TempDir Path directory;
 
     @Test
+    void operationalDatabaseSnapshotWorksWithoutAnyArchiveFiles() throws Exception {
+        List<LocalDate> dates = dates(2);
+        JsonObject root = manifest(dates).root();
+        root.remove("manifest_id");
+        root.remove("files");
+        root.put("schema_version", 2);
+        root.put("kind", "daily-maintenance");
+        root.put("input_mode", "database");
+        root.put("source_key", "configured-source");
+        root.put("data_root", directory.toString());
+        root.put("archive_directory", directory.resolve("nonexistent-archives").toString());
+        JsonArray inputs = JsonSupport.putArray(root, "input_sessions");
+        JsonArray sources = JsonSupport.putArray(root, "database_sources");
+        JsonObject availability = JsonSupport.putObject(root, "availability");
+        for (LocalDate date : dates) {
+            inputs.add(date.toString());
+            JsonObject item = JsonSupport.addObject(sources);
+            item.put("session", date.toString());
+            item.put("raw_id", "id");
+            availability.put(date.toString(), "receipt");
+        }
+        root.put("manifest_id", CanonicalJson.sha256(root));
+        Path workload = directory.resolve("database-workload.json");
+        Files.write(workload, CanonicalJson.bytes(root));
+        JavaWriterManifest manifest = JavaWriterManifest.read(workload);
+        assertTrue(manifest.databaseBacked());
+        AtomicInteger queries = new AtomicInteger();
+        Connection connection = (Connection) Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{Connection.class},
+                (proxy, method, arguments) -> {
+                    if (method.getName().equals("prepareStatement")) {
+                        queries.incrementAndGet();
+                        return statement(arguments[0].toString(), dates);
+                    }
+                    return null;
+                });
+        try (JavaDbCopy copy = JavaDbCopy.open(connection, manifest)) {
+            var loaded = copy.get(dates);
+            assertEquals("id", loaded.get(dates.getFirst()).evidence().rawId());
+            assertTrue(loaded.get(dates.getFirst()).evidence().expected());
+            assertEquals(100.25, loaded.get(dates.getFirst()).raw().get(1L).close());
+            assertEquals(5, queries.get());
+        }
+    }
+
+    @Test
     void jdbcSourceUsesOnlyConsistentReadsAndReusesRowsAcrossOverlappingWindows() throws Exception {
         List<LocalDate> dates = dates(2);
         JavaWriterManifest manifest = manifest(dates);

@@ -602,7 +602,7 @@ public final class JavaZScoreCandidate {
         }
     }
 
-    private JsonObject definition(Family family, int window) {
+    JsonObject definition(Family family, int window) {
         JsonObject value = JsonSupport.object();
         value.put("schema_version", 1); value.put("source_scope", manifest.sourceScope()); value.put("calendar_id", manifest.calendarId());
         value.put("family", family.value); value.put("window", window); value.put("calculation_version", CALCULATION_VERSION);
@@ -652,6 +652,7 @@ public final class JavaZScoreCandidate {
     }
 
     private void verifySourceIdentities(List<LocalDate> dates) {
+        if (manifest.databaseBacked()) return;
         for (LocalDate date : dates) {
             if (verifiedSources != null && verifiedSources.contains(date)) continue;
             if (manifest.isAdoptable(date)) manifest.archive(date);
@@ -745,7 +746,7 @@ public final class JavaZScoreCandidate {
     }
 
     private void validateCheckpoint(Path checkpoint, LocalDate session, Family family, int window, String digest) {
-        if (checkpoint == null || !Files.exists(checkpoint)) return;
+        if (manifest.databaseBacked() || checkpoint == null || !Files.exists(checkpoint)) return;
         try {
             JsonObject value = JsonSupport.read(checkpoint);
             if (JsonSupport.integerOrDefault(value.get("schema_version"), -1) != 1

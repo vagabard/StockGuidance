@@ -36,7 +36,7 @@ def parser() -> argparse.ArgumentParser:
 	arguments.add_argument("--workers", type=int, default=3)
 	arguments.add_argument("--batch-sessions", type=int, default=20)
 	arguments.add_argument("--timeout-seconds", type=float, default=7200)
-	arguments.add_argument("--stage", type=parse_stage, metavar="{source,java,validation}", help="Run only one maintenance stage; later stages require earlier stage artifacts")
+	arguments.add_argument("--stage", type=parse_stage, metavar="{source,java,validation}", help="Run one stage: download/recovery, Java database updates, or database validation")
 	return arguments
 
 

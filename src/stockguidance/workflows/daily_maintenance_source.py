@@ -11,7 +11,7 @@ from stockguidance.calendar.sessions import TradingSession
 from stockguidance.config.source import SourceConfig
 from stockguidance.market_data.atomic import atomic_write
 from stockguidance.market_data.identity import data_configuration_key, encode_json
-from stockguidance.market_data.manifests import InvalidManifest, ManifestStore, SourceManifest
+from stockguidance.market_data.manifests import SourceManifest
 from stockguidance.market_data.providers.configured_polygon import ConfiguredPolygonProvider
 from stockguidance.market_data.providers.contracts import DownloadedSession, ResponseState
 from stockguidance.market_data.records import bar_payload, decode_bar, records_id
@@ -26,8 +26,9 @@ class SourceStageResult:
 	refreshed_dates: set[date]
 
 
-def export_archive(source: SourceConfig, manifest: SourceManifest) -> dict[str, Any]:
-	download = manifest.download
+def export_archive(source: SourceConfig, download: DownloadedSession | SourceManifest) -> dict[str, Any]:
+	if isinstance(download, SourceManifest):
+		download = download.download
 	timestamps = dict(download.response.source_timestamps)
 	rows = []
 	for bar in download.response.records:
@@ -75,8 +76,6 @@ def availability_from_database(maintenance: MaintenanceSession) -> dict[date, st
 
 def run_source_stage(maintenance: MaintenanceSession) -> SourceStageResult:
 	context = maintenance.context
-	store = ManifestStore(context.source.data_root)
-	identity = context.source.data_configuration.to_source_identity()
 	provider = ConfiguredPolygonProvider(3)
 	started = monotonic()
 	last_lock_check = started
@@ -92,22 +91,19 @@ def run_source_stage(maintenance: MaintenanceSession) -> SourceStageResult:
 		available_at = imported[1] if imported is not None else (context.publication.expected_at(session) or session.closes_at).isoformat()
 		refresh_due = imported is not None and context.correction.refresh_due(session, datetime.fromisoformat(imported[1]), context.now)
 		entry = None if refresh_due else archive_entry(context.source, session, None if imported is None else imported[0], available_at)
+		if entry is None and imported is not None and not refresh_due:
+			entry = {"session": session.session_date.isoformat(), "path": None, "valid": True, "records_id": imported[0]}
 		if refresh_due or entry is None:
-			try:
-				manifest = None if refresh_due else store.load(identity, session)
-			except InvalidManifest:
-				manifest = None
-			if manifest is not None and context.correction.refresh_due(session, manifest.download.available_at, context.now):
-				manifest = None
-			if manifest is None or manifest.download.response.state is not ResponseState.COMPLETE:
-				response = provider.fetch(context.source, session)
-				if response.state is not ResponseState.COMPLETE:
-					raise RuntimeError(f"Massive has not supplied a complete response for {session.session_date}; resolve publication or provider access and rerun")
-				manifest = store.save_download(identity, DownloadedSession(session, response, context.clock.now()))
-				downloaded += 1
-			entry = export_archive(context.source, manifest)
-			entry["available_at"] = manifest.download.available_at.isoformat()
-			available_at = manifest.download.available_at.isoformat()
+			response = provider.fetch(context.source, session)
+			if response.state is not ResponseState.COMPLETE:
+				raise RuntimeError(f"Massive has not supplied a complete response for {session.session_date}; resolve publication or provider access and rerun")
+			download = DownloadedSession(session, response, context.clock.now())
+			downloaded += 1
+			maintenance.cursor.execute("INSERT INTO stockguidance_daily_source_files (source_key, session_date, file_size, modified_ns, download_pending) VALUES (%s, %s, 0, 0, 1) ON DUPLICATE KEY UPDATE download_pending = 1", (data_configuration_key(context.source.data_configuration), session.session_date))
+			maintenance.connection.commit()
+			entry = export_archive(context.source, download)
+			entry["available_at"] = download.available_at.isoformat()
+			available_at = download.available_at.isoformat()
 			refreshed_dates.add(session.session_date)
 		files_by_date[session.session_date] = entry
 		availability[session.session_date] = available_at
@@ -118,20 +114,5 @@ def run_source_stage(maintenance: MaintenanceSession) -> SourceStageResult:
 
 def read_archives_for_java(maintenance: MaintenanceSession) -> SourceStageResult:
 	context = maintenance.context
-	files_by_date: dict[date, dict[str, Any]] = {}
-	availability: dict[date, str] = {}
-	refreshed_dates: set[date] = set()
-	for session in context.raw_sessions:
-		imported = maintenance.imports.get(session.session_date)
-		available_at = imported[1] if imported is not None else (context.publication.expected_at(session) or session.closes_at).isoformat()
-		entry = archive_entry(context.source, session, None if imported is None else imported[0], available_at)
-		if entry is None:
-			raise ValueError(f"Stage 'java' requires the source archive for {session.session_date}; run --stage source first")
-		file_sha256, archive_records_id = archive_identity(Path(entry["path"]))
-		entry["file_sha256"] = file_sha256
-		entry["records_id"] = archive_records_id
-		files_by_date[session.session_date] = entry
-		availability[session.session_date] = available_at
-		if imported is None or imported[0] != archive_records_id:
-			refreshed_dates.add(session.session_date)
-	return SourceStageResult(files_by_date, availability, 0, refreshed_dates)
+	print(f"Preparing {len(context.raw_sessions)} sessions from database receipts; Java will inspect pending downloads", file=sys.stderr, flush=True)
+	return SourceStageResult({}, availability_from_database(maintenance), 0, set())

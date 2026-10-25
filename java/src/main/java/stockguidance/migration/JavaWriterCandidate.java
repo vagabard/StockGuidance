@@ -42,6 +42,7 @@ public final class JavaWriterCandidate {
     private final boolean productionTarget;
     private final String expectedProductionSchema;
     private final String completionTable;
+    private final TickerState pendingTickers = new TickerState();
 
     public JavaWriterCandidate(JavaWriterManifest manifest) {
         this(manifest, false, null);
@@ -77,8 +78,19 @@ public final class JavaWriterCandidate {
 
     private WriteResult writeRaw(Connection connection, ArchiveCandidateReader.SessionArchive archive,
                                  Path checkpoint, InterruptPoint interruption, TickerState tickers) throws SQLException {
+        return writeRaw(connection, archive, checkpoint, interruption, tickers, null);
+    }
+
+    WriteResult writePendingRaw(Connection connection, ArchiveCandidateReader.SessionArchive archive,
+                               OperationalDatabase.Fingerprint fingerprint) throws SQLException {
+        return writeRaw(connection, archive, null, InterruptPoint.NONE, pendingTickers, fingerprint);
+    }
+
+    private WriteResult writeRaw(Connection connection, ArchiveCandidateReader.SessionArchive archive,
+                                 Path checkpoint, InterruptPoint interruption, TickerState tickers,
+                                 OperationalDatabase.Fingerprint fingerprint) throws SQLException {
         LocalDate session = archive.session();
-        if (manifest.operational()) {
+        if (manifest.operational() && !manifest.databaseBacked()) {
             try {
                 requireRawImport(connection, archive);
                 return new WriteResult("raw", session, "reused", true, 0, archive.recordsId());
@@ -133,6 +145,21 @@ public final class JavaWriterCandidate {
             upsertImport(connection, session, archive.recordsId(), null, null);
             upsertCompletion(connection, RAW_SERIES, session, RAW_SERIES, archive.recordsId());
             manifest.verifyArchiveIdentity(archive);
+            if (fingerprint != null) {
+                try {
+                    if (!fingerprint.equals(OperationalDatabase.Fingerprint.read(archive.path()))) {
+                        throw new IllegalArgumentException("Source changed during import: " + session);
+                    }
+                } catch (java.io.IOException error) {
+                    throw new IllegalArgumentException("Cannot inspect source: " + session, error);
+                }
+                OperationalDatabase.saveFingerprint(connection, manifest.sourceKey(), session, fingerprint);
+                invalidateDerivedNeighbors(connection, session);
+                try (PreparedStatement statement = connection.prepareStatement("DELETE FROM stockguidance_daily_import_in_progress WHERE session_date = ?")) {
+                    statement.setObject(1, session);
+                    statement.executeUpdate();
+                }
+            }
             applyInterruption(interruption, InterruptPoint.BEFORE_COMMIT);
             connection.commit();
             committed = true;
@@ -186,7 +213,7 @@ public final class JavaWriterCandidate {
         expected.forEach((ticker, values) -> rows.put(ticker, new ValidationContent.DerivedRow(ticker, values)));
         String contentDigest = derivedContentId(rows);
         String dependencyDigest = manifest.operational() ? operationalDependency(current, prior, following) : dependencyDigest(prior, following);
-        if (manifest.operational() && derivedMatches(connection, session, dependencyDigest, contentDigest)) {
+        if (manifest.operational() && !manifest.databaseBacked() && derivedMatches(connection, session, dependencyDigest, contentDigest)) {
             return new WriteResult("derived", session, "reused", true, 0, contentDigest);
         }
         validateCheckpoint(checkpoint, DERIVED_SERIES, session, contentDigest);
@@ -197,17 +224,21 @@ public final class JavaWriterCandidate {
             connection.setAutoCommit(false);
             writeMetadata(connection);
             long dateId = ensureSession(connection, session);
-            requireRawImport(connection, current);
-            if (!manifest.operational() || !prior.bars().isEmpty()) requireRawImport(connection, prior);
-            if (!manifest.operational() || !following.bars().isEmpty()) requireRawImport(connection, following);
+            if (!manifest.databaseBacked()) {
+                requireRawImport(connection, current);
+                if (!manifest.operational() || !prior.bars().isEmpty()) requireRawImport(connection, prior);
+                if (!manifest.operational() || !following.bars().isEmpty()) requireRawImport(connection, following);
+            }
             deleteDerived(connection, dateId);
             batchInsertDerived(connection, dateId, rows);
             if (manifest.operational()) invalidateZScores(connection, session);
             upsertImport(connection, session, current.recordsId(), dependencyDigest, contentDigest);
             upsertCompletion(connection, "derived", session, DERIVED_SERIES, contentDigest);
-            manifest.verifyArchiveIdentity(current);
-            if (!manifest.operational() || !prior.bars().isEmpty()) manifest.verifyArchiveIdentity(prior);
-            if (!manifest.operational() || !following.bars().isEmpty()) manifest.verifyArchiveIdentity(following);
+            if (!manifest.databaseBacked()) {
+                manifest.verifyArchiveIdentity(current);
+                if (!manifest.operational() || !prior.bars().isEmpty()) manifest.verifyArchiveIdentity(prior);
+                if (!manifest.operational() || !following.bars().isEmpty()) manifest.verifyArchiveIdentity(following);
+            }
             applyInterruption(interruption, InterruptPoint.BEFORE_COMMIT);
             connection.commit();
             committed = true;
@@ -712,6 +743,28 @@ public final class JavaWriterCandidate {
             }
             statement.executeBatch();
         }
+    }
+
+    private void invalidateDerivedNeighbors(Connection connection, LocalDate session) throws SQLException {
+        List<LocalDate> neighbors = new ArrayList<>();
+        for (String direction : List.of("<= ? ORDER BY transaction_date DESC", ">= ? ORDER BY transaction_date")) {
+            try (PreparedStatement statement = connection.prepareStatement("SELECT transaction_date FROM "
+                    + SqlIdentifiers.quote(names.sessions(), "sessions") + " WHERE transaction_date " + direction + " LIMIT 2")) {
+                statement.setObject(1, session);
+                try (ResultSet rows = statement.executeQuery()) {
+                    while (rows.next()) neighbors.add(rows.getDate(1).toLocalDate());
+                }
+            }
+        }
+        try (PreparedStatement statement = connection.prepareStatement("UPDATE " + SqlIdentifiers.quote(names.imports(), "imports")
+                + " SET derived_dependency_id = NULL, derived_content_id = NULL WHERE session_date = ?")) {
+            for (LocalDate neighbor : neighbors) {
+                statement.setObject(1, neighbor);
+                statement.addBatch();
+            }
+            statement.executeBatch();
+        }
+        invalidateZScores(connection, neighbors.stream().min(LocalDate::compareTo).orElse(session));
     }
 
     private boolean derivedMatches(Connection connection, LocalDate session, String dependency, String digest) throws SQLException {

@@ -67,7 +67,7 @@ def _validate_metadata(connection: Any, names: Any, manifest: dict[str, Any], ta
 
 def validate(connection: Any, names: Any, workload: dict[str, Any], directory: Path,
 		published_metadata: list[dict[str, Any]], binding: dict[str, str]) -> dict[str, Any]:
-	sessions = tuple(str(item["session"]) for item in workload["files"] if item.get("valid") is True)
+	sessions = tuple(workload["input_sessions"]) if workload.get("input_mode") == "database" else tuple(str(item["session"]) for item in workload["files"] if item.get("valid") is True)
 	if not sessions:
 		raise ValueError("Independent z-score validation has no source sessions")
 	placeholders = ",".join("%s" for _ in sessions)

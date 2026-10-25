@@ -149,7 +149,7 @@ public final class JavaDbCopy implements AutoCloseable {
             Map<LocalDate, Long> identifiers = new HashMap<>();
             Map<LocalDate, JavaZScoreCandidate.Evidence> evidence = new HashMap<>();
             for (LocalDate date : dates) {
-                if (manifest.isAdoptable(date)) manifest.archive(date);
+                if (!manifest.databaseBacked() && manifest.isAdoptable(date)) manifest.archive(date);
                 var file = manifest.file(date);
                 evidence.put(date, new JavaZScoreCandidate.Evidence(file.valid(), file.recordsId(), null, null));
             }

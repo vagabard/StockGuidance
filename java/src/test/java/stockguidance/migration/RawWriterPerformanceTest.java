@@ -32,6 +32,54 @@ class RawWriterPerformanceTest {
     Path directory;
 
     @Test
+    void operationalRawPublicationCommitsFingerprintAndClearsMarkerWithRows() throws Exception {
+        Fixture fixture = databaseFixture();
+        Database database = new Database(fixture.manifest());
+        var fingerprint = OperationalDatabase.Fingerprint.read(fixture.archive().path());
+        var writer = new JavaWriterCandidate(fixture.manifest());
+        writer.writePendingRaw(database.connection(), fixture.archive(), fingerprint);
+        assertEquals(1, database.commits);
+        assertTrue(database.committedWrites.stream().anyMatch(sql -> sql.startsWith("INSERT INTO stockguidance_daily_source_files")));
+        assertTrue(database.committedWrites.stream().anyMatch(sql -> sql.startsWith("DELETE FROM stockguidance_daily_import_in_progress")));
+        assertTrue(database.pendingWrites.isEmpty());
+        assertTrue(database.autoCommit);
+    }
+
+    @Test
+    void changedSourceRollsBackOperationalPublicationBeforeCompletion() throws Exception {
+        Fixture fixture = databaseFixture();
+        Database database = new Database(fixture.manifest());
+        var fingerprint = OperationalDatabase.Fingerprint.read(fixture.archive().path());
+        var stale = new OperationalDatabase.Fingerprint(fingerprint.size() + 1, fingerprint.modifiedNs());
+        var writer = new JavaWriterCandidate(fixture.manifest());
+        assertThrows(IllegalArgumentException.class, () -> writer.writePendingRaw(database.connection(), fixture.archive(), stale));
+        assertEquals(0, database.commits);
+        assertEquals(1, database.rollbacks);
+        assertTrue(database.committedWrites.isEmpty());
+        assertTrue(database.pendingWrites.isEmpty());
+        assertTrue(database.autoCommit);
+    }
+
+    private Fixture databaseFixture() throws Exception {
+        Fixture fixture = fixture(2);
+        JsonObject root = fixture.manifest().root();
+        root.remove("manifest_id");
+        root.remove("files");
+        root.put("schema_version", 2);
+        root.put("kind", "daily-maintenance");
+        root.put("input_mode", "database");
+        root.put("source_key", "configured-source");
+        root.put("data_root", directory.toString());
+        root.put("archive_directory", directory.toString());
+        JsonSupport.putArray(root, "input_sessions").add(fixture.archive().session().toString());
+        JsonSupport.putObject(root, "availability").put(fixture.archive().session().toString(), "receipt");
+        root.put("manifest_id", CanonicalJson.sha256(root));
+        Path workload = directory.resolve("operational.json");
+        Files.write(workload, CanonicalJson.bytes(root));
+        return new Fixture(JavaWriterManifest.read(workload), fixture.archive());
+    }
+
+    @Test
     void batchesAreBoundedAndTickerMappingsAreReusedAfterCommit() throws Exception {
         Fixture fixture = fixture(2001);
         Database database = new Database(fixture.manifest());
@@ -207,6 +255,8 @@ class RawWriterPerformanceTest {
         private final List<Integer> tickerBatches = new ArrayList<>();
         private final List<Integer> priceBatches = new ArrayList<>();
         private final List<Integer> updateBatches = new ArrayList<>();
+        private final List<String> pendingWrites = new ArrayList<>();
+        private final List<String> committedWrites = new ArrayList<>();
         private List<List<Object>> storedBars = List.of();
         private String catalog = "stockguidance_disposable_fixture";
         private boolean autoCommit = true;
@@ -227,8 +277,8 @@ class RawWriterPerformanceTest {
                         case "getAutoCommit" -> autoCommit;
                         case "setAutoCommit" -> { autoCommit = (Boolean) arguments[0]; yield null; }
                         case "prepareStatement" -> statement((String) arguments[0]);
-                        case "commit" -> { tickers.putAll(pendingTickers); pendingTickers.clear(); commits++; yield null; }
-                        case "rollback" -> { pendingTickers.clear(); rollbacks++; yield null; }
+                        case "commit" -> { tickers.putAll(pendingTickers); pendingTickers.clear(); committedWrites.addAll(pendingWrites); pendingWrites.clear(); commits++; yield null; }
+                        case "rollback" -> { pendingTickers.clear(); pendingWrites.clear(); rollbacks++; yield null; }
                         case "close" -> null;
                         default -> throw new UnsupportedOperationException(method.getName());
                     });
@@ -242,7 +292,7 @@ class RawWriterPerformanceTest {
                         case "setString", "setLong", "setObject" -> { parameters.put((Integer) arguments[0], arguments[1]); yield null; }
                         case "setNull" -> { parameters.put((Integer) arguments[0], null); yield null; }
                         case "executeQuery" -> rows(query(sql));
-                        case "executeUpdate" -> 1;
+                        case "executeUpdate" -> { if (autoCommit) committedWrites.add(sql); else pendingWrites.add(sql); yield 1; }
                         case "addBatch" -> { batch.add(new HashMap<>(parameters)); yield null; }
                         case "executeBatch" -> {
                             if (failBatch) throw new SQLException("Injected batch failure");

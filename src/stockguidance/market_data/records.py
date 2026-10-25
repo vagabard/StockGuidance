@@ -7,16 +7,20 @@ from stockguidance.calendar.sessions import TradingSession
 from stockguidance.market_data.identity import content_id, mapping
 
 
+_PRICE_LIMIT = Decimal("1e60")
+_PRICE_QUANTA = {8: Decimal("1e-8"), 22: Decimal("1e-22")}
+
+
 def _decimal_price(value: object, places: int) -> Decimal:
 	if isinstance(value, bool) or not isinstance(value, (str, int, float, Decimal)):
 		raise ValueError("Expected a numeric price")
 	try:
-		result = Decimal(str(value))
-		if not result.is_finite() or result <= 0 or result >= Decimal("1e60"):
+		result = value if isinstance(value, Decimal) else Decimal(str(value))
+		if not result.is_finite() or result <= 0 or result >= _PRICE_LIMIT:
 			raise ValueError("Price must be finite, positive, and representable")
 		with localcontext() as context:
-			context.prec = max(90, len(result.as_tuple().digits) + abs(int(result.as_tuple().exponent)) + places)
-			result = result.quantize(Decimal(1).scaleb(-places), rounding=ROUND_HALF_UP)
+			context.prec = 90
+			result = result.quantize(_PRICE_QUANTA[places], rounding=ROUND_HALF_UP)
 		if result <= 0:
 			raise ValueError("Price rounds to zero")
 		return result
@@ -87,8 +91,8 @@ class DailyBar:
 
 
 def bar_payload(bar: DailyBar) -> dict[str, object]:
-	return {"T": bar.ticker, "o": canonical_decimal(decimal_price(bar.open)), "h": canonical_decimal(decimal_price(bar.high)),
-		"l": canonical_decimal(decimal_price(bar.low)), "c": canonical_decimal(decimal_price(bar.close)),
+	return {"T": bar.ticker, "o": canonical_decimal(bar.open), "h": canonical_decimal(bar.high),
+		"l": canonical_decimal(bar.low), "c": canonical_decimal(bar.close),
 		"v": canonical_decimal(decimal_quantity(bar.volume)), "vw": None if bar.vwap is None else canonical_decimal(decimal_vwap(bar.vwap)), "n": bar.transactions}
 
 

@@ -39,7 +39,7 @@ public final class JavaWriterManifest {
         this.sourceKey = sourceKey;
         this.correctedSchemaHash = correctedSchemaHash;
         this.dataRoot = dataRoot;
-        this.files = Map.copyOf(files);
+        this.files = new HashMap<>(files);
         this.targets = Map.copyOf(targets);
     }
 
@@ -89,13 +89,41 @@ public final class JavaWriterManifest {
     }
 
     private static JavaWriterManifest readOperational(Path path, JsonObject root) {
-        if (JsonSupport.integerOrDefault(root.get("schema_version"), -1) != 1) {
+        int version = JsonSupport.integerOrDefault(root.get("schema_version"), -1);
+        if (version != 1 && version != 2) {
             throw new IllegalArgumentException("Unsupported daily workload version");
         }
         JsonObject registry = object(root, "authoritative_registry");
         TableNames names = TableNames.decode(registry);
-        Map<LocalDate, FileEntry> files = readFiles(array(root, "files"), path, true);
         Map<LocalDate, TargetEntry> targets = readTargets(array(root, "targets"));
+        Map<LocalDate, FileEntry> files;
+        if (version == 2) {
+            if (!"database".equals(root.get("input_mode"))) throw new IllegalArgumentException("Database input mode is required");
+            files = new HashMap<>();
+            Path directory = absolutePath(requiredText(root, "archive_directory"), path);
+            for (Object value : array(root, "input_sessions")) {
+                LocalDate session = LocalDate.parse(requiredText(value));
+                if (files.putIfAbsent(session, new FileEntry(session, directory.resolve(session + ".ndjson"), false, null, null)) != null) {
+                    throw new IllegalArgumentException("Duplicate database input session");
+                }
+            }
+            for (TargetEntry target : targets.values()) {
+                for (LocalDate session : target.derivedDependencies()) {
+                    files.putIfAbsent(session, new FileEntry(session, null, false, null, null));
+                }
+            }
+            if (root.get("database_sources") instanceof JsonArray sources) {
+                for (Object value : sources) {
+                    JsonObject item = (JsonObject) value;
+                    LocalDate session = date(item, "session");
+                    FileEntry previous = files.get(session);
+                    if (previous == null) throw new IllegalArgumentException("Out-of-scope database receipt");
+                    files.put(session, new FileEntry(session, previous.path(), true, null, requiredText(item, "raw_id")));
+                }
+            }
+        } else {
+            files = readFiles(array(root, "files"), path, true);
+        }
         JsonObject unsigned = (JsonObject) JsonSupport.deepCopy(root);
         unsigned.remove("manifest_id");
         String identity = CanonicalJson.sha256(unsigned);
@@ -110,8 +138,33 @@ public final class JavaWriterManifest {
         return "daily-maintenance".equals(root.get("kind"));
     }
 
+    public boolean databaseBacked() {
+        return operational() && "database".equals(root.get("input_mode"));
+    }
+
+    public void databaseSources(Map<LocalDate, OperationalDatabase.Receipt> receipts) {
+        JsonArray sources = JsonSupport.array();
+        JsonObject availability = (JsonObject) root.get("availability");
+        for (LocalDate session : files.keySet().stream().sorted().toList()) {
+            FileEntry previous = files.get(session);
+            OperationalDatabase.Receipt receipt = receipts.get(session);
+            files.put(session, new FileEntry(session, previous.path(), receipt != null, null, receipt == null ? null : receipt.rawId()));
+            if (receipt != null) {
+                JsonObject item = JsonSupport.addObject(sources);
+                item.put("session", session.toString());
+                item.put("raw_id", receipt.rawId());
+                availability.put(session.toString(), receipt.availableAt());
+            }
+        }
+        root.put("database_sources", sources);
+    }
+
     public String availableAt(LocalDate session) {
         return requiredText(object(root, "availability"), session.toString());
+    }
+
+    void availableAt(LocalDate session, String value) {
+        object(root, "availability").put(session.toString(), value);
     }
 
     public JsonObject root() {
@@ -199,6 +252,10 @@ public final class JavaWriterManifest {
 
     public void verifyArchiveIdentity(ArchiveCandidateReader.SessionArchive archive) {
         FileEntry entry = file(archive.session());
+        if (databaseBacked()) {
+            if (!java.util.Objects.equals(entry.path(), archive.path())) throw new IllegalArgumentException("Unexpected source path");
+            return;
+        }
         if (!entry.valid() || entry.path() == null
                 || (entry.fileSha256() != null && !entry.fileSha256().equals(archive.fileSha256()))
                 || (!trustsExistingFile(archive.session()) && entry.recordsId() != null && !entry.recordsId().equals(archive.recordsId()))

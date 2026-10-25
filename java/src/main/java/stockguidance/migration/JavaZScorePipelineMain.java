@@ -94,13 +94,24 @@ public final class JavaZScorePipelineMain implements AutoCloseable {
     JsonObject run(List<LocalDate> sessions) throws Exception {
         long started = System.nanoTime();
         synchronized (progress) { progress.clear(); }
+        List<JsonObject> results = new ArrayList<>();
+        if (manifest.databaseBacked()) {
+            Map<LocalDate, List<JsonObject>> completed = completedSeries(sessions);
+            List<LocalDate> pending = new ArrayList<>();
+            for (LocalDate session : sessions) {
+                List<JsonObject> existing = completed.getOrDefault(session, List.of());
+                if (existing.size() == 4) results.addAll(existing);
+                else pending.add(session);
+            }
+            System.err.println("Z-score planning: " + (sessions.size() - pending.size()) + " sessions reused, " + pending.size() + " pending");
+            sessions = pending;
+        }
         List<LocalDate> dependencies = sessions.stream().flatMap(session -> manifest.target(session).zscoreDependencies().stream())
                 .distinct().sorted().toList();
         source.request(dependencies);
         CompletionService<List<JsonObject>> completion = new ExecutorCompletionService<>(calculators);
         int submitted = 0;
         int completed = 0;
-        List<JsonObject> results = new ArrayList<>();
         while (completed < sessions.size()) {
             while (submitted < sessions.size() && submitted - completed < workers + 3) {
                 LocalDate session = sessions.get(submitted++);
@@ -132,6 +143,50 @@ public final class JavaZScorePipelineMain implements AutoCloseable {
         report.put("workload_seconds", (System.nanoTime() - started) / 1e9);
         report.put("transaction_unit", "one z-score series/session");
         return report;
+    }
+
+    private Map<LocalDate, List<JsonObject>> completedSeries(List<LocalDate> sessions) throws java.sql.SQLException {
+        Map<LocalDate, List<JsonObject>> result = new HashMap<>();
+        if (sessions.isEmpty()) return result;
+        Map<String, String> families = new HashMap<>();
+        Map<String, Integer> windows = new HashMap<>();
+        for (JavaZScoreCandidate.Family family : JavaZScoreCandidate.Family.values()) {
+            for (int window : new int[]{20, 60}) {
+                JsonObject definition = candidate().definition(family, window);
+                String key = CanonicalJson.sha256(definition);
+                families.put(key, definition.get("family").toString());
+                windows.put(key, window);
+            }
+        }
+        var names = manifest.tableNames();
+        String parameters = String.join(",", java.util.Collections.nCopies(sessions.size(), "?"));
+        try (Connection connection = connect();
+             var statement = connection.prepareStatement("SELECT s.transaction_date, z.series_key, z.row_count, z.ready_count, "
+                     + "z.content_digest, z.dependency_digest, z.availability_digest FROM "
+                     + stockguidance.database.SqlIdentifiers.quote(names.zscoreSessions(), "zscore_sessions") + " z JOIN "
+                     + stockguidance.database.SqlIdentifiers.quote(names.sessions(), "sessions")
+                     + " s ON s.id = z.date_id WHERE s.transaction_date IN (" + parameters + ")")) {
+            for (int index = 0; index < sessions.size(); index++) statement.setObject(index + 1, sessions.get(index));
+            try (var rows = statement.executeQuery()) {
+                while (rows.next()) {
+                    String key = rows.getString(2);
+                    if (!families.containsKey(key) || rows.getLong(3) != source.tickers().size()) continue;
+                    LocalDate session = rows.getDate(1).toLocalDate();
+                    JsonObject item = JsonSupport.object();
+                    item.put("session", session.toString());
+                    item.put("family", families.get(key));
+                    item.put("window", windows.get(key));
+                    item.put("row_count", rows.getLong(3));
+                    item.put("ready_count", rows.getLong(4));
+                    item.put("content_digest", rows.getString(5));
+                    item.put("dependency_digest", rows.getString(6));
+                    item.put("availability_digest", rows.getString(7));
+                    item.put("status", "reused");
+                    result.computeIfAbsent(session, ignored -> new ArrayList<>()).add(item);
+                }
+            }
+        }
+        return result;
     }
 
     private List<JsonObject> calculateSession(LocalDate session) throws Exception {

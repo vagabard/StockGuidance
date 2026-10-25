@@ -16,7 +16,7 @@ The grouped-daily Massive/Polygon adapter is shared with the other update CLIs.
 Java classes and dependencies must be available under `java/target`.
 
 The implementation keeps one `maintain_daily` command but separates the workflow
-internally into context/setup, source archival, Java materialization, and Python
+internally into context/setup, source downloading, Java materialization, and Python
 validation modules. The `--stage` option selects the corresponding module for a
 focused rerun; the default command preserves the source-to-Java-to-validation
 handoff and validates each Java batch before continuing.
@@ -51,10 +51,12 @@ For debugging or a controlled rerun, execute one phase at a time:
 & .venv/Scripts/python.exe -m stockguidance.cli.maintain_daily --stage validation
 ```
 
-`source` downloads and archives the requested sessions. `java` requires those
-archive files, materializes the database and saves one Java report beside each
-workload under `output/daily-maintenance/java`. `validation` requires the
-workloads and reports from `java` and runs only the independent Python checks.
+`source` downloads daily NDJSON files and recovers interrupted raw imports.
+`java` discovers completed database sessions, imports pending NDJSON files, and
+calculates daily deltas and z-scores from database values. Completed historical
+sessions do not require their NDJSON files to be present. `validation` discovers
+completed series directly from database metadata and runs independent Python
+checks; it does not require workload files or previous reports.
 Use the same date, policy, checkpoint and batch arguments for all three
 commands. The default, with no `--stage`, runs all three phases. Numeric aliases
 `1`, `2` and `3` are also accepted for source, Java and validation respectively.
@@ -73,22 +75,37 @@ Java classes are unavailable.
 
 ## Writes and validation
 
-Existing daily-maintenance archive files are treated as usable inputs without
-reloading and decoding their provider-response manifests. Existing database
-import receipts supply the source identity and availability for those sessions.
-Missing files are downloaded and archived. Java transactionally reconciles raw
-rows, including removal of keys withdrawn by a corrected response, and repairs
-derived values from chronological neighbors. Source changes invalidate
-dependent z-score completion receipts. The Java pipeline recomputes requested
-z-score dependencies and preserves matching output rows; rechecking dependencies
-also repairs deleted or corrupted z-score materializations.
+Database import receipts are authoritative for completed raw and daily-delta
+sessions. Java queries receipts in batches, checks filenames and file metadata,
+and parses only new, explicitly refreshed, or changed NDJSON inputs. File size
+and modification time are recorded in `stockguidance_daily_source_files` in the
+raw import transaction. Existing receipts without file metadata are trusted and
+receive a metadata baseline without decoding the file. Missing dates are checked
+against exchange sessions, rather than inferred solely from the latest date.
+The source stage records a pending-download flag in that table before publishing
+a refreshed file, so a separate Java invocation still imports the refresh even
+when the old receipt has no file metadata. Import completion clears the flag.
+
+Java transactionally reconciles pending raw rows, including removal of tickers
+withdrawn by corrections. Daily deltas use exact decimal raw values read from
+the database in bounded batches. Changed raw data invalidates neighboring delta
+receipts and affected z-score completion receipts. Unchanged completed deltas
+and z-score sessions are reused without historical content comparisons. A
+changed ticker count also prevents reuse of old z-score completion metadata.
+Missing inputs fail with the session dates and a request to run the source stage.
+
+Normal Java runs trust completed history. They do not detect arbitrary historical
+database damage or file edits preserving both size and modification time.
+Independent validation remains available; a force-verification option is deferred.
 
 Operational raw record identities use the same version 2 canonical decimal
 contract as migration. OHLC values retain eight decimal places and VWAP retains
 22; HTTP JSON decimals are parsed without a binary floating-point round trip.
-Older version 1 source manifests are bypassed when their daily-maintenance
-archive already exists. If that archive is missing, maintenance recreates it
-from a current provider response.
+The daily-maintenance source stage retains NDJSON downloads without creating
+duplicate response JSON or per-session manifest copies. Shared manifest storage
+used by other workflows remains supported. Existing downloaded NDJSON files are
+preserved. Historical files are not recreated merely because they are absent if
+their database session is complete and no source refresh is due.
 
 Each Java batch is followed by independent Python numerical, status, and
 metadata checks for the materialized z-scores. These checks use a fresh
@@ -100,14 +117,34 @@ on every date.
 
 ## Recovery and readiness
 
-Downloaded responses, generated workload descriptions and per-session committed
-receipts survive interruption. Java records each raw date as in progress before
-writing it and removes the marker after commit. On restart, maintenance deletes
-raw and derived rows and the import receipt for marked dates, then imports them
-again from the retained archive. Workload identities prevent stale checkpoints
-from being reused after source changes. Validation snapshots are fresh so an old
-passing report cannot hide subsequent database damage. An advisory database
-lock prevents concurrent maintenance coordinators.
+Retained NDJSON downloads and database completion receipts survive interruption.
+Java records a raw date as in progress before writing it, then removes that marker
+in the same transaction that commits the raw rows, receipt and file metadata.
+The source stage removes incomplete raw/delta data for remaining markers; Java
+then imports the pending download. A Java-only run encountering an unfinished
+import requests source-stage recovery and does not delete data itself.
+
+Workload descriptions, pipeline intermediates, validation details and checkpoints
+are temporary files inside owned `run-*` subdirectories of
+`--java-checkpoint-directory`. Successful runs remove their temporary files and
+failed directories for the same stage, database configuration, tables and date
+range. Failed runs retain diagnostics until a successful retry. Checkpoints never
+override database completion. NDJSON downloads are never included in this cleanup.
+Validation snapshots are fresh. An advisory database lock prevents concurrent
+maintenance coordinators.
+
+Version 2 operational workloads use database inputs. Version 1 archive workloads
+remain supported by Java for compatibility, as do migration and benchmark inputs.
+New operational runs generate their workloads afresh. Legacy workload/report files
+and duplicate response/manifest files are not automatically deleted; other
+workflows may still use them. They are no longer required by daily maintenance.
+
+Before using this version on an existing database, run the existing explicit
+updater schema initialization (`initialize_update_schema`, also exposed by the
+updater's `--initialize-schema` option). It creates the missing
+`stockguidance_daily_source_files` and `stockguidance_daily_import_in_progress`
+tables without altering existing tables. Operational runs check these tables and
+do not create or alter schema automatically.
 
 Progress and phase estimates appear on stderr; stdout contains the final JSON
 report. Exit 0 means the requested range passed both validators. Nonzero means

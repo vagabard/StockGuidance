@@ -43,7 +43,7 @@ class MaintenanceSession:
 	context: MaintenanceContext
 	connection: Any
 	cursor: Any
-	imports: dict[date, tuple[str, str, int]]
+	imports: dict[date, tuple[str, str]]
 	partial_imports_removed: int
 
 	def assert_lock(self) -> None:
@@ -76,13 +76,13 @@ def session_workload(calendar: SessionCalendar, start: date, end: date, cutoff: 
 	return tuple(calendar.sessions(first.session_date, last.session_date)), published
 
 
-def raw_import_state(cursor: Any, names: TableNames, sessions: tuple[TradingSession, ...]) -> dict[date, tuple[str, str, int]]:
+def raw_import_state(cursor: Any, names: TableNames, sessions: tuple[TradingSession, ...]) -> dict[date, tuple[str, str]]:
 	if not sessions:
 		return {}
 	identifiers = tuple(session.session_date.isoformat() for session in sessions)
 	placeholders = ",".join("%s" for _ in identifiers)
-	cursor.execute(f"SELECT s.transaction_date, i.raw_id, i.available_at, COUNT(p.ticker_id) FROM {quote_identifier(names.sessions)} s LEFT JOIN {quote_identifier(names.imports)} i ON i.session_date = s.transaction_date LEFT JOIN {quote_identifier(names.prices)} p ON p.date_id = s.id WHERE s.transaction_date IN ({placeholders}) GROUP BY s.transaction_date, i.raw_id, i.available_at", identifiers)
-	return {date.fromisoformat(str(row[0])): (str(row[1]), str(row[2]), int(row[3])) for row in cursor.fetchall() if row[1] is not None}
+	cursor.execute(f"SELECT s.transaction_date, i.raw_id, i.available_at FROM {quote_identifier(names.sessions)} s JOIN {quote_identifier(names.imports)} i ON i.session_date = s.transaction_date WHERE s.transaction_date IN ({placeholders}) ORDER BY s.transaction_date", identifiers)
+	return {date.fromisoformat(str(row[0])): (str(row[1]), str(row[2])) for row in cursor.fetchall() if row[1] is not None}
 
 
 @contextmanager
@@ -141,7 +141,10 @@ def open_maintenance(
 			DEFAULT_CALENDAR_ID if data_configuration is None else data_configuration.calendar_id,
 			min(start, date(2005, 1, 1)), max(end, now.date()) + timedelta(days=14))
 		raw_sessions, targets = session_workload(calendar, start, end, now, publication)
-		partial_imports_removed = prepare_partial_imports(cursor, connection, names) if run_java and prepare_partial_imports is not None else 0
+		cursor.execute("SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME IN (%s, %s) AND ENGINE = 'InnoDB'", ("stockguidance_daily_source_files", "stockguidance_daily_import_in_progress"))
+		if {row[0] for row in cursor.fetchall()} != {"stockguidance_daily_source_files", "stockguidance_daily_import_in_progress"}:
+			raise ValueError("Daily maintenance metadata is missing; run explicit update schema initialization first")
+		partial_imports_removed = prepare_partial_imports(cursor, connection, names) if getattr(arguments, "stage", None) in (None, "source") and prepare_partial_imports is not None else 0
 		imports = raw_import_state(cursor, names, raw_sessions)
 		context = MaintenanceContext(arguments, clock, now, database_path, source, names, calendar, raw_sessions, targets, publication, correction)
 		yield MaintenanceSession(context, connection, cursor, imports, partial_imports_removed)
