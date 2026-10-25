@@ -16,6 +16,7 @@ from stockguidance.market_data.providers.configured_polygon import ConfiguredPol
 from stockguidance.market_data.providers.contracts import DownloadedSession, ResponseState
 from stockguidance.market_data.records import bar_payload, decode_bar, records_id
 from stockguidance.workflows.daily_maintenance_context import MaintenanceSession
+from stockguidance.market_data.quality import invalid_fields
 
 
 @dataclass
@@ -35,6 +36,10 @@ def export_archive(source: SourceConfig, download: DownloadedSession | SourceMan
 		if bar.ticker not in timestamps:
 			raise ValueError(f"Source timestamp is missing for {download.session.session_date}: {bar.ticker}")
 		rows.append(encode_json({**bar_payload(bar), "t": timestamps[bar.ticker]}))
+	for ticker, values in download.response.bad_records:
+		if ticker not in timestamps:
+			raise ValueError(f"Source timestamp is missing for {download.session.session_date}: {ticker}")
+		rows.append(encode_json({"T": ticker, **dict(zip(("o", "h", "l", "c", "v", "vw", "n"), values)), "t": timestamps[ticker]}))
 	content = b"".join(rows)
 	path = source.data_root / "daily-maintenance" / data_configuration_key(source.data_configuration) / f"{download.session.session_date}.ndjson"
 	if not path.exists() or path.read_bytes() != content:
@@ -54,12 +59,19 @@ def archive_entry(source: SourceConfig, session: TradingSession, raw_id: str | N
 def archive_identity(path: Path) -> tuple[str, str]:
 	content = path.read_bytes()
 	records = []
+	tickers: set[str] = set()
 	for line in content.splitlines():
 		row = json.loads(line)
 		if not isinstance(row, dict):
 			raise ValueError(f"Daily-maintenance archive record is not an object: {path}")
+		ticker = row.get("T")
+		if not isinstance(ticker, str) or not ticker or ticker in tickers:
+			raise ValueError(f"Daily-maintenance archive has an invalid or duplicate ticker: {path}")
+		tickers.add(ticker)
+		if invalid_fields(tuple(row.get(field) for field in ("o", "h", "l", "c", "v", "vw", "n"))):
+			continue
 		records.append(decode_bar(row))
-	if not records or len({record.ticker for record in records}) != len(records):
+	if not tickers:
 		raise ValueError(f"Daily-maintenance archive is empty or contains duplicate tickers: {path}")
 	return sha256(content).hexdigest(), records_id(tuple(records))
 

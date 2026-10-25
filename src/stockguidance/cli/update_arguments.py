@@ -21,4 +21,4 @@ def add_update_policy_arguments(arguments: argparse.ArgumentParser, *, include_s
 	arguments.add_argument("--archive-refresh-days", type=float, default=DEFAULT_ARCHIVE_REFRESH_DAYS)
 	arguments.add_argument("--correction-evidence", default=DEFAULT_CORRECTION_EVIDENCE)
 	if include_schema_initialization:
-		arguments.add_argument("--initialize-schema", action="store_true", help="Explicitly create missing updater tables; existing tables are never altered")
+		arguments.add_argument("--initialize-schema", action="store_true", help="Explicitly create missing updater/quality tables and date-first indexes; existing financial columns are preserved")

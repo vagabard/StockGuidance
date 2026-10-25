@@ -15,6 +15,21 @@ configuration and its table-name registry. Set `MASSIVE_API_KEY` or
 The grouped-daily Massive/Polygon adapter is shared with the other update CLIs.
 Java classes and dependencies must be available under `java/target`.
 
+After upgrading, run the explicit updater schema setup described in
+[market-data updating](market_data_updating.md#upgrade-and-initial-quality-scan)
+and rebuild Java. Quality tracking uses additional database tables; original
+downloaded NDJSON and bad raw rows remain available for audit. For existing
+history, the Python updater's resumable `--scan-quality` command scans the full
+chosen scope before normal recurring maintenance.
+
+`maintain_daily` accepts `--quality-history clean` (default),
+`--quality-history interpolated`, `--retrospective-quality`, and `--scan-quality`.
+Java imports classify numeric bad rows, interpolate bounded gaps, and attach
+quality lineage to derived values and rolling z-score outputs. Singleton and
+multi-session repairs retain different classifications and exact gap lengths.
+The normal mode respects actual repair availability; retrospective use retains
+a FUTURE_LEAKAGE flag. Missing endpoints remain unresolved bad data.
+
 The implementation keeps one `maintain_daily` command but separates the workflow
 internally into context/setup, source downloading, Java materialization, and Python
 validation modules. The `--stage` option selects the corresponding module for a

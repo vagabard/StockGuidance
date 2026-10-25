@@ -5,6 +5,7 @@ from stockguidance.calendar.sessions import TradingSession, require_next_session
 from stockguidance.database.repositories.closes import CloseData
 from stockguidance.market_data.closes import CloseIssue, valid_close
 from stockguidance.targets.specification import TargetSpec
+from stockguidance.market_data.quality import QualityFlag, combine_quality
 
 
 def close_to_close_return(entry_close: float, exit_close: float, specification: TargetSpec) -> float:
@@ -21,6 +22,9 @@ class TargetValues:
 	raw: tuple[float | None, ...]
 	transformed: tuple[float | None, ...]
 	issues: tuple[CloseIssue, ...] = ()
+	quality: QualityFlag = QualityFlag.CLEAN
+	gap_length: int = 0
+	provenance: tuple[str, ...] = ()
 
 	def __post_init__(self) -> None:
 		if not isinstance(self.raw, tuple) or not self.raw or self.raw != self.transformed or not isinstance(self.issues, tuple):
@@ -48,4 +52,5 @@ def construct_targets(specification: TargetSpec, ticker_ids: tuple[int, ...], en
 			values.append(None)
 		else:
 			values.append(close_to_close_return(entry_price.close, exit_price.close, specification))
-	return TargetValues(tuple(values), tuple(values), issues)
+	quality, gap_length, provenance = combine_quality([*(item for item in data.observations if item.timing.session in {entry, exit_session} and item.ticker_id in ticker_ids), *issues])
+	return TargetValues(tuple(values), tuple(values), issues, quality, gap_length, provenance)

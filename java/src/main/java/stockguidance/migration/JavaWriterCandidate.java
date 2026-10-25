@@ -141,6 +141,14 @@ public final class JavaWriterCandidate {
             batchInsertTickers(connection, newTickers);
             batchInsertBars(connection, inserts);
             batchUpdateBars(connection, updates);
+            if (manifest.operational()) {
+                try (PreparedStatement statement = connection.prepareStatement("DELETE FROM stockguidance_row_quality WHERE date_id=?")) {
+                    statement.setLong(1, dateId); statement.executeUpdate();
+                }
+                Map<String, Long> qualityTickers = new HashMap<>(tickers.ids);
+                for (NewTicker ticker : newTickers) qualityTickers.put(ticker.label(), ticker.id());
+                RowQuality.savePending(connection, manifest, archive, dateId, qualityTickers);
+            }
             if (manifest.operational()) invalidateZScores(connection, session);
             upsertImport(connection, session, archive.recordsId(), null, null);
             upsertCompletion(connection, RAW_SERIES, session, RAW_SERIES, archive.recordsId());
@@ -231,6 +239,7 @@ public final class JavaWriterCandidate {
             }
             deleteDerived(connection, dateId);
             batchInsertDerived(connection, dateId, rows);
+            if (manifest.operational()) RowQuality.saveDerived(connection, names, prior.session(), session, following.session(), rows.keySet());
             if (manifest.operational()) invalidateZScores(connection, session);
             upsertImport(connection, session, current.recordsId(), dependencyDigest, contentDigest);
             upsertCompletion(connection, "derived", session, DERIVED_SERIES, contentDigest);

@@ -8,6 +8,7 @@ from stockguidance.config.validation import require_aware_datetime, require_posi
 from stockguidance.market_data.identity import content_id
 from stockguidance.zscores.results import ZScoreResult, ZScoreRow, ZScoreStatus
 from stockguidance.zscores.specification import ZScoreFamily, ZScoreSpecification
+from stockguidance.market_data.quality import QualityPolicy
 
 
 METADATA_SCHEMA_VERSION: Final = 1
@@ -75,7 +76,10 @@ class ZScoreSeriesDefinition:
 	def from_specification(cls, source_scope: str, calendar_id: str, specification: ZScoreSpecification, window: int) -> "ZScoreSeriesDefinition":
 		if window not in specification.windows:
 			raise ValueError("Z-score window is not present in the specification")
-		return cls(source_scope, calendar_id, specification.family, window, specification.calculation_version, specification.precision, specification.delta_definition)
+		version = specification.calculation_version
+		if specification.quality_policy != QualityPolicy():
+			version += ":quality:" + specification.quality_policy.identity[:16]
+		return cls(source_scope, calendar_id, specification.family, window, version, specification.precision, specification.delta_definition)
 
 
 @dataclass(frozen=True)
@@ -168,7 +172,7 @@ def status_counts(rows: tuple[ZScoreRow, ...]) -> tuple[tuple[ZScoreStatus, int]
 
 def rows_content_id(rows: tuple[ZScoreRow, ...]) -> str:
 	return content_id([
-		(row.session.session_date.isoformat(), row.ticker_id, row.score, int(row.status))
+		(row.session.session_date.isoformat(), row.ticker_id, row.score, int(row.status), int(row.quality), row.gap_length, row.provenance) if row.quality else (row.session.session_date.isoformat(), row.ticker_id, row.score, int(row.status))
 		for row in sorted(rows, key=lambda item: (item.session.sequence, item.ticker_id))
 	])
 

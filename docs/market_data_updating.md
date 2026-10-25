@@ -11,13 +11,85 @@ Installing `pyproject.toml` also exposes the `update_market_data` console comman
 Add `--verbose` to report phase progress and elapsed times on stderr while
 keeping the final machine-readable result on stdout. Verbose failures include
 the underlying validation or storage exception to identify the failing phase.
-Planning reads bounded session metadata, receipts, row counts, and raw ticker
-IDs rather than decoding the entire raw and delta history. Full records are
-loaded only for sessions requiring import or repair (plus dependency neighbors).
-Exact all-zero OHLCV placeholder rows are removed transactionally and treated as
-non-trading; downloaded source files are retained unchanged. Small request
-scopes still run full integrity verification, while large scopes trust the
-database receipt identities during normal updates.
+Normal planning for scopes larger than 32 sessions reads date mappings,
+completion receipts, pending imports, and lightweight manifest headers. It does
+not scan OHLCV rows, count historical raw/delta rows, enumerate historical ticker
+keys, or decode full response files. Detailed records are loaded for affected
+sessions and their dependencies. Small scopes retain full integrity checks;
+`--force-verify` requests those checks for a larger scope explicitly.
+
+Bad rows, including all-zero placeholders, are retained and classified in the
+database. Validated calculations use separate effective replacements where
+bounded interpolation is possible. Downloaded NDJSON files remain unchanged.
+
+## Upgrade and initial quality scan
+
+Create the quality tables and missing date-first raw/delta indexes explicitly,
+then scan the retained history once. Use the same source, bounds, and publication
+settings as your regular updater command:
+
+```powershell
+& .venv/Scripts/python.exe -m stockguidance.cli.update_market_data `
+  --initialize-schema --scan-quality --verbose `
+  --start-date '<first-retained-session>' --end-date '<last-retained-session>'
+```
+
+`--initialize-schema` preserves existing financial columns. Creating an index on
+a large existing table can take time; verbose output reports the active phase
+and emits a heartbeat every 15 seconds. Database query execution and fetching
+are timed separately, with returned row counts and affected-session totals.
+
+The initial scan checkpoints completed 128-session batches in the database.
+Rerun the same bounded command after interruption to resume it. On success the
+temporary scan checkpoint is removed; quality records and revision history are
+the long-term evidence. A later explicit `--scan-quality` starts a new scan.
+Routine updates classify changed records and refresh affected interpolation
+dependencies without repeating the initial history scan.
+
+## Bad data and interpolation
+
+The database stores original fields, invalid-field masks, replacement values,
+endpoint dates and values, gap length, method version, and actual availability.
+Replacements use linear interpolation by trading-session distance between clean
+observations for the same ticker. Existing valid fields and valid zero quantities
+are preserved. Missing endpoints or invalid replacements remain unresolved bad
+data; interpolated observations never become interpolation endpoints.
+
+Quality flags are separate from calculation readiness/status codes:
+
+| Classification | Mask | Meaning |
+| --- | ---: | --- |
+| CLEAN | 0 | Valid observed data |
+| BAD | 1 | Unresolved invalid observation |
+| BAD.INTERPOLATED.SINGLE | 3 | Replacement for one bad session |
+| BAD.INTERPOLATED.GAP | 5 | Replacement within consecutive bad sessions; exact length retained |
+| FUTURE_LEAKAGE | 8 | Additional flag when retrospective processing uses unavailable evidence |
+
+`stockguidance_row_quality` holds current classifications;
+`stockguidance_quality_revisions` retains immutable repair evidence; and
+`stockguidance_output_quality` holds derived-column and z-score lineage. Tables
+belong to the database's asserted source configuration. Original bad financial
+rows remain in the raw table; consumers must use the quality-aware repositories
+to obtain effective values. Direct SQL readers must consult the quality tables.
+
+Derived calculations propagate their actual input classifications, including
+cross-ticker ranking dependencies. Rolling z-score windows retain the union of
+their input labels, maximum gap length, and repair revision references. Quality
+and policy revisions participate in dependency identities. Close observations,
+feature/target values, and samples also carry quality lineage.
+
+Z-score updates accept `--quality-history clean` (default) or
+`--quality-history interpolated`. Clean mode resets usable history at every bad
+or interpolated session and requires a fresh full clean window. Interpolated
+mode accepts singleton and multi-session replacements, retaining their distinct
+labels and lengths. Unresolved bad observations remain unusable. The close-data
+API exposes the same switch through `CloseQuery.quality_policy`.
+
+Repairs become available only after both endpoints and the repair itself were
+available. `--retrospective-quality` explicitly permits earlier use of a repair
+and marks affected outputs with FUTURE_LEAKAGE. A later valid provider correction
+cleans the current row, preserves prior bad/repair revisions, and invalidates
+dependent materializations.
 
 ## Required evidence and policy
 
@@ -80,7 +152,8 @@ adapter; another provider can implement the typed `MarketDataProvider` protocol.
 
 Add `--initialize-schema` only when explicitly setting up an updater database.
 It creates missing tables and binds that database to one complete source/request
-identity. It never alters existing table definitions. Existing legacy rows do not
+identity. Setup also adds missing date-first indexes without changing financial
+column definitions. Existing legacy rows do not
 become verified merely because the database is bound: they must be reconciled
 against validated source evidence. Use separate databases for different source
 scopes, including different adjustment policies; the existing raw schema cannot

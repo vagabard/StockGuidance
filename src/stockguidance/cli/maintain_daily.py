@@ -26,6 +26,9 @@ def maintenance_range(as_of: date) -> tuple[date, date]:
 def parser() -> argparse.ArgumentParser:
 	arguments = argparse.ArgumentParser(description="Maintain recent market data with Java and validate independently in Python")
 	arguments.add_argument("--data-root", default="data")
+	arguments.add_argument("--quality-history", choices=("clean", "interpolated"), default="clean")
+	arguments.add_argument("--retrospective-quality", action="store_true")
+	arguments.add_argument("--scan-quality", action="store_true", help="Classify retained bad rows and repair bounded gaps")
 	arguments.add_argument("--dbinfo-file", default="dbinfo.id")
 	add_update_policy_arguments(arguments, include_schema_initialization=False, include_history_boundary=False)
 	arguments.set_defaults(adjustment=None)

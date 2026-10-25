@@ -9,9 +9,11 @@ from stockguidance.market_data.update_planning import SnapshotIndex
 from stockguidance.validation.derived import derived_values_match
 
 
-def import_if_needed(repository: MarketDataRepository, query: SessionQuery, download: DownloadedSession, snapshot: SessionSnapshot | None) -> None:
-	if snapshot is None or not snapshot.raw_verified or records_id(snapshot.records) != records_id(download.response.records):
+def import_if_needed(repository: MarketDataRepository, query: SessionQuery, download: DownloadedSession, snapshot: SessionSnapshot | None) -> bool:
+	if snapshot is None or not snapshot.raw_verified or (snapshot.original_content_id or records_id(snapshot.records)) != records_id(download.response.records):
 		repository.import_session(query, download)
+		return True
+	return False
 
 
 def derived_repairs(snapshots: tuple[SessionSnapshot, ...], repair_dates: frozenset[date]) -> tuple[DerivedUpdate, ...]:

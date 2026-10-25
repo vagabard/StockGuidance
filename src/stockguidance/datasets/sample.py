@@ -11,6 +11,7 @@ from stockguidance.features.history_window import WindowState
 from stockguidance.market_data.availability import AvailabilityPolicy
 from stockguidance.targets.construction import TargetValues
 from stockguidance.targets.specification import TargetSpec
+from stockguidance.market_data.quality import QualityFlag
 
 
 class TargetState(StrEnum):
@@ -67,6 +68,18 @@ class Sample:
 	@property
 	def training_eligible(self) -> bool:
 		return self.features.values is not None and self.target_state is TargetState.READY
+
+	@property
+	def quality(self) -> QualityFlag:
+		return self.features.quality | self.targets.quality
+
+	@property
+	def gap_length(self) -> int:
+		return max(self.features.gap_length, self.targets.gap_length)
+
+	@property
+	def provenance(self) -> tuple[str, ...]:
+		return tuple(sorted(set(self.features.provenance) | set(self.targets.provenance)))
 
 	@property
 	def feature_cache_key(self) -> str:

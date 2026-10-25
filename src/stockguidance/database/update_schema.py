@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 
 from stockguidance.config.source import SourceConfig
 from stockguidance.database.repositories.mysql_sessions import Cursor
+from stockguidance.database.repositories.quality import schema_statements as quality_schema_statements
 from stockguidance.database.write_connections import WriteConnectionFactory
 from stockguidance.market_data.identity import data_configuration_key
 from stockguidance.market_data.legacy_derived import DERIVED_COLUMNS
@@ -34,13 +35,14 @@ def update_schema_statements(table_names: TableNames, *, case_sensitive_tickers:
 		"CREATE TABLE IF NOT EXISTS stockguidance_daily_import_in_progress (session_date DATE NOT NULL PRIMARY KEY, started_at VARCHAR(40) NOT NULL) ENGINE=InnoDB",
 		f"CREATE TABLE IF NOT EXISTS {quote_identifier(table_names.table(TableRole.VERIFICATIONS))} (id INT AUTO_INCREMENT PRIMARY KEY, comparison_type VARCHAR(32) NOT NULL, baseline_key CHAR(64) NOT NULL, candidate_key CHAR(64) NOT NULL, status VARCHAR(16) NOT NULL, requested_count INT NOT NULL, completed_count INT NOT NULL, random_seed BIGINT NOT NULL, registered_at VARCHAR(40) NOT NULL, completed_at VARCHAR(40) NULL, detail VARCHAR(512) NULL) ENGINE=InnoDB",
 		f"CREATE TABLE IF NOT EXISTS {quote_identifier(table_names.table(TableRole.VERIFICATION_SAMPLES))} (verification_id INT NOT NULL, sample_date DATE NOT NULL, status VARCHAR(16) NOT NULL, baseline_digest CHAR(64) NULL, candidate_digest CHAR(64) NULL, mismatch_count INT NOT NULL, detail VARCHAR(512) NULL, PRIMARY KEY (verification_id, sample_date)) ENGINE=InnoDB",
-	)
+	) + quality_schema_statements()
 
 
 def zscore_schema_statements(table_names: TableNames, windows: Iterable[int]) -> tuple[str, ...]:
 	selected_windows = _validate_windows(windows)
 	tables = table_names.resolve_zscore_tables(selected_windows)
 	statements = [
+		*quality_schema_statements(),
 		f"CREATE TABLE IF NOT EXISTS {quote_identifier(table_names.table(TableRole.ZSCORE_SERIES))} ("
 		"series_key CHAR(64) NOT NULL, schema_version INT NOT NULL, source_scope CHAR(64) NOT NULL, "
 		"calendar_id VARCHAR(128) NOT NULL, family VARCHAR(32) NOT NULL, `window` INT NOT NULL, "
@@ -207,6 +209,12 @@ def initialize_update_schema(source: SourceConfig, connect: WriteConnectionFacto
 		try:
 			for statement in statements:
 				cursor.execute(statement, ())
+			if not sqlite_compatible:
+				for table in (selected_names.prices, selected_names.deltas):
+					cursor.execute("SELECT INDEX_NAME, COLUMN_NAME, SEQ_IN_INDEX FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s ORDER BY INDEX_NAME, SEQ_IN_INDEX", (table,))
+					indexes = cursor.fetchall()
+					if not any(row[1] == "date_id" and row[2] == 1 for row in indexes):
+						cursor.execute(f"CREATE INDEX stockguidance_date_ticker ON {quote_identifier(table)} (date_id, ticker_id)", ())
 			assert_transactional_tables(cursor, selected_names)
 			configuration = source.data_configuration
 			cursor.execute(

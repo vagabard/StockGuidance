@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 
 from stockguidance.calendar.sessions import TradingSession
 from stockguidance.config.source import SourceIdentity
@@ -17,17 +17,17 @@ from stockguidance.validation.derived import derived_values_match
 
 
 class SnapshotCoverageReader:
-	def __init__(self, repository: MarketDataRepository) -> None:
+	def __init__(self, repository: MarketDataRepository, *, force_verify: bool = False) -> None:
 		self.repository = repository
+		self.force_verify = force_verify
 		self.metadata: tuple[SessionMetadata, ...] = ()
 		self.snapshots: tuple[SessionSnapshot, ...] = ()
 		self.cleaned_dates: tuple[date, ...] = ()
 		self.has_orphans = False
 
 	def read(self, query: SessionQuery) -> tuple[StoredSession, ...]:
-		self.cleaned_dates = self.repository.cleanup_placeholders(query)
-		self.has_orphans = self.repository.has_orphans(query)
-		self.metadata = self.repository.inspect_metadata(query)
+		self.has_orphans = len(query.sessions) <= 32 and self.repository.has_orphans(query)
+		self.metadata = self.repository.inspect_metadata(query, force_verify=self.force_verify)
 		self.snapshots = ()
 		return tuple(StoredSession(item.date_id, item.session.session_date, CoverageState.UNVERIFIED, "Source manifests and dependent rows require reconciliation", None if item.receipt is None else item.receipt.available_at) for item in self.metadata)
 
@@ -59,6 +59,24 @@ def plan_updates(plan: CoveragePlan, metadata: tuple[SessionMetadata, ...], stor
 	for item in plan.sessions:
 		if item.state is CoverageState.NOT_YET_AVAILABLE or item.expected_available_at is None:
 			continue
+		stored = by_date.get(item.session.session_date)
+		if stored is not None and stored.raw_count is None and stored.receipt is not None and stored.receipt.available_at <= now and item.session.session_date not in force_refresh_dates:
+			try:
+				header = store.load_metadata(plan.request.source, item.session)
+				checked_at = stored.receipt.available_at if header is None else datetime.fromisoformat(str(header["available_at"]))
+				if checked_at.tzinfo is None or checked_at > now:
+					raise ValueError("Source verification time is unavailable")
+				refresh_due = correction.refresh_due(item.session, checked_at, now)
+				if refresh_due and _fetch_authorized(plan, item.session):
+					work.append(UpdateWork(item.session, None, True, "Scheduled source refresh; response loading deferred until download"))
+					continue
+				if refresh_due and stored.receipt.derived_content_id is not None and stored.receipt.derived_dependency_id is not None and (header is None or header.get("records_id") == stored.receipt.raw_id):
+					work.append(UpdateWork(item.session, None, False, "Scheduled source refresh is outside current provider access; database completion remains recorded", True))
+					continue
+				if not refresh_due and stored.receipt.derived_content_id is not None and stored.receipt.derived_dependency_id is not None and (header is None or header.get("records_id") == stored.receipt.raw_id):
+					continue
+			except (InvalidManifest, ValueError, KeyError):
+				pass
 		try:
 			manifest = store.load(plan.request.source, item.session)
 		except InvalidManifest:
@@ -103,7 +121,9 @@ class SnapshotIndex:
 
 	def dependency(self, snapshot: SessionSnapshot) -> str:
 		prior, following = self.by_sequence.get(snapshot.session.sequence - 1), self.by_sequence.get(snapshot.session.sequence + 1)
-		return content_id([LEGACY_DERIVED_SPEC, self.empty_id if prior is None else prior.raw_content_id, snapshot.raw_content_id, self.empty_id if following is None else following.raw_content_id])
+		values = [LEGACY_DERIVED_SPEC, self.empty_id if prior is None else prior.raw_content_id, snapshot.raw_content_id, self.empty_id if following is None else following.raw_content_id]
+		quality = [record.revision for item in (prior, snapshot, following) if item is not None for record in item.quality]
+		return content_id(values if not quality else [values, quality])
 
 
 def reconciled(source: SourceIdentity, manifest: SourceManifest | None, snapshot: SessionSnapshot | None, index: SnapshotIndex, cutoff: datetime) -> bool:
@@ -112,4 +132,4 @@ def reconciled(source: SourceIdentity, manifest: SourceManifest | None, snapshot
 	if manifest.download.response.state not in {ResponseState.COMPLETE, ResponseState.NO_TRADING} or snapshot.receipt is None or snapshot.receipt.available_at > cutoff:
 		return False
 	prior, following = index.neighbors(snapshot)
-	return records_id(manifest.download.response.records) == snapshot.raw_content_id and snapshot.derived_verified(index.dependency(snapshot)) and derived_values_match(snapshot, prior, following)
+	return records_id(manifest.download.response.records) == (snapshot.original_content_id or snapshot.raw_content_id) and snapshot.derived_verified(index.dependency(snapshot)) and derived_values_match(snapshot, prior, following)

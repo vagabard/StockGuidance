@@ -78,6 +78,11 @@ def test_invalid_provider_responses_are_sanitized_failures(harness, calendar, pa
 		payload["next_url"] = 123
 	elif change == "bad-count":
 		payload["resultsCount"] = True
+	if change in {"bad-price", "nan-price", "negative-count", "fractional-count"}:
+		response = PolygonGroupedProvider(Transport(payload, status)).fetch(harness.source, calendar.session(date(2024, 7, 1)))
+		assert not response.records
+		assert len(response.bad_records) == 1
+		return
 	with pytest.raises(StageExecutionError) as error:
 		PolygonGroupedProvider(Transport(payload, status)).fetch(harness.source, calendar.session(date(2024, 7, 1)))
 	assert "fixture secret" not in str(error.value)

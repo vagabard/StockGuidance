@@ -28,7 +28,7 @@ class SourceManifest:
 
 
 def response_payload(response: ProviderResponse) -> dict[str, object]:
-	return {"state": response.state.value, "http_status": response.http_status, "provider_status": response.provider_status, "counts": dict(response.counts), "has_more": response.has_more, "evidence": response.evidence, "source_timestamps": dict(response.source_timestamps), "ignored_placeholders": list(response.ignored_placeholders), "records": [bar_payload(bar) for bar in response.records]}
+	return {"state": response.state.value, "http_status": response.http_status, "provider_status": response.provider_status, "counts": dict(response.counts), "has_more": response.has_more, "evidence": response.evidence, "source_timestamps": dict(response.source_timestamps), "ignored_placeholders": list(response.ignored_placeholders), "bad_records": [[ticker, [None if value is None else str(value) for value in values]] for ticker, values in response.bad_records], "records": [bar_payload(bar) for bar in response.records]}
 
 
 def decode_response(value: object) -> ProviderResponse:
@@ -47,7 +47,11 @@ def decode_response(value: object) -> ProviderResponse:
 	ignored = payload.get("ignored_placeholders", [])
 	if not isinstance(ignored, list) or any(not isinstance(ticker, str) for ticker in ignored):
 		raise ValueError("Invalid ignored placeholder metadata")
-	return ProviderResponse(ResponseState(text_field(payload, "state")), tuple(decode_bar(row) for row in rows), status, text_field(payload, "provider_status"), validated_counts, has_more, evidence, validated_timestamps, tuple(ignored))
+	bad_payload = payload.get("bad_records", [])
+	if not isinstance(bad_payload, list) or any(not isinstance(row, list) or len(row) != 2 or not isinstance(row[1], list) for row in bad_payload):
+		raise ValueError("Invalid bad-record metadata")
+	bad = tuple((row[0], tuple(row[1])) for row in bad_payload)
+	return ProviderResponse(ResponseState(text_field(payload, "state")), tuple(decode_bar(row) for row in rows), status, text_field(payload, "provider_status"), validated_counts, has_more, evidence, validated_timestamps, tuple(ignored), bad)
 
 
 class ManifestStore:
@@ -83,12 +87,9 @@ class ManifestStore:
 				if session_date in seen_dates:
 					raise ValueError("Duplicate source manifest session")
 				seen_dates.add(session_date)
-				manifest = self.load(source, allowed[session_date])
-				if manifest is None:
-					raise ValueError("Source manifest disappeared during inventory")
-				response = manifest.download.response
-				quality = EvidenceQuality.VERIFIED if response.state in {ResponseState.COMPLETE, ResponseState.NO_TRADING} else EvidenceQuality.UNVERIFIED
-				observations.append(LocalObservation(source, calendar_id, session_date, quality, response.evidence or f"Source manifest response state: {response.state.value}", True, manifest.download.available_at, manifest.content_id))
+				if decode_source(payload["source"]) != source or payload["calendar_id"] != calendar_id:
+					raise ValueError("Manifest inventory scope mismatch")
+				observations.append(LocalObservation(source, calendar_id, session_date, EvidenceQuality.UNVERIFIED, "Manifest metadata discovered; response validation deferred until import or explicit verification", True, datetime.fromisoformat(text_field(payload, "available_at")), text_field(payload, "content_id")))
 			except (OSError, TypeError, ValueError, KeyError) as error:
 				if session_date is not None and session_date in allowed and not any(item.session_date == session_date for item in observations):
 					observations.append(LocalObservation(source, calendar_id, session_date, EvidenceQuality.CORRUPT, "Source manifest or response content is corrupt", False))
@@ -97,6 +98,20 @@ class ManifestStore:
 
 	def path_for(self, source: SourceIdentity, session: TradingSession) -> Path:
 		return self.directory / data_configuration_key(source) / f"{session.session_date.isoformat()}.manifest.json"
+
+	def load_metadata(self, source: SourceIdentity, session: TradingSession) -> dict[str, object] | None:
+		path = self.path_for(source, session)
+		if not path.exists():
+			path = self.directory / source_key(source) / f"{session.session_date.isoformat()}.manifest.json"
+		try:
+			payload = mapping(json.loads(path.read_bytes()))
+		except FileNotFoundError:
+			return None
+		except (ValueError, TypeError):
+			raise InvalidManifest(f"Invalid manifest metadata for {session.session_date}") from None
+		if payload.get("schema_version") != 1 or payload.get("session_date") != session.session_date.isoformat() or payload.get("calendar_id") != session.calendar_id or payload.get("source") != asdict(source):
+			raise InvalidManifest(f"Invalid manifest metadata scope for {session.session_date}")
+		return payload
 
 	def _raw_path(self, source: SourceIdentity, identity: str) -> Path:
 		if len(identity) != 64 or any(character not in "0123456789abcdef" for character in identity):

@@ -9,6 +9,7 @@ from stockguidance.database.repositories.sessions import SessionQuery
 from stockguidance.market_data.legacy_derived import LegacyDerivedRow, derived_id
 from stockguidance.market_data.providers.contracts import DownloadedSession
 from stockguidance.market_data.records import DailyBar, records_id
+from stockguidance.market_data.quality import QualityRecord
 from stockguidance.validation.findings import ValidationFinding
 
 
@@ -35,6 +36,8 @@ class SessionSnapshot:
 	records: tuple[DailyBar, ...]
 	derived: tuple[LegacyDerivedRow, ...]
 	receipt: ImportReceipt | None
+	quality: tuple[QualityRecord, ...] = ()
+	original_content_id: str | None = None
 
 	def __post_init__(self) -> None:
 		require_positive_int(self.date_id, "snapshot date_id")
@@ -49,7 +52,7 @@ class SessionSnapshot:
 
 	@property
 	def raw_verified(self) -> bool:
-		return self.receipt is not None and self.receipt.raw_id == self.raw_content_id
+		return self.receipt is not None and self.receipt.raw_id == (self.original_content_id or self.raw_content_id)
 
 	@cached_property
 	def raw_content_id(self) -> str:
@@ -68,8 +71,8 @@ class SessionMetadata:
 	session: TradingSession
 	date_id: int
 	receipt: ImportReceipt | None
-	raw_count: int
-	derived_count: int
+	raw_count: int | None
+	derived_count: int | None
 	raw_keys: tuple[str, ...]
 
 	def __post_init__(self) -> None:
@@ -78,7 +81,7 @@ class SessionMetadata:
 			raise ValueError("Invalid session metadata session")
 		if self.receipt is not None and (not isinstance(self.receipt, ImportReceipt) or self.receipt.available_at < self.session.closes_at):
 			raise ValueError("Invalid session metadata receipt")
-		if type(self.raw_count) is not int or self.raw_count < 0 or type(self.derived_count) is not int or self.derived_count < 0:
+		if any(value is not None and (type(value) is not int or value < 0) for value in (self.raw_count, self.derived_count)):
 			raise ValueError("Invalid session metadata counts")
 		if not isinstance(self.raw_keys, tuple) or any(not isinstance(key, str) for key in self.raw_keys) or len(set(self.raw_keys)) != len(self.raw_keys):
 			raise ValueError("Invalid session metadata keys")
@@ -92,8 +95,11 @@ class DerivedUpdate:
 
 
 class MarketDataRepository(Protocol):
+	def reconcile_quality(self, query: SessionQuery) -> tuple[date, ...]: ...
+	def reconcile_quality_dependencies(self, query: SessionQuery, affected: frozenset[date]) -> tuple[date, ...]: ...
+	def scan_quality(self, query: SessionQuery) -> tuple[date, ...]: ...
 	def has_orphans(self, query: SessionQuery) -> bool: ...
-	def inspect_metadata(self, query: SessionQuery) -> tuple[SessionMetadata, ...]: ...
+	def inspect_metadata(self, query: SessionQuery, *, force_verify: bool = False) -> tuple[SessionMetadata, ...]: ...
 	def cleanup_placeholders(self, query: SessionQuery) -> tuple[date, ...]: ...
 	def inspect(self, query: SessionQuery) -> tuple[SessionSnapshot, ...]: ...
 	def inspect_integrity(self, query: SessionQuery) -> tuple[ValidationFinding, ...]: ...

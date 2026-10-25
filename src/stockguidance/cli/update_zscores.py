@@ -20,6 +20,7 @@ from stockguidance.market_data.providers.polygon import GROUPED_ENDPOINT, GROUPE
 from stockguidance.market_data.publication import DailyPublicationPolicy
 from stockguidance.workflows.update_zscores import ZScoreUpdateResult, ZScoreUpdateSettings, update_zscores
 from stockguidance.cli.zscore_args import parse_windows as _parse_windows
+from stockguidance.market_data.quality import HistoryMode, QualityPolicy
 
 
 def parse_windows(value: str) -> tuple[int, ...]:
@@ -29,6 +30,8 @@ def parse_windows(value: str) -> tuple[int, ...]:
 def parser() -> argparse.ArgumentParser:
 	arguments = argparse.ArgumentParser(description="Populate local verified rolling z-score materializations without provider access")
 	arguments.add_argument("--data-root", default="data")
+	arguments.add_argument("--quality-history", choices=("clean", "interpolated"), default="clean")
+	arguments.add_argument("--retrospective-quality", action="store_true", help="Permit future-informed repairs and flag affected results with FUTURE_LEAKAGE")
 	arguments.add_argument("--dbinfo-file", default="dbinfo.id")
 	arguments.add_argument("--adjustment", choices=("adjusted", "unadjusted"), default="adjusted")
 	arguments.add_argument("--windows", required=True, type=parse_windows, help="Distinct rolling windows, for example 20,60")
@@ -99,10 +102,11 @@ def assemble_and_update_zscores(arguments: argparse.Namespace) -> ZScoreUpdateRe
 	calendar = _calendar(arguments, clock, data_configuration.calendar_id)
 	boundary = _boundary(arguments, source, calendar, clock, table_names, connect)
 	publication = DailyPublicationPolicy(timedelta(minutes=arguments.publication_delay_minutes), arguments.publication_evidence)
-	settings = ZScoreUpdateSettings(arguments.start_date, arguments.end_date, arguments.windows, publication, arguments.initialize_schema)
+	policy = QualityPolicy(HistoryMode(arguments.quality_history), arguments.retrospective_quality)
+	settings = ZScoreUpdateSettings(arguments.start_date, arguments.end_date, arguments.windows, publication, arguments.initialize_schema, policy)
 	if settings.initialize_schema:
 		initialize_zscore_schema(source, connect, settings.windows, table_names)
-	repository = MySQLZScoreRepository(source, connect, table_names, ManifestStore(source.data_root))
+	repository = MySQLZScoreRepository(source, connect, table_names, ManifestStore(source.data_root), quality_policy=policy)
 	return update_zscores(source, settings, boundary, calendar, repository, clock, initialized_schema=settings.initialize_schema)
 
 

@@ -1,4 +1,5 @@
 from collections.abc import Sequence
+from dataclasses import replace
 from datetime import date
 
 from stockguidance.database.dates import normalize_date_id, normalize_session_date
@@ -10,6 +11,9 @@ from stockguidance.database.repositories.validation import DatabaseInspection, S
 from stockguidance.database.table_names import TableNames, TableRole, quote_identifier
 from stockguidance.market_data.legacy_derived import DERIVED_COLUMNS, LegacyDerivedRow
 from stockguidance.market_data.records import DailyBar
+from stockguidance.market_data.records import records_id
+from stockguidance.database.repositories.quality import read_quality
+from stockguidance.market_data.quality import QualityPolicy, HistoryMode, decode_values
 from stockguidance.validation.findings import FindingCategory, ValidationCheck, ValidationFinding
 
 
@@ -71,12 +75,22 @@ def inspect_rows(cursor: Cursor, query: SessionQuery, table_names: TableNames) -
 			findings.append(ValidationFinding(FindingCategory.INVALID, ValidationCheck.IMPORT, "Invalid import receipt identity or availability", session_date))
 	sessions = {session.session_date: session for session in query.sessions}
 	snapshots: list[SessionSnapshot] = []
+	quality = read_quality(cursor, tuple(ids))
+	findings = [replace(finding, category=FindingCategory.NOT_ASSESSED, detail="Classified bad source row retained with quality provenance") if finding.check is ValidationCheck.RAW_VALUES and tuple(finding.record_ids) in quality else finding for finding in findings]
 	for date_id, session_date in ids.items():
 		snapshot_receipt = receipts.get(session_date)
 		if snapshot_receipt is not None and snapshot_receipt.available_at < sessions[session_date].closes_at:
 			findings.append(ValidationFinding(FindingCategory.INVALID, ValidationCheck.IMPORT, "Daily receipt predates the session close", session_date))
 			snapshot_receipt = None
-		snapshots.append(SessionSnapshot(sessions[session_date], date_id, tuple(raw.get(date_id, {}).values()), tuple(derived.get(date_id, {}).values()), snapshot_receipt))
+		quality_tickers = {record.observation.ticker for (quality_date_id, _), record in quality.items() if quality_date_id == date_id}
+		originals = tuple(bar for bar in raw.get(date_id, {}).values() if bar.ticker not in quality_tickers)
+		bars = {bar.ticker: bar for bar in originals}
+		flags = tuple(record for (quality_date_id, _), record in quality.items() if quality_date_id == date_id)
+		for record in flags:
+			effective, _ = record.usable(QualityPolicy(HistoryMode.INTERPOLATED), query.as_of)
+			if effective is not None:
+				bars[record.observation.ticker] = decode_values(record.observation.ticker, effective)
+		snapshots.append(SessionSnapshot(sessions[session_date], date_id, tuple(bars.values()), tuple(derived.get(date_id, {}).values()), snapshot_receipt, flags, records_id(originals) if flags else None))
 	return DatabaseInspection(tuple(snapshots), tuple(findings), tuple(SessionRecordCounts(session_date, count[0], count[1]) for session_date, count in counts.items()), tuple(sorted(ticker_symbols.items())))
 
 

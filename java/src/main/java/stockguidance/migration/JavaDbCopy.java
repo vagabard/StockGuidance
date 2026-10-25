@@ -22,7 +22,9 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
 public final class JavaDbCopy implements AutoCloseable {
-    public record RawRow(long tickerId, long dateId, Double close) { }
+    public record RawRow(long tickerId, long dateId, Double close, org.apache.fory.json.JsonObject quality) {
+        public RawRow(long tickerId, long dateId, Double close) { this(tickerId, dateId, close, null); }
+    }
     public record DeltaRow(long tickerId, long dateId, Double closeRatioToPrior) { }
     public record SessionData(Long dateId, JavaZScoreCandidate.Evidence evidence,
                               Map<Long, RawRow> raw, Map<Long, DeltaRow> deltas) {
@@ -189,8 +191,9 @@ public final class JavaDbCopy implements AutoCloseable {
                 deltas.put(date, new HashMap<>());
             }
             if (!byId.isEmpty()) {
+                var quality = manifest.operational() ? RowQuality.load(connection, List.copyOf(byId.keySet())) : Map.<RowQuality.Key, org.apache.fory.json.JsonObject>of();
                 readValues(names.prices(), "close", byId, (date, tickerId, dateId, value) -> {
-                    if (raw.get(date).putIfAbsent(tickerId, new RawRow(tickerId, dateId, value)) != null) {
+                    if (raw.get(date).putIfAbsent(tickerId, new RawRow(tickerId, dateId, value, quality.get(new RowQuality.Key(dateId, tickerId)))) != null) {
                         throw new IllegalArgumentException("Duplicate raw input");
                     }
                 });

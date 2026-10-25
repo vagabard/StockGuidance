@@ -5,12 +5,14 @@ from stockguidance.config.validation import require_positive_int
 from stockguidance.database.repositories.sessions import SessionQuery
 from stockguidance.market_data.closes import CloseIssue, CloseObservation
 from stockguidance.market_data.identity import content_id
+from stockguidance.market_data.quality import QualityPolicy
 
 
 @dataclass(frozen=True)
 class CloseQuery:
 	scope: SessionQuery
 	ticker_ids: tuple[int, ...]
+	quality_policy: QualityPolicy = QualityPolicy()
 
 	def __post_init__(self) -> None:
 		if not isinstance(self.scope, SessionQuery) or not isinstance(self.ticker_ids, tuple) or not self.ticker_ids or len(set(self.ticker_ids)) != len(self.ticker_ids):
@@ -45,8 +47,9 @@ class CloseData:
 	def revision(self) -> str:
 		return content_id({
 			"source": asdict(self.query.scope.boundary.source),
-			"observations": sorted((item.timing.session.session_date.isoformat(), item.ticker_id, item.close, item.timing.available_at.isoformat(), item.revision) for item in self.observations),
-			"issues": sorted((item.session.session_date.isoformat(), item.ticker_id, item.state.value) for item in self.issues),
+			"observations": sorted((item.timing.session.session_date.isoformat(), item.ticker_id, item.close, item.timing.available_at.isoformat(), item.revision, int(item.quality), item.gap_length, item.provenance) if item.quality else (item.timing.session.session_date.isoformat(), item.ticker_id, item.close, item.timing.available_at.isoformat(), item.revision) for item in self.observations),
+			"issues": sorted((item.session.session_date.isoformat(), item.ticker_id, item.state.value, int(item.quality), item.gap_length, item.provenance) if item.quality else (item.session.session_date.isoformat(), item.ticker_id, item.state.value) for item in self.issues),
+			"quality_policy": self.query.quality_policy.identity,
 		})
 
 

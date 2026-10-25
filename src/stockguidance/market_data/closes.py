@@ -5,6 +5,7 @@ import math
 from stockguidance.calendar.sessions import TradingSession
 from stockguidance.config.validation import require_enum, require_positive_int, require_text
 from stockguidance.market_data.availability import ObservationTiming
+from stockguidance.market_data.quality import QualityFlag
 
 
 class PriceState(StrEnum):
@@ -27,6 +28,9 @@ class CloseObservation:
 	close: float
 	timing: ObservationTiming
 	revision: str
+	quality: QualityFlag = QualityFlag.CLEAN
+	gap_length: int = 0
+	provenance: tuple[str, ...] = ()
 
 	def __post_init__(self) -> None:
 		require_positive_int(self.ticker_id, "close ticker_id")
@@ -42,6 +46,9 @@ class CloseIssue:
 	session: TradingSession
 	state: PriceState
 	detail: str
+	quality: QualityFlag = QualityFlag.CLEAN
+	gap_length: int = 0
+	provenance: tuple[str, ...] = ()
 
 	def __post_init__(self) -> None:
 		require_positive_int(self.ticker_id, "unavailable ticker_id")

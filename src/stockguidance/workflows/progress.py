@@ -5,6 +5,7 @@ from collections.abc import Iterator
 from typing import TextIO
 from collections.abc import Callable
 from typing import TypeVar
+from threading import Event, Thread
 
 T = TypeVar("T")
 
@@ -31,6 +32,12 @@ class ProgressReporter:
 			return
 		started = perf_counter()
 		self.message(f"{name}...")
+		stopped = Event()
+		def heartbeat() -> None:
+			while not stopped.wait(15):
+				self.message(f"{name} still running; elapsed {perf_counter() - started:.1f}s")
+		worker = Thread(target=heartbeat, daemon=True)
+		worker.start()
 		try:
 			yield
 		except Exception as error:
@@ -38,6 +45,9 @@ class ProgressReporter:
 			raise
 		else:
 			self.message(f"{name} completed in {perf_counter() - started:.3f}s")
+		finally:
+			stopped.set()
+			worker.join()
 
 	def sessions(self, completed: int, total: int, *, downloaded: int = 0, failures: int = 0, started: float | None = None) -> None:
 		if not self.enabled:

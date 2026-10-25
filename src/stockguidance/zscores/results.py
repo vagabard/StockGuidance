@@ -5,6 +5,7 @@ from enum import IntEnum
 from stockguidance.calendar.sessions import TradingSession
 from stockguidance.config.validation import require_enum, require_positive_int, require_text
 from stockguidance.zscores.specification import ZScoreSpecification
+from stockguidance.market_data.quality import QualityFlag
 
 
 class ZScoreStatus(IntEnum):
@@ -24,6 +25,9 @@ class ZScoreRow:
 	score: float | None
 	status: ZScoreStatus
 	reason: str
+	quality: QualityFlag = QualityFlag.CLEAN
+	gap_length: int = 0
+	provenance: tuple[str, ...] = ()
 
 	def __post_init__(self) -> None:
 		if type(self.window) is not int or self.window < 2:

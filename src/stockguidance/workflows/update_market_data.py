@@ -43,6 +43,8 @@ class UpdateSettings:
 	corrections: CorrectionPolicy
 	repair_plan: RepairPlan | None = None
 	discovery: CoverageDiscoveryResult | None = None
+	scan_quality: bool = False
+	force_verify: bool = False
 
 	def __post_init__(self) -> None:
 		require_date(self.start, "update start")
@@ -74,7 +76,7 @@ def update_market_data(source: SourceConfig, settings: UpdateSettings, boundary:
 			capability_resolved=capability_resolved,
 		)
 	request = MarketDataRequest(source.identity, settings.start, settings.end, started)
-	reader = SnapshotCoverageReader(repository)
+	reader = SnapshotCoverageReader(repository, force_verify=settings.force_verify)
 	try:
 		plan = reporter.measure("plan coverage and read session metadata", lambda: plan_coverage(
 			source, request, boundary, calendar, settings.publication, reader, clock,
@@ -89,6 +91,9 @@ def update_market_data(source: SourceConfig, settings: UpdateSettings, boundary:
 	except Exception:
 		raise StageExecutionError(_failure(FailureCode.STORAGE)) from None
 	store = ManifestStore(source.data_root)
+	quality_changed = ()
+	if settings.scan_quality and plan.query is not None:
+		quality_changed = reporter.measure("scan existing database quality", lambda: repository.scan_quality(plan.query))
 	failures: list[StageFailure] = []
 	failed_dates: set[date] = set()
 	stale_refreshes: set[date] = set()
@@ -97,16 +102,22 @@ def update_market_data(source: SourceConfig, settings: UpdateSettings, boundary:
 		failures.append(_failure(FailureCode.STORAGE))
 		failed_dates.update(item.session.session_date for item in plan.sessions)
 	try:
-		force_refresh_dates = frozenset(repair.session_date for repair in settings.repair_plan.items if repair.action is RepairAction.REFRESH_SOURCE) if settings.repair_plan is not None else frozenset()
+		force_refresh_dates = (frozenset(repair.session_date for repair in settings.repair_plan.items if repair.action is RepairAction.REFRESH_SOURCE) if settings.repair_plan is not None else frozenset()) | frozenset(quality_changed)
 		work = reporter.measure("build update plan", lambda: plan_updates(plan, reader.metadata, store, settings.corrections, started, force_refresh_dates))
 	except Exception:
 		raise StageExecutionError(_failure(FailureCode.STORAGE)) from None
-	target_query = _target_query(plan.boundary, plan.query, tuple(item.session for item in work), started)
+	target_query = _target_query(plan.boundary, plan.query, tuple(item.session for item in work if not item.needs_download and not (item.refresh_blocked and item.manifest is None)), started)
+	reporter.message(f"update plan: {len(plan.sessions)} sessions; {len(work)} affected; {sum(item.needs_download for item in work)} downloads; {0 if target_query is None else len(target_query.sessions)} detailed reads")
 	try:
+		target_quality_changed: tuple[date, ...] = ()
+		if target_query is not None:
+			target_quality_changed = reporter.measure("classify targeted records", lambda: repository.reconcile_quality(target_query))
 		target_snapshots = () if target_query is None else reporter.measure("read targeted session records", lambda: repository.inspect(target_query))
 	except Exception:
 		raise StageExecutionError(_failure(FailureCode.STORAGE)) from None
 	by_date = {snapshot.session.session_date: snapshot for snapshot in target_snapshots}
+	metadata_by_date = {metadata.session.session_date: metadata for metadata in reader.metadata}
+	changed_dates: set[date] = set()
 	session_started = perf_counter()
 	for index, item in enumerate(work, 1):
 		try:
@@ -129,7 +140,11 @@ def update_market_data(source: SourceConfig, settings: UpdateSettings, boundary:
 				continue
 			query = SessionQuery(plan.boundary, plan.query.sessions, decision_cutoff(clock)) if plan.query is not None else None
 			if query is not None:
-				import_if_needed(repository, query, manifest.download, by_date.get(item.session.session_date))
+				metadata = metadata_by_date.get(item.session.session_date)
+				response = manifest.download.response
+				trusted_unchanged = item.needs_download and not settings.force_verify and not response.bad_records and metadata is not None and metadata.receipt is not None and metadata.receipt.raw_id == records_id(response.records) and (metadata.raw_count is None or (metadata.raw_count == len(response.records) and metadata.raw_keys == tuple(sorted(bar.ticker for bar in response.records))))
+				if not trusted_unchanged and import_if_needed(repository, query, manifest.download, by_date.get(item.session.session_date)):
+					changed_dates.add(item.session.session_date)
 				store.mark_imported(manifest)
 		except Exception as error:
 			failures.append(error.failure if isinstance(error, StageExecutionError) else _failure(FailureCode.STORAGE, item.session.session_date))
@@ -137,12 +152,17 @@ def update_market_data(source: SourceConfig, settings: UpdateSettings, boundary:
 		if reporter.enabled and (index == 1 or index == len(work) or index % 25 == 0):
 			reporter.sessions(index, len(work), downloaded=downloaded, failures=len(failures), started=session_started)
 	scope = dependency_scope(plan, calendar, settings.publication, decision_cutoff(clock))
-	affected_dates = {item.session.session_date for item in work} | failed_dates
+	affected_dates = changed_dates | (failed_dates - stale_refreshes) | set(quality_changed) | set(target_quality_changed) | {item.session.session_date for item in work if not item.needs_download and not (item.refresh_blocked and item.manifest is None)}
+	if scope.query is not None and (downloaded or target_quality_changed or quality_changed):
+		quality_dependencies = reporter.measure("refresh interpolation dependencies", lambda: repository.reconcile_quality_dependencies(scope.query, frozenset(affected_dates)))
+		affected_dates.update(quality_dependencies)
 	final_query = _dependency_query(plan.boundary, scope.query, affected_dates, decision_cutoff(clock))
-	full_verify = len(plan.sessions) <= _FULL_VERIFY_SESSION_LIMIT
+	full_verify = settings.force_verify or len(plan.sessions) <= _FULL_VERIFY_SESSION_LIMIT
 	if full_verify and scope.query is not None:
 		final_query = scope.query
 	try:
+		if final_query is not None:
+			reporter.measure("classify affected records and dependencies", lambda: repository.reconcile_quality(final_query))
 		snapshots = () if final_query is None else reporter.measure("read affected records and dependencies", lambda: repository.inspect(final_query))
 		eligible = tuple(snapshot for snapshot in snapshots if snapshot.receipt is not None and snapshot.receipt.available_at <= clock.now())
 		affected_sequences = {session.sequence for session in scope.query.sessions if session.session_date in affected_dates} if scope.query is not None else set()
@@ -160,7 +180,7 @@ def update_market_data(source: SourceConfig, settings: UpdateSettings, boundary:
 	completed = decision_cutoff(clock)
 	final_request = MarketDataRequest(source.identity, request.start, request.end, completed)
 	try:
-		final_reader = SnapshotCoverageReader(repository)
+		final_reader = SnapshotCoverageReader(repository, force_verify=settings.force_verify)
 		final_plan = plan_coverage(
 			source, final_request, boundary, calendar, settings.publication, final_reader, clock,
 			fetchable_start=None if capability is None else capability.fetchable_start,
@@ -191,9 +211,15 @@ def update_market_data(source: SourceConfig, settings: UpdateSettings, boundary:
 		state, detail = assessment.state, assessment.detail
 		if assessment.expected_available_at is not None and assessment.expected_available_at <= completed and assessment.session.closes_at <= completed:
 			try:
-				manifest = store.load(source.identity, assessment.session)
 				snapshot = by_date.get(assessment.session.session_date)
 				metadata = metadata_by_date.get(assessment.session.session_date)
+				if assessment.session.session_date in stale_refreshes and assessment.session.session_date not in affected_dates and metadata is not None and metadata.raw_count is None:
+					assessments.append(SessionCoverage(assessment.session, CoverageState.UNVERIFIED, "Database completion is retained, but scheduled provider refresh could not be authorized"))
+					continue
+				if assessment.session.session_date not in affected_dates and metadata is not None and metadata.raw_count is None and metadata.receipt is not None and metadata.receipt.available_at <= completed and metadata.receipt.derived_content_id is not None and metadata.receipt.derived_dependency_id is not None:
+					assessments.append(SessionCoverage(assessment.session, CoverageState.COMPLETE, "Database completion receipt verified"))
+					continue
+				manifest = store.load(source.identity, assessment.session)
 				if assessment.session.session_date not in affected_dates and _trusted_complete(source, assessment, manifest, metadata, completed):
 					findings = ()
 				else:

@@ -34,11 +34,20 @@ public final class ArchiveCandidateReader {
     }
 
     public static SessionArchive read(Path path, LocalDate session) {
+        return read(path, session, false);
+    }
+
+    public static SessionArchive readForImport(Path path, LocalDate session) {
+        return read(path, session, true);
+    }
+
+    private static SessionArchive read(Path path, LocalDate session, boolean qualityAware) {
         if (path == null || session == null) {
             throw new IllegalArgumentException("Archive path and session are required");
         }
         MessageDigest digest = sha256();
         Map<String, ValidationContent.RawBar> bars = new TreeMap<>();
+        Map<String, List<BigDecimal>> badRecords = new TreeMap<>();
         try (InputStream input = Files.newInputStream(path)) {
             LineReader lines = new LineReader(input, digest);
             byte[] line;
@@ -46,7 +55,10 @@ public final class ArchiveCandidateReader {
                 if (line.length == 0) {
                     throw new IllegalArgumentException("Archive record is empty");
                 }
-                ValidationContent.RawBar bar = decode(parse(line), session);
+                RawArchiveRecord source = parse(line);
+                ValidationContent.RawBar bar = decode(source, session, qualityAware);
+                List<BigDecimal> original = Arrays.asList(source.o, source.h, source.l, source.c, source.v, source.vw, source.n);
+                if (qualityAware && !RowQuality.invalid(original).isEmpty()) badRecords.put(bar.ticker(), original);
                 if (bars.putIfAbsent(bar.ticker(), bar) != null) {
                     throw new IllegalArgumentException("Duplicate archive ticker");
                 }
@@ -58,7 +70,9 @@ public final class ArchiveCandidateReader {
             throw new IllegalArgumentException("Empty archive does not establish no trading");
         }
         String fileSha256 = hex(digest.digest());
-        return new SessionArchive(path, session, fileSha256, Map.copyOf(bars), recordsId(bars));
+        Map<String, ValidationContent.RawBar> valid = new TreeMap<>(bars);
+        if (qualityAware) valid.keySet().removeAll(badRecords.keySet());
+        return new SessionArchive(path, session, fileSha256, Map.copyOf(bars), recordsId(valid), Map.copyOf(badRecords));
     }
 
     public static final class RawArchiveRecord {
@@ -69,7 +83,7 @@ public final class ArchiveCandidateReader {
         public BigDecimal c;
         public BigDecimal v;
         public BigDecimal vw;
-        public Long n;
+        public BigDecimal n;
         public Long t;
 
         public RawArchiveRecord() {
@@ -102,7 +116,7 @@ public final class ArchiveCandidateReader {
                     case "c" -> row.c = readDecimal(reader);
                     case "v" -> row.v = readDecimal(reader);
                     case "vw" -> row.vw = readDecimal(reader);
-                    case "n" -> row.n = readLong(reader);
+                    case "n" -> row.n = readDecimal(reader);
                     case "t" -> row.t = readLong(reader);
                     default -> reader.skipValue();
                 }
@@ -221,7 +235,7 @@ public final class ArchiveCandidateReader {
         return value.signum() == 0 ? "0" : value.stripTrailingZeros().toPlainString();
     }
 
-    private static ValidationContent.RawBar decode(RawArchiveRecord row, LocalDate session) {
+    private static ValidationContent.RawBar decode(RawArchiveRecord row, LocalDate session, boolean qualityAware) {
         if (row == null) {
             throw new IllegalArgumentException("Archive record must be an object");
         }
@@ -235,6 +249,10 @@ public final class ArchiveCandidateReader {
         if (!Instant.ofEpochMilli(row.t).atZone(EXCHANGE_ZONE).toLocalDate().equals(session)) {
             throw new IllegalArgumentException("Archive timestamp and session disagree");
         }
+        Long count = null;
+        try { if (row.n != null) count = row.n.longValueExact(); }
+        catch (ArithmeticException error) { if (!qualityAware) throw new IllegalArgumentException("Invalid transactions", error); }
+        if (qualityAware) return new ValidationContent.RawBar(ticker, row.o, row.h, row.l, row.c, row.v, row.vw, count);
         BigDecimal open = price(row.o, "o");
         BigDecimal high = price(row.h, "h");
         BigDecimal low = price(row.l, "l");
@@ -244,7 +262,7 @@ public final class ArchiveCandidateReader {
             throw new IllegalArgumentException("Invalid archive volume");
         }
         BigDecimal vwap = row.vw == null ? null : price(row.vw, "vw");
-        Long transactions = row.n;
+        Long transactions = count;
         if (transactions != null && transactions < 0) {
             throw new IllegalArgumentException("Invalid transactions");
         }
@@ -290,7 +308,10 @@ public final class ArchiveCandidateReader {
     }
 
     public record SessionArchive(Path path, LocalDate session, String fileSha256,
-                                 Map<String, ValidationContent.RawBar> bars, String recordsId) {
+                                 Map<String, ValidationContent.RawBar> bars, String recordsId, Map<String, List<BigDecimal>> badRecords) {
+        public SessionArchive(Path path, LocalDate session, String fileSha256, Map<String, ValidationContent.RawBar> bars, String recordsId) {
+            this(path, session, fileSha256, bars, recordsId, Map.of());
+        }
     }
 
     private static final class LineReader {

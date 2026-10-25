@@ -56,6 +56,7 @@ def build_workload(source: SourceConfig, names: TableNames, calendar: SessionCal
 		"source_key": data_configuration_key(source.data_configuration), "source": {"archive_source": asdict(source.identity)},
 		"authoritative_registry": {"schema_version": 1, "tables": names.tables(), "zscore_templates": names.templates()},
 		"input_sessions": [session.session_date.isoformat() for session in raw_sessions],
+		"session_sequences": {session.session_date.isoformat(): session.sequence for session in raw_sessions},
 		"refreshed_sessions": [session.session_date.isoformat() for session in refreshed_sessions],
 		"targets": target_entries, "mappings": {"ticker_mappings": []},
 		"availability": {session.session_date.isoformat(): availability[session.session_date] for session in raw_sessions},
@@ -115,6 +116,11 @@ def run_java_stage(
 		inputs = tuple(session for session in context.raw_sessions if first <= session.session_date <= last)
 		batch_raw_dates = tuple(session for session in inputs if session.session_date in source_result.refreshed_dates and session.session_date not in processed)
 		workload = build_workload(context.source, context.names, context.calendar, inputs, batch, source_result.availability, batch_raw_dates)
+		workload["quality_history"] = getattr(arguments, "quality_history", "clean")
+		workload["retrospective_quality"] = getattr(arguments, "retrospective_quality", False)
+		workload["scan_quality"] = getattr(arguments, "scan_quality", False)
+		workload.pop("manifest_id", None)
+		workload["manifest_id"] = content_id(workload)
 		path = checkpoint / f"workload-{workload['manifest_id']}.json"
 		atomic_write(path, encode_json(workload))
 		report = execute_java(arguments, command, path, checkpoint)

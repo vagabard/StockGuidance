@@ -42,9 +42,9 @@ def _query(harness, calendar, *days):
 def test_zscore_schema_is_explicit_and_keeps_updater_checks_independent(harness):
 	registry = load_table_names()
 	statements = zscore_schema_statements(registry, (2, 20))
-	assert len(statements) == 6
-	assert all("FLOAT NULL" in statement or "status_counts" in statement for statement in statements[2:])
-	assert all("PRIMARY KEY (date_id, ticker_id)" in statement for statement in statements[2:])
+	assert len(statements) == 10
+	assert all("FLOAT NULL" in statement or "status_counts" in statement for statement in statements[6:])
+	assert all("PRIMARY KEY (date_id, ticker_id)" in statement for statement in statements[6:])
 
 	initialize_zscore_schema(harness.source, harness.database, (2, 20), registry)
 	tables = {row[0] for row in harness.database.sql("SELECT name FROM sqlite_master WHERE type = 'table'")}

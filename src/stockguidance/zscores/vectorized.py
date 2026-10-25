@@ -30,6 +30,9 @@ def calculate_zscores_vectorized(specification: ZScoreSpecification, input_data:
 		raise ValueError("Vectorized calculation requires z-score specification and input contracts")
 	if specification.family is not input_data.family:
 		raise ValueError("z-score specification and input families must match")
+	if any(observation.quality for series in input_data.tickers for observation in series.observations):
+		from stockguidance.zscores.calculation import calculate_zscores
+		return calculate_zscores(specification, input_data)
 	rows = []
 	sequence_indexes = {session.sequence: index for index, session in enumerate(input_data.sessions)}
 	dependencies = input_data.dependency_sequences

@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from stockguidance.market_data.quality import QualityPolicy
 from enum import StrEnum
 from typing import Final
 
@@ -24,6 +25,7 @@ class ZScoreSpecification:
 	calculation_version: str = CALCULATION_VERSION
 	precision: str = FLOAT32_PRECISION
 	delta_definition: str = "not_applicable"
+	quality_policy: QualityPolicy = QualityPolicy()
 
 	def __post_init__(self) -> None:
 		require_enum(self.family, ZScoreFamily, "z-score family")

@@ -5,6 +5,7 @@ from enum import StrEnum
 from stockguidance.calendar.sessions import TradingSession
 from stockguidance.config.validation import require_enum, require_positive_int
 from stockguidance.zscores.specification import ZScoreFamily
+from stockguidance.market_data.quality import QualityFlag
 
 
 class InputState(StrEnum):
@@ -27,6 +28,9 @@ class ZScoreObservation:
 	value: object | None = None
 	state: InputState = InputState.AVAILABLE
 	actual_available: bool = True
+	quality: QualityFlag = QualityFlag.CLEAN
+	gap_length: int = 0
+	provenance: tuple[str, ...] = ()
 
 	def __post_init__(self) -> None:
 		require_enum(self.state, InputState, "z-score input state")

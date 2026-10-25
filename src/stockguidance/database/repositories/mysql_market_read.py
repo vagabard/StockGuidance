@@ -8,7 +8,10 @@ from stockguidance.database.repositories.mysql_sessions import Cursor
 from stockguidance.database.repositories.sessions import SessionQuery
 from stockguidance.database.table_names import TableNames, TableRole, quote_identifier
 from stockguidance.market_data.legacy_derived import DERIVED_COLUMNS, LegacyDerivedRow
-from stockguidance.market_data.records import DailyBar, count_value, decimal_price, decimal_quantity, decimal_vwap, is_non_trading_placeholder
+from stockguidance.market_data.records import DailyBar, count_value, decimal_price, decimal_quantity, decimal_vwap
+from stockguidance.market_data.records import records_id
+from stockguidance.market_data.quality import QualityPolicy, HistoryMode, decode_values, invalid_fields
+from stockguidance.database.repositories.quality import read_quality
 
 
 def _optional_text(value: object) -> str | None:
@@ -49,13 +52,16 @@ def _dates(cursor: Cursor, query: SessionQuery, table_names: TableNames) -> dict
 	placeholders = ",".join("%s" for _ in dates)
 	cursor.execute(f"SELECT id, transaction_date FROM {quote_identifier(table_names.table(TableRole.SESSIONS))} WHERE transaction_date IN ({placeholders}) ORDER BY transaction_date", dates)
 	ids: dict[int, date] = {}
+	seen_dates: set[date] = set()
+	allowed_dates = set(dates)
 	for row in cursor.fetchall():
 		if len(row) != 2:
 			raise ValueError("Invalid date layout")
 		date_id, session_date = normalize_date_id(row[0]), normalize_session_date(row[1])
-		if date_id in ids or session_date in ids.values() or session_date not in dates:
+		if date_id in ids or session_date in seen_dates or session_date not in allowed_dates:
 			raise ValueError("Duplicate or out-of-scope date mapping")
 		ids[date_id] = session_date
+		seen_dates.add(session_date)
 	return ids
 
 
@@ -65,21 +71,29 @@ def _receipts(cursor: Cursor, dates: tuple[date, ...], table_names: TableNames) 
 	placeholders = ",".join("%s" for _ in dates)
 	cursor.execute(f"SELECT session_date, raw_id, available_at, derived_dependency_id, derived_content_id FROM {quote_identifier(table_names.table(TableRole.IMPORTS))} WHERE session_date IN ({placeholders})", dates)
 	receipts: dict[date, ImportReceipt] = {}
+	allowed_dates = set(dates)
 	for row in cursor.fetchall():
 		session_date, receipt = decode_receipt(row)
-		if session_date in receipts or session_date not in dates:
+		if session_date in receipts or session_date not in allowed_dates:
 			raise ValueError("Invalid receipt scope or timestamp")
 		receipts[session_date] = receipt
 	return receipts
 
 
-def read_metadata(cursor: Cursor, query: SessionQuery, table_names: TableNames) -> tuple[SessionMetadata, ...]:
+def read_metadata(cursor: Cursor, query: SessionQuery, table_names: TableNames, *, force_verify: bool = False) -> tuple[SessionMetadata, ...]:
 	ids = _dates(cursor, query, table_names)
 	by_date = {session.session_date: session for session in query.sessions}
 	receipts = _receipts(cursor, tuple(by_date), table_names)
+	requested_dates = tuple(by_date)
+	date_placeholders = ",".join("%s" for _ in requested_dates)
+	cursor.execute(f"SELECT session_date FROM stockguidance_daily_import_in_progress WHERE session_date IN ({date_placeholders})", requested_dates)
+	for row in cursor.fetchall():
+		receipts.pop(normalize_session_date(row[0]), None)
 	date_ids = tuple(ids)
 	if not date_ids:
 		return ()
+	if len(query.sessions) > 32 and not force_verify:
+		return tuple(SessionMetadata(by_date[session_date], date_id, receipts.get(session_date), None, None, ()) for date_id, session_date in ids.items())
 	placeholders = ",".join("%s" for _ in date_ids)
 	counts: dict[int, list[int]] = {date_id: [0, 0] for date_id in date_ids}
 	for index, role in enumerate((TableRole.PRICES, TableRole.DELTAS)):
@@ -139,15 +153,24 @@ def read_snapshots(cursor: Cursor, query: SessionQuery, table_names: TableNames)
 		if ticker_id in labels:
 			raise ValueError("Duplicate ticker mapping")
 		labels[ticker_id] = row[1]
-	cursor.execute(f"SELECT date_id, ticker_id, open, high, low, close, volume, vwap, transactions FROM {quote_identifier(table_names.table(TableRole.PRICES))} WHERE date_id IN ({id_placeholders}) ORDER BY date_id, ticker_id", date_ids)
 	raw: dict[int, list[DailyBar]] = {}
+	originals: dict[int, list[DailyBar]] = {}
+	quality = read_quality(cursor, date_ids)
+	cursor.execute(f"SELECT date_id, ticker_id, open, high, low, close, volume, vwap, transactions FROM {quote_identifier(table_names.table(TableRole.PRICES))} WHERE date_id IN ({id_placeholders}) ORDER BY date_id, ticker_id", date_ids)
 	for row in cursor.fetchall():
 		if len(row) != 9 or normalize_date_id(row[1]) not in labels:
 			raise ValueError("Invalid raw ticker mapping")
-		if is_non_trading_placeholder(tuple(row[2:])):
+		date_id, ticker_id = normalize_date_id(row[0]), normalize_date_id(row[1])
+		record = quality.get((date_id, ticker_id))
+		if record is not None or invalid_fields(tuple(row[2:])):
+			if record is not None:
+				effective, _ = record.usable(QualityPolicy(HistoryMode.INTERPOLATED), query.as_of)
+				if effective is not None:
+					raw.setdefault(date_id, []).append(decode_values(labels[ticker_id], effective))
 			continue
 		date_id, bar = decode_raw_row((row[0], labels[normalize_date_id(row[1])], *row[2:]))
 		raw.setdefault(date_id, []).append(bar)
+		originals.setdefault(date_id, []).append(bar)
 	cursor.execute(f"SELECT date_id, ticker_id, " + ", ".join(DERIVED_COLUMNS) + f" FROM {quote_identifier(table_names.table(TableRole.DELTAS))} WHERE date_id IN ({id_placeholders}) ORDER BY date_id, ticker_id", date_ids)
 	derived: dict[int, list[LegacyDerivedRow]] = {}
 	for row in cursor.fetchall():
@@ -162,7 +185,8 @@ def read_snapshots(cursor: Cursor, query: SessionQuery, table_names: TableNames)
 		bars, rows = tuple(raw.get(date_id, [])), tuple(derived.get(date_id, []))
 		if _duplicates(bars, rows):
 			raise ValueError("Duplicate database record keys")
-		snapshots.append(SessionSnapshot(by_date[session_date], date_id, bars, rows, receipts.get(session_date)))
+		flags = tuple(record for (quality_date_id, _), record in quality.items() if quality_date_id == date_id)
+		snapshots.append(SessionSnapshot(by_date[session_date], date_id, bars, rows, receipts.get(session_date), flags, records_id(tuple(originals.get(date_id, ()))) if flags else None))
 	return tuple(snapshots)
 
 

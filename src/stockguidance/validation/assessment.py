@@ -41,14 +41,15 @@ def assess_session(source: SourceIdentity, item: SessionUpdate, manifest: Source
 		add(FindingCategory.MISSING, ValidationCheck.SESSION, "Expected published session has no usable database mapping or records")
 		return tuple(findings)
 	raw = {bar.ticker for bar in snapshot.records}
+	quality_keys = {record.observation.ticker for record in snapshot.quality}
 	if manifest is not None and manifest.source == source:
 		expected = {bar.ticker for bar in manifest.download.response.records}
-		missing, extra = tuple(sorted(expected - raw)), tuple(sorted(raw - expected))
+		missing, extra = tuple(sorted(expected - raw - quality_keys)), tuple(sorted(raw - expected - quality_keys))
 		if missing:
 			add(FindingCategory.MISSING, ValidationCheck.RAW_KEYS, "Source record keys are missing from raw storage", missing)
 		if extra:
 			add(FindingCategory.INVALID, ValidationCheck.RAW_KEYS, "Raw storage contains keys absent from the declared provider response", extra)
-		if not missing and not extra and records_id(manifest.download.response.records) != snapshot.raw_content_id:
+		if not missing and not extra and records_id(manifest.download.response.records) != (snapshot.original_content_id or snapshot.raw_content_id):
 			expected_bars = {bar.ticker: bar for bar in manifest.download.response.records}
 			add(FindingCategory.INVALID, ValidationCheck.RAW_VALUES, "Raw financial content differs from the validated provider response", tuple(bar.ticker for bar in snapshot.records if bar != expected_bars[bar.ticker]))
 	if not snapshot.raw_verified:

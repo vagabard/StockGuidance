@@ -1,4 +1,5 @@
 from collections import deque
+from dataclasses import replace
 from collections.abc import Iterable
 from decimal import Decimal
 import math
@@ -8,6 +9,7 @@ from typing import cast
 from stockguidance.zscores.inputs import InputState, TickerSeries, ZScoreInput, ZScoreObservation
 from stockguidance.zscores.results import ZScoreResult, ZScoreRow, ZScoreStatus
 from stockguidance.zscores.specification import ZScoreFamily, ZScoreSpecification
+from stockguidance.market_data.quality import QualityFlag, QualityPolicy
 
 
 _STATUS_PRIORITY = {
@@ -159,7 +161,11 @@ def _numeric_value(value: object | None, family: ZScoreFamily) -> float | None:
 	return converted
 
 
-def _observation_issue(observation: ZScoreObservation, family: ZScoreFamily) -> tuple[ZScoreStatus | None, float | None, str]:
+def _observation_issue(observation: ZScoreObservation, family: ZScoreFamily, policy: QualityPolicy = QualityPolicy()) -> tuple[ZScoreStatus | None, float | None, str]:
+	if not policy.accepts(observation.quality):
+		return ZScoreStatus.INSUFFICIENT_HISTORY, None, "quality_history_reset"
+	if observation.quality & QualityFlag.FUTURE_LEAKAGE and not policy.retrospective:
+		return ZScoreStatus.UNVERIFIED_INPUT, None, "future_evidence_unavailable"
 	if observation.state is InputState.INVALID:
 		return ZScoreStatus.INVALID_INPUT, None, "invalid_input"
 	if observation.state in (InputState.UNVERIFIED, InputState.NOT_YET_AVAILABLE) or not observation.actual_available:
@@ -225,7 +231,7 @@ def _calculate_ticker(
 		issue_counts = {status: 0 for status in _STATUS_PRIORITY}
 		for sequence in range(minimum_sequence, maximum_sequence + 1):
 			observation = sequence_to_observation.get(sequence, missing_observation)
-			issue, numeric, _ = _observation_issue(observation, specification.family)
+			issue, numeric, _ = _observation_issue(observation, specification.family, specification.quality_policy)
 			issues.append((sequence, issue))
 			if issue is not None:
 				issue_counts[issue] += 1
@@ -263,6 +269,18 @@ def _calculate_ticker(
 			score = (numeric - moments.mean) / standard_deviation
 			quantized = quantize_float32(score)
 			rows.append(ZScoreRow(window, session, series.ticker_id, quantized, ZScoreStatus.READY, "ready"))
+	flagged = [(session.sequence, observation) for session, observation in zip(input_data.sessions, series.observations) if observation.quality]
+	if flagged:
+		for index, row in enumerate(rows):
+			flags = QualityFlag.CLEAN
+			gap = 0
+			provenance: set[str] = set()
+			for sequence, observation in flagged:
+				if row.session.sequence - row.window < sequence <= row.session.sequence:
+					flags |= observation.quality
+					gap = max(gap, observation.gap_length)
+					provenance.update(observation.provenance)
+			rows[index] = replace(row, quality=flags, gap_length=gap, provenance=tuple(sorted(provenance)))
 	return tuple(rows)
 
 

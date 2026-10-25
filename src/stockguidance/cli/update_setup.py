@@ -155,13 +155,15 @@ def assemble_and_update(arguments: argparse.Namespace) -> UpdateResult:
 			timedelta(days=arguments.recent_window_days), timedelta(hours=arguments.recent_refresh_hours),
 			timedelta(days=arguments.archive_refresh_days), arguments.correction_evidence,
 		),
-		repair_plan, discovery,
+		repair_plan, discovery, getattr(arguments, "scan_quality", False), getattr(arguments, "force_verify", False),
 	)
 	if arguments.initialize_schema:
 		reporter.measure("initialize updater schema", lambda: initialize_update_schema(source, connect, table_names))
 	if arguments.history_start is not None and boundary is None and discovery.history_boundary is not None:
 		history_store.save(discovery.history_boundary)
-	result = update_market_data(source, settings, query_boundary, calendar, provider, MySQLMarketDataRepository(source, connect, table_names), clock, reporter=reporter)
+	repository = MySQLMarketDataRepository(source, connect, table_names, reporter=reporter)
+	repository.force_verify = settings.force_verify
+	result = update_market_data(source, settings, query_boundary, calendar, provider, repository, clock, reporter=reporter)
 	history_store.save_discovery_metadata(discovery.metadata())
 	reporter.finish(successful=result.successful, failures=len(result.failures))
 	return result

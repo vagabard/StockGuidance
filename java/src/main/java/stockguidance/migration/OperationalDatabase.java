@@ -112,25 +112,40 @@ final class OperationalDatabase {
     static Map<LocalDate, ArchiveCandidateReader.SessionArchive> readRaw(Connection connection, TableNames names,
             List<LocalDate> dates, Map<LocalDate, Receipt> receipts) throws SQLException {
         Map<LocalDate, Map<String, ValidationContent.RawBar>> bars = new HashMap<>();
+        java.util.Set<LocalDate> knownBad = new java.util.HashSet<>();
         for (LocalDate session : dates) bars.put(session, new TreeMap<>());
         List<LocalDate> present = dates.stream().filter(receipts::containsKey).toList();
         if (!present.isEmpty()) {
             String parameters = String.join(",", Collections.nCopies(present.size(), "?"));
-            String sql = "SELECT s.transaction_date, t.label, p.open, p.high, p.low, p.close, p.volume, p.vwap, p.transactions FROM "
-                    + SqlIdentifiers.quote(names.prices(), "prices") + " p JOIN " + SqlIdentifiers.quote(names.sessions(), "sessions")
-                    + " s ON s.id = p.date_id JOIN " + SqlIdentifiers.quote(names.tickers(), "tickers")
-                    + " t ON t.id = p.ticker_id WHERE s.transaction_date IN (" + parameters + ") ORDER BY s.transaction_date, t.label";
-            try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            Map<Long, LocalDate> dateIds = new HashMap<>();
+            Map<Long, String> labels = new HashMap<>();
+            try (PreparedStatement statement = connection.prepareStatement("SELECT id,transaction_date FROM " + SqlIdentifiers.quote(names.sessions(), "sessions") + " WHERE transaction_date IN (" + parameters + ")")) {
                 bindDates(statement, present);
+                try (ResultSet rows = statement.executeQuery()) { while (rows.next()) dateIds.put(rows.getLong(1), rows.getDate(2).toLocalDate()); }
+            }
+            if (dateIds.isEmpty()) throw new IllegalArgumentException("Completed raw session has no date mapping");
+            try (PreparedStatement statement = connection.prepareStatement("SELECT id,label FROM " + SqlIdentifiers.quote(names.tickers(), "tickers")); ResultSet rows = statement.executeQuery()) {
+                while (rows.next()) labels.put(rows.getLong(1), rows.getString(2));
+            }
+            var quality = RowQuality.load(connection, List.copyOf(dateIds.keySet()));
+            for (RowQuality.Key key : quality.keySet()) knownBad.add(dateIds.get(key.dateId()));
+            String sql = "SELECT date_id,ticker_id,open,high,low,close,volume,vwap,transactions FROM "
+                    + SqlIdentifiers.quote(names.prices(), "prices") + " WHERE date_id IN ("
+                    + String.join(",", Collections.nCopies(dateIds.size(), "?")) + ") ORDER BY date_id,ticker_id";
+            try (PreparedStatement statement = connection.prepareStatement(sql)) {
+                int parameter = 1; for (long dateId : dateIds.keySet()) statement.setLong(parameter++, dateId);
                 statement.setFetchSize(1000);
                 try (ResultSet rows = statement.executeQuery()) {
                     while (rows.next()) {
-                        String ticker = rows.getString(2);
+                        long dateId = rows.getLong(1), tickerId = rows.getLong(2);
+                        String ticker = labels.get(tickerId);
                         long count = rows.getLong(9);
                         Long transactions = rows.wasNull() ? null : count;
                         ValidationContent.RawBar bar = new ValidationContent.RawBar(ticker, rows.getBigDecimal(3), rows.getBigDecimal(4),
                                 rows.getBigDecimal(5), rows.getBigDecimal(6), rows.getBigDecimal(7), rows.getBigDecimal(8), transactions);
-                        if (bars.get(rows.getDate(1).toLocalDate()).putIfAbsent(ticker, bar) != null) {
+                        bar = RowQuality.effective(bar, quality.get(new RowQuality.Key(dateId, tickerId)));
+                        if (bar == null) continue;
+                        if (bars.get(dateIds.get(dateId)).putIfAbsent(ticker, bar) != null) {
                             throw new IllegalArgumentException("Duplicate database raw ticker");
                         }
                     }
@@ -139,7 +154,10 @@ final class OperationalDatabase {
         }
         Map<LocalDate, ArchiveCandidateReader.SessionArchive> result = new HashMap<>();
         for (LocalDate session : dates) {
-            if (receipts.containsKey(session) && bars.get(session).isEmpty()) throw new IllegalArgumentException("Completed raw session has no rows: " + session);
+            if (receipts.containsKey(session) && bars.get(session).isEmpty() && !knownBad.contains(session)
+                    && !ArchiveCandidateReader.recordsId(Map.of()).equals(receipts.get(session).rawId())) {
+                throw new IllegalArgumentException("Completed raw session has no rows: " + session);
+            }
             result.put(session, new ArchiveCandidateReader.SessionArchive(null, session, null, Map.copyOf(bars.get(session)), identity(session, receipts)));
         }
         return result;

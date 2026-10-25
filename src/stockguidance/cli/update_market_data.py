@@ -20,6 +20,8 @@ def parser() -> argparse.ArgumentParser:
 	add_update_policy_arguments(arguments)
 	arguments.add_argument("--max-retries", type=int, default=3)
 	arguments.add_argument("--verbose", action="store_true", help="Write updater phases, timings, and detailed failures to stderr")
+	arguments.add_argument("--scan-quality", action="store_true", help="Resume the initial database quality scan and interpolate bounded bad-data gaps")
+	arguments.add_argument("--force-verify", action="store_true", help="Explicitly verify historical records and source responses")
 	return arguments
 
 

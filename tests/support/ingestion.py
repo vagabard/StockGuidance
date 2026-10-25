@@ -47,6 +47,7 @@ class FakeCursor:
 			self.synthetic = [(name, self.database.engine) for name in parameters]
 			return
 		sql = operation.replace("%s", "?").replace("INSERT IGNORE", "INSERT OR IGNORE").replace("START TRANSACTION", "BEGIN")
+		sql = re.sub(r" FOR UPDATE(?=\s|$)", "", sql)
 		sql = sql.replace("INT AUTO_INCREMENT PRIMARY KEY", "INTEGER PRIMARY KEY AUTOINCREMENT")
 		sql = re.sub(r" ENGINE=InnoDB$", "", sql)
 		values = tuple(str(value) if isinstance(value, Decimal) else value.isoformat() if isinstance(value, (date, datetime)) else value for value in parameters)

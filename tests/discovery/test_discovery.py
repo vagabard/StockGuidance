@@ -140,7 +140,8 @@ def test_source_manifest_inventory_and_versioned_discovery_metadata_are_readable
 	response = ProviderResponse(ResponseState.COMPLETE, (bar,), 200, "OK", (("resultsCount", 1),), source_timestamps=(("AAA", int(session.closes_at.timestamp() * 1000)),))
 	store.save_download(source, DownloadedSession(session, response, session.closes_at + timedelta(minutes=15)))
 	inventory = store.inventory(source, calendar)
-	assert inventory.verified_dates == (date(2021, 1, 6),)
+	assert inventory.verified_dates == ()
+	assert tuple(item.session_date for item in inventory.observations) == (date(2021, 1, 6),)
 
 	clock = FrozenClock(datetime(2021, 1, 7, tzinfo=timezone.utc))
 	result = discover_coverage(source, calendar, clock, DailyPublicationPolicy(timedelta(minutes=15), "fixture"), local_inventory=inventory)

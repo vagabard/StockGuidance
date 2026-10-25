@@ -15,6 +15,9 @@ from stockguidance.database.repositories.zscores import LoadedZScoreInputs, ZSco
 from stockguidance.database.table_names import TableNames, TableRole, load_table_names, quote_identifier
 from stockguidance.database.update_schema import assert_source, assert_transactional_tables, assert_zscore_tables
 from stockguidance.database.write_connections import WriteConnectionFactory, WriteCursor
+from stockguidance.database.repositories.quality import OUTPUTS, read_quality
+from stockguidance.market_data.quality import QualityFlag, QualityPolicy, QualityRecord
+import json
 from stockguidance.market_data.identity import content_id, source_key
 from stockguidance.market_data.manifests import InvalidManifest, ManifestStore, SourceManifest
 from stockguidance.market_data.providers.contracts import ResponseState
@@ -102,15 +105,17 @@ class _SessionEvidence:
 		self.receipt_invalid = False
 		self.manifest: SourceManifest | None = None
 		self.manifest_invalid = False
+		self.quality: dict[int, QualityRecord] = {}
 
 
 class MySQLZScoreRepository(ZScoreRepository):
 	"""Bounded z-score storage using the existing updater tables as evidence."""
 
-	def __init__(self, source: SourceConfig, connect: WriteConnectionFactory, table_names: TableNames | None = None, manifest_store: ManifestStore | None = None) -> None:
+	def __init__(self, source: SourceConfig, connect: WriteConnectionFactory, table_names: TableNames | None = None, manifest_store: ManifestStore | None = None, *, quality_policy: QualityPolicy = QualityPolicy()) -> None:
 		self.source, self.connect = source, connect
 		self.table_names = table_names or load_table_names()
 		self.manifests = manifest_store or ManifestStore(source.data_root)
+		self.quality_policy = quality_policy
 
 	@contextmanager
 	def _transaction(self, *, write: bool = False) -> Iterator[WriteCursor]:
@@ -187,7 +192,20 @@ class MySQLZScoreRepository(ZScoreRepository):
 					values.append(_status_observation(InputState.INVALID, stored))
 				else:
 					values.append(_status_observation(InputState.AVAILABLE, stored_ratio - 1.0))
-			observations[ticker_id] = tuple(values)
+			qualified = []
+			for index, (session, observation) in enumerate(zip(query.scope.sessions, values)):
+				quality_inputs = [evidence[session.session_date].quality.get(ticker_id)]
+				if query.family.value == "price_delta" and index:
+					quality_inputs.append(evidence[query.scope.sessions[index - 1].session_date].quality.get(ticker_id))
+				flags, gap, provenance = QualityFlag.CLEAN, 0, []
+				for record in quality_inputs:
+					if record is not None:
+						_, record_flags = record.usable(self.quality_policy, query.scope.as_of)
+						flags |= record_flags
+						gap = max(gap, record.gap_length)
+						provenance.append(record.revision)
+				qualified.append(replace(observation, quality=flags, gap_length=gap, provenance=tuple(sorted(set(provenance)))))
+			observations[ticker_id] = tuple(qualified)
 		input_data = ZScoreInput.from_values(
 			query.family,
 			query.scope.sessions,
@@ -238,14 +256,17 @@ class MySQLZScoreRepository(ZScoreRepository):
 				raise ValueError("Duplicate z-score ticker mapping")
 			labels[ticker_id] = row[1]
 
-		parameters = dates + ticker_ids
+		by_date_id = {item.date_id: item for item in evidence.values() if item.date_id is not None}
+		date_ids = tuple(by_date_id)
+		if not date_ids:
+			raise ZScoreDependencyChanged("Z-score session mapping is missing")
+		parameters = date_ids + ticker_ids
 		raw_sql = (
 			f"SELECT r.date_id, r.ticker_id, r.close FROM {quote_identifier(self.table_names.table(TableRole.PRICES))} r "
-			f"WHERE r.date_id IN (SELECT id FROM {quote_identifier(self.table_names.table(TableRole.SESSIONS))} WHERE transaction_date IN ({_placeholders(dates)})) "
+			f"WHERE r.date_id IN ({_placeholders(date_ids)}) "
 			f"AND r.ticker_id IN ({_placeholders(ticker_ids)}) ORDER BY r.date_id, r.ticker_id{lock_clause}"
 		)
 		cursor.execute(raw_sql, parameters)
-		by_date_id = {item.date_id: item for item in evidence.values() if item.date_id is not None}
 		for row in cursor.fetchall():
 			if len(row) != 3 or normalize_date_id(row[0]) not in by_date_id:
 				raise ValueError("Invalid z-score raw close row")
@@ -255,11 +276,13 @@ class MySQLZScoreRepository(ZScoreRepository):
 				item.raw_duplicates.add(ticker_id)
 			else:
 				item.raw[ticker_id] = row[2]
+		for (date_id, ticker_id), record in read_quality(cursor, tuple(by_date_id), for_update=lock, ticker_ids=ticker_ids).items():
+			by_date_id[date_id].quality[ticker_id] = record
 
 		if query.family.value == "price_delta":
 			delta_sql = (
 				f"SELECT r.date_id, r.ticker_id, r.close_ratio_to_prior FROM {quote_identifier(self.table_names.table(TableRole.DELTAS))} r "
-				f"WHERE r.date_id IN (SELECT id FROM {quote_identifier(self.table_names.table(TableRole.SESSIONS))} WHERE transaction_date IN ({_placeholders(dates)})) "
+				f"WHERE r.date_id IN ({_placeholders(date_ids)}) "
 				f"AND r.ticker_id IN ({_placeholders(ticker_ids)}) ORDER BY r.date_id, r.ticker_id{lock_clause}"
 			)
 			cursor.execute(delta_sql, parameters)
@@ -290,14 +313,15 @@ class MySQLZScoreRepository(ZScoreRepository):
 				evidence[session_date].receipt_invalid = True
 
 		for item in evidence.values():
+			if len(sessions) > 32:
+				continue
 			try:
 				item.manifest = self.manifests.load(self.source.identity, next(session for session in sessions if session.session_date == item.session_date))
 			except (InvalidManifest, OSError, ValueError):
 				item.manifest_invalid = True
 		return evidence, labels
 
-	@staticmethod
-	def _close_values(query: ZScoreInputQuery, evidence: Mapping[date, _SessionEvidence], labels: Mapping[int, str]) -> dict[TradingSession, dict[int, _CloseValue]]:
+	def _close_values(self, query: ZScoreInputQuery, evidence: Mapping[date, _SessionEvidence], labels: Mapping[int, str]) -> dict[TradingSession, dict[int, _CloseValue]]:
 		result: dict[TradingSession, dict[int, _CloseValue]] = {}
 		for session in query.scope.sessions:
 			item = evidence[session.session_date]
@@ -305,9 +329,21 @@ class MySQLZScoreRepository(ZScoreRepository):
 			manifest_records = {} if manifest is None else {bar.ticker: bar for bar in manifest.download.response.records}
 			verified = manifest is not None and not item.manifest_invalid and manifest.download.response.state in {ResponseState.COMPLETE, ResponseState.NO_TRADING} and item.receipt is not None and not item.receipt_invalid and item.receipt[0] == records_id(manifest.download.response.records)
 			available = verified and item.receipt is not None and item.receipt[1] <= query.scope.as_of and manifest is not None and manifest.download.available_at <= query.scope.as_of
+			if len(query.scope.sessions) > 32:
+				verified = item.receipt is not None and not item.receipt_invalid
+				available = verified and item.receipt is not None and item.receipt[1] <= query.scope.as_of
 			values: dict[int, _CloseValue] = {}
 			for ticker_id in query.ticker_ids:
 				label = labels.get(ticker_id)
+				quality = item.quality.get(ticker_id)
+				if quality is not None and item.receipt is not None and not item.receipt_invalid:
+					if item.receipt[1] > query.scope.as_of:
+						values[ticker_id] = _CloseValue(InputState.NOT_YET_AVAILABLE, None)
+						continue
+					effective, _ = quality.usable(self.quality_policy, query.scope.as_of)
+					state = InputState.AVAILABLE if effective is not None else InputState.NOT_YET_AVAILABLE if quality.available_at is not None and quality.available_at > query.scope.as_of else InputState.INVALID
+					values[ticker_id] = _CloseValue(state, None if effective is None else _as_float(effective[3]))
+					continue
 				if not verified:
 					state = InputState.NOT_YET_AVAILABLE if item.receipt is not None and item.receipt[1] > query.scope.as_of else InputState.UNVERIFIED
 					values[ticker_id] = _CloseValue(state, None)
@@ -316,12 +352,12 @@ class MySQLZScoreRepository(ZScoreRepository):
 					not_yet_available = verified and ((item.receipt is not None and item.receipt[1] > query.scope.as_of) or (manifest is not None and manifest.download.available_at > query.scope.as_of))
 					values[ticker_id] = _CloseValue(InputState.NOT_YET_AVAILABLE if not_yet_available else InputState.UNVERIFIED, None)
 					continue
-				if label is None or label not in manifest_records:
+				if label is None or (manifest is not None and label not in manifest_records):
 					values[ticker_id] = _CloseValue(InputState.MISSING, None)
 					continue
 				raw_value = item.raw.get(ticker_id)
 				raw_close = _as_float(raw_value)
-				manifest_close = _as_float(manifest_records[label].close)
+				manifest_close = raw_close if manifest is None else _as_float(manifest_records[label].close)
 				if ticker_id in item.raw_duplicates or raw_close is None or raw_close <= 0.0 or manifest_close is None or manifest_close <= 0.0 or not math.isclose(raw_close, manifest_close, rel_tol=1e-10, abs_tol=1e-12):
 					values[ticker_id] = _CloseValue(InputState.INVALID, raw_close)
 				else:
@@ -341,6 +377,7 @@ class MySQLZScoreRepository(ZScoreRepository):
 				"receipt": None if item.receipt is None else (item.receipt[0], item.receipt[1].isoformat()),
 				"raw": sorted((ticker_id, _digest_value(item.raw.get(ticker_id))) for ticker_id in query.ticker_ids),
 				"delta": sorted((ticker_id, _digest_value(item.deltas.get(ticker_id))) for ticker_id in query.ticker_ids) if query.family.value == "price_delta" else None,
+				"quality": sorted((ticker_id, record.revision) for ticker_id, record in item.quality.items()), "quality_policy": self.quality_policy.identity,
 			})
 			availability.append({"session": session.session_date.isoformat(), "states": sorted((ticker_id, close[ticker_id].state.value) for ticker_id in query.ticker_ids)})
 		dependency = content_id(payload)
@@ -415,6 +452,10 @@ class MySQLZScoreRepository(ZScoreRepository):
 	def _replace_session(self, cursor: WriteCursor, definition: ZScoreSeriesDefinition, dependency: ZScoreDependencySnapshot, rows: tuple[ZScoreRow, ...], metadata: ZScoreSessionMetadata) -> None:
 		table = quote_identifier(self.table_names.resolve_zscore_tables((definition.window,))[definition.window].price if definition.family.value == "price" else self.table_names.resolve_zscore_tables((definition.window,))[definition.window].price_delta)
 		cursor.execute(f"DELETE FROM {table} WHERE date_id = %s", (dependency.date_id,))
+		cursor.execute(f"DELETE FROM {OUTPUTS} WHERE series_key = %s AND date_id = %s", (definition.series_key, dependency.date_id))
+		for row in rows:
+			if row.quality:
+				cursor.execute(f"INSERT INTO {OUTPUTS} (series_key, date_id, ticker_id, flags, gap_length, provenance) VALUES (%s,%s,%s,%s,%s,%s)", (definition.series_key, dependency.date_id, row.ticker_id, int(row.quality), row.gap_length, json.dumps(row.provenance)))
 		parameters = tuple((dependency.date_id, row.ticker_id, row.score, int(row.status)) for row in rows)
 		for offset in range(0, len(parameters), 1000):
 			cursor.executemany(f"INSERT INTO {table} (date_id, ticker_id, zscore, status) VALUES (%s,%s,%s,%s)", parameters[offset:offset + 1000])
@@ -596,7 +637,12 @@ class MySQLZScoreRepository(ZScoreRepository):
 				raise ZScoreSchemaError("Invalid z-score status or score") from error
 		if len({row.ticker_id for row in rows}) != len(rows):
 			raise ZScoreSchemaError("Duplicate z-score row key")
-		return tuple(rows)
+		return self._qualify_rows(cursor, definition.series_key, dependency.date_id, tuple(rows))
+
+	def _qualify_rows(self, cursor: Cursor, series_key: str, date_id: int, rows: tuple[ZScoreRow, ...]) -> tuple[ZScoreRow, ...]:
+		cursor.execute(f"SELECT ticker_id, flags, gap_length, provenance FROM {OUTPUTS} WHERE series_key = %s AND date_id = %s", (series_key, date_id))
+		quality = {normalize_date_id(item[0]): (QualityFlag(int(str(item[1]))), int(str(item[2])), tuple(json.loads(str(item[3])))) for item in cursor.fetchall()}
+		return tuple(replace(row, quality=quality[row.ticker_id][0], gap_length=quality[row.ticker_id][1], provenance=quality[row.ticker_id][2]) if row.ticker_id in quality else row for row in rows)
 
 	def _read_rows_many(
 		self,
@@ -604,6 +650,7 @@ class MySQLZScoreRepository(ZScoreRepository):
 		requests: tuple[tuple[ZScoreSeriesDefinition, ZScoreDependencySnapshot], ...],
 	) -> dict[tuple[str, int], tuple[ZScoreRow, ...]]:
 		result: dict[tuple[str, int], list[ZScoreRow]] = {}
+		quality_metadata: dict[tuple[str, int, int], tuple[QualityFlag, int, tuple[str, ...]]] = {}
 		resolved = self.table_names.resolve_zscore_tables(tuple(sorted({definition.window for definition, _ in requests})))
 		for definition in {definition for definition, _ in requests}:
 			matching = tuple((item_definition, dependency) for item_definition, dependency in requests if item_definition == definition)
@@ -638,7 +685,16 @@ class MySQLZScoreRepository(ZScoreRepository):
 					result.setdefault(key, []).append(ZScoreRow(definition.window, dependency.session, ticker_id, score, status, "stored"))
 				except (TypeError, ValueError, OverflowError) as error:
 					raise ZScoreSchemaError("Invalid z-score status or score") from error
-		parsed = {key: tuple(rows) for key, rows in result.items()}
+			cursor.execute(f"SELECT date_id,ticker_id,flags,gap_length,provenance FROM {OUTPUTS} WHERE series_key = %s AND date_id IN ({_placeholders(date_ids)})", (definition.series_key, *date_ids))
+			for item in cursor.fetchall():
+				quality_metadata[(definition.series_key, normalize_date_id(item[0]), normalize_date_id(item[1]))] = (QualityFlag(int(str(item[2]))), int(str(item[3])), tuple(json.loads(str(item[4]))))
+		parsed = {}
+		for key, stored_rows in result.items():
+			qualified = []
+			for row in stored_rows:
+				quality = quality_metadata.get((*key, row.ticker_id))
+				qualified.append(row if quality is None else replace(row, quality=quality[0], gap_length=quality[1], provenance=quality[2]))
+			parsed[key] = tuple(qualified)
 		for key, rows in parsed.items():
 			if len({row.ticker_id for row in rows}) != len(rows):
 				raise ZScoreSchemaError("Duplicate z-score row key")

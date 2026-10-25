@@ -15,6 +15,7 @@ from stockguidance.zscores.calculation import calculate_zscores
 from stockguidance.zscores.results import ZScoreResult, ZScoreRow, ZScoreStatus
 from stockguidance.zscores.specification import DELTA_DEFINITION, ZScoreFamily, ZScoreSpecification
 from stockguidance.zscores.storage import ZScoreSeriesDefinition
+from stockguidance.market_data.quality import QualityPolicy
 
 
 @dataclass(frozen=True)
@@ -24,6 +25,7 @@ class ZScoreUpdateSettings:
 	windows: tuple[int, ...]
 	publication: DailyPublicationPolicy
 	initialize_schema: bool = False
+	quality_policy: QualityPolicy = QualityPolicy()
 
 	def __post_init__(self) -> None:
 		require_date(self.start, "z-score update start")
@@ -95,10 +97,7 @@ def _rows_match(expected: tuple[ZScoreRow, ...], stored: tuple[ZScoreRow, ...]) 
 
 
 def _definition(source: SourceConfig, calendar: SessionCalendar, family: ZScoreFamily, specification: ZScoreSpecification, window: int) -> ZScoreSeriesDefinition:
-	return ZScoreSeriesDefinition(
-		 source_key(source.identity), calendar.calendar_id, family, window,
-		specification.calculation_version, specification.precision, specification.delta_definition,
-	)
+	return ZScoreSeriesDefinition.from_specification(source_key(source.identity), calendar.calendar_id, specification, window)
 
 
 def _status_counts(results: tuple[tuple[ZScoreFamily, int, ZScoreResult], ...]) -> tuple[tuple[ZScoreFamily, int, ZScoreStatus, int], ...]:
@@ -167,7 +166,7 @@ def update_zscores(
 	written_sessions: set[TradingSession] = set()
 	failures: list[str] = []
 	for family in (ZScoreFamily.PRICE, ZScoreFamily.PRICE_DELTA):
-		specification = ZScoreSpecification(family, settings.windows, delta_definition=DELTA_DEFINITION if family is ZScoreFamily.PRICE_DELTA else "not_applicable")
+		specification = ZScoreSpecification(family, settings.windows, delta_definition=DELTA_DEFINITION if family is ZScoreFamily.PRICE_DELTA else "not_applicable", quality_policy=settings.quality_policy)
 		try:
 			loaded = repository.load_inputs(ZScoreInputQuery(query_scope, family, ticker_ids, tuple(effective)))
 			result = calculate_zscores(specification, loaded.input)

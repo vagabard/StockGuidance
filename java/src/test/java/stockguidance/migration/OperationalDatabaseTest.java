@@ -50,7 +50,7 @@ class OperationalDatabaseTest {
     }
 
     @Test
-    void databaseDerivedInputsPreserveDecimalsAndShareOneQuery() throws Exception {
+    void databaseDerivedInputsPreserveDecimalsAndUseIdQueries() throws Exception {
         LocalDate session = LocalDate.of(2024, 7, 1);
         LocalDate following = session.plusDays(1);
         BigDecimal exact = new BigDecimal("1702500000000000.12345678");
@@ -60,7 +60,7 @@ class OperationalDatabaseTest {
         TableNames names = TableNames.decode(JsonSupport.read(Path.of("../src/stockguidance/database/table_names.json")));
         var receipts = Map.of(session, new OperationalDatabase.Receipt("historical-id", "receipt", null, null));
         var inputs = OperationalDatabase.readRaw(connection, names, List.of(session, following), receipts);
-        assertEquals(1, queries.get());
+        assertEquals(4, queries.get());
         var current = inputs.get(session);
         assertNull(current.path());
         assertEquals("historical-id", current.recordsId());
@@ -84,7 +84,15 @@ class OperationalDatabaseTest {
         return (Connection) Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{Connection.class},
                 (proxy, method, arguments) -> {
                     if (!method.getName().equals("prepareStatement")) return null;
-                    assertTrue(arguments[0].toString().contains("JOIN `ticker_symbol`"));
+                    String sql = arguments[0].toString();
+                    assertFalse(sql.contains(" JOIN "));
+                    List<Object[]> selected;
+                    if (sql.startsWith("SELECT id,transaction_date")) selected = List.<Object[]>of(new Object[]{1L, Date.valueOf("2024-07-01")});
+                    else if (sql.startsWith("SELECT id,label")) selected = List.<Object[]>of(new Object[]{2L, "AAp"});
+                    else if (sql.contains("stockguidance_row_quality")) selected = List.of();
+                    else selected = values.stream().map(row -> {
+                        Object[] copy = row.clone(); copy[0] = 1L; copy[1] = 2L; return copy;
+                    }).toList();
                     return Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{PreparedStatement.class},
                             (statement, action, parameters) -> {
                                 if (!action.getName().equals("executeQuery")) return null;
@@ -93,10 +101,10 @@ class OperationalDatabaseTest {
                                 boolean[] wasNull = {false};
                                 return Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{ResultSet.class},
                                         (rows, operation, columns) -> {
-                                            if (operation.getName().equals("next")) return position.incrementAndGet() < values.size();
+                                            if (operation.getName().equals("next")) return position.incrementAndGet() < selected.size();
                                             if (operation.getName().equals("wasNull")) return wasNull[0];
                                             if (!operation.getName().startsWith("get")) return null;
-                                            Object value = values.get(position.get())[(int) columns[0] - 1];
+                                            Object value = selected.get(position.get())[(int) columns[0] - 1];
                                             wasNull[0] = value == null;
                                             return operation.getName().equals("getLong") && value == null ? 0L : value;
                                         });

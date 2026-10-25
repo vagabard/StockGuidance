@@ -29,6 +29,9 @@ def _decimal_price(value: object, places: int) -> Decimal:
 		result = value if isinstance(value, Decimal) else Decimal(str(value))
 		if not result.is_finite() or result <= 0 or result >= _PRICE_LIMIT:
 			raise ValueError(f"Price must be finite, positive, and representable: {value!r}")
+		exponent = result.as_tuple().exponent
+		if isinstance(exponent, int) and exponent >= -places:
+			return result
 		with localcontext() as context:
 			context.prec = 90
 			result = result.quantize(_PRICE_QUANTA[places], rounding=ROUND_HALF_UP)
@@ -57,7 +60,7 @@ def decimal_quantity(value: object) -> Decimal:
 	if isinstance(value, bool) or not isinstance(value, (str, int, float, Decimal)):
 		raise ValueError("Expected a numeric quantity")
 	try:
-		result = Decimal(str(value))
+		result = value if isinstance(value, Decimal) else Decimal(str(value))
 	except InvalidOperation as error:
 		raise ValueError("Invalid quantity") from error
 	if not result.is_finite() or result < 0 or result > Decimal(2**63 - 1):

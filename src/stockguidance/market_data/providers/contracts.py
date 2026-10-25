@@ -86,6 +86,7 @@ class ProviderResponse:
 	evidence: str | None = None
 	source_timestamps: tuple[tuple[str, int], ...] = ()
 	ignored_placeholders: tuple[str, ...] = ()
+	bad_records: tuple[tuple[str, tuple[object, ...]], ...] = ()
 
 	def __post_init__(self) -> None:
 		require_enum(self.state, ResponseState, "response state")
@@ -100,13 +101,16 @@ class ProviderResponse:
 		if type(self.has_more) is not bool:
 			raise ValueError("Continuation flag must be boolean")
 		keys = {bar.ticker for bar in self.records}
-		if not isinstance(self.source_timestamps, tuple) or len(dict(self.source_timestamps)) != len(self.source_timestamps) or any(ticker not in keys or type(timestamp) is not int or timestamp < 0 for ticker, timestamp in self.source_timestamps):
+		bad_keys = {ticker for ticker, values in self.bad_records}
+		if len(bad_keys) != len(self.bad_records) or bad_keys & keys or any(not isinstance(ticker, str) or not ticker or len(ticker) > 16 or any(character.isspace() for character in ticker) or len(values) != 7 for ticker, values in self.bad_records):
+			raise ValueError("Invalid bad record metadata")
+		if not isinstance(self.source_timestamps, tuple) or len(dict(self.source_timestamps)) != len(self.source_timestamps) or any(ticker not in keys | bad_keys or type(timestamp) is not int or timestamp < 0 for ticker, timestamp in self.source_timestamps):
 			raise ValueError("Invalid source observation timestamps")
 		if not isinstance(self.ignored_placeholders, tuple) or len(set(self.ignored_placeholders)) != len(self.ignored_placeholders) or any(not isinstance(ticker, str) or not ticker or ticker in keys for ticker in self.ignored_placeholders):
 			raise ValueError("Invalid ignored placeholder keys")
-		if self.state is ResponseState.COMPLETE and (not self.records or self.has_more or self.provider_status != "OK" or dict(self.counts).get("resultsCount") != len(self.records) + len(self.ignored_placeholders)):
+		if self.state is ResponseState.COMPLETE and (not (self.records or self.bad_records) or self.has_more or self.provider_status != "OK" or dict(self.counts).get("resultsCount") != len(self.records) + len(bad_keys | set(self.ignored_placeholders))):
 			raise ValueError("Complete response requires exact count and exhausted continuation")
-		if self.state is ResponseState.NO_TRADING and (self.records or self.has_more or not self.evidence):
+		if self.state is ResponseState.NO_TRADING and (self.records or self.bad_records or self.has_more or not self.evidence):
 			raise ValueError("No trading requires explicit authoritative evidence and no records")
 
 

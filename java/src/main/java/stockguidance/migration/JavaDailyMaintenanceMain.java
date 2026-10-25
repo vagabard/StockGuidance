@@ -182,12 +182,12 @@ public final class JavaDailyMaintenanceMain {
                     OperationalDatabase.saveFingerprint(connection, manifest.sourceKey(), session, fingerprint);
                     continue;
                 }
-                var archive = ArchiveCandidateReader.read(path, session);
+                var archive = ArchiveCandidateReader.readForImport(path, session);
                 archiveReads++;
                 if (!fingerprint.equals(OperationalDatabase.Fingerprint.read(path))) {
                     throw new IllegalArgumentException("Source changed while reading: " + session);
                 }
-                if (receipt != null && receipt.rawId().equals(archive.recordsId())) {
+                if (receipt != null && receipt.rawId().equals(archive.recordsId()) && archive.badRecords().isEmpty()) {
                     OperationalDatabase.saveFingerprint(connection, manifest.sourceKey(), session, fingerprint);
                     continue;
                 }
@@ -200,6 +200,13 @@ public final class JavaDailyMaintenanceMain {
                 System.err.println("Imported raw " + session);
             }
             if (!missing.isEmpty()) throw new IllegalArgumentException("Missing raw sessions " + missing + "; run --stage source first");
+            if (rawChanged > 0 || Boolean.TRUE.equals(manifest.root().get("scan_quality"))
+                    || receipts.values().stream().anyMatch(receipt -> receipt.dependencyId() == null)) {
+                long qualityStarted = System.nanoTime();
+                RowQuality.reconcile(connection, manifest, inputs, OperationalDatabase.receipts(connection, manifest.tableNames(), inputs));
+                connection.commit();
+                System.err.printf("Classify and interpolate: %.3fs%n", (System.nanoTime() - qualityStarted) / 1e9);
+            }
             receipts = OperationalDatabase.receipts(connection, manifest.tableNames(), inputs);
             manifest.databaseSources(receipts);
             List<LocalDate> pending = new ArrayList<>();

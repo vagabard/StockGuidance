@@ -143,7 +143,7 @@ public final class JavaZScoreCandidate {
         }
     }
 
-    private static Map<Long, Map<LocalDate, Cell>> cachedValues(Map<LocalDate, JavaDbCopy.SessionData> inputs,
+    private Map<Long, Map<LocalDate, Cell>> cachedValues(Map<LocalDate, JavaDbCopy.SessionData> inputs,
                                                                List<Long> identifiers, boolean delta) {
         Map<Long, Map<LocalDate, Cell>> result = new HashMap<>();
         for (long identifier : identifiers) {
@@ -154,7 +154,7 @@ public final class JavaZScoreCandidate {
                     if (row != null) values.put(date, new Cell(row.closeRatioToPrior()));
                 } else {
                     JavaDbCopy.RawRow row = input.raw().get(identifier);
-                    if (row != null) values.put(date, new Cell(row.close()));
+                    if (row != null) values.put(date, RowQuality.cell(row.close(), row.quality(), manifest.root()));
                 }
             });
             result.put(identifier, values);
@@ -348,6 +348,7 @@ public final class JavaZScoreCandidate {
 
     private static Issue closeIssue(Cell cell, Evidence evidence) {
         if (evidence == null || !evidence.verified()) return Issue.UNVERIFIED;
+        if (cell != null && cell.quality != 0 && !cell.accepted) return Issue.INSUFFICIENT_HISTORY;
         if (cell == null || cell.value == null) return Issue.MISSING;
         if (!isFinite(cell.value) || cell.value <= 0.0) return Issue.INVALID;
         return Issue.NONE;
@@ -402,7 +403,20 @@ public final class JavaZScoreCandidate {
             }
             hashingSeconds += (System.nanoTime() - phaseStarted) / 1e9;
             phaseStarted = System.nanoTime();
-            rows.addAll(calculate(family, window, target, dates, tickerMappingsFor(chunk, tickerMappings), rawChunk, deltaChunk, evidence, phaseSeconds));
+            List<ScoreRow> calculated = calculate(family, window, target, dates, tickerMappingsFor(chunk, tickerMappings), rawChunk, deltaChunk, evidence, phaseSeconds);
+            int end = dates.indexOf(target), first = Math.max(0, end - window + 1 - (family == Family.PRICE_DELTA ? 1 : 0));
+            for (ScoreRow row : calculated) {
+                int flags = 0, gap = 0;
+                java.util.Set<String> provenance = new java.util.TreeSet<>();
+                Map<LocalDate, Cell> ticker = rawChunk.getOrDefault(row.tickerId, Map.of());
+                for (int index = first; index <= end; index++) {
+                    Cell cell = ticker.get(dates.get(index));
+                    if (cell != null && cell.quality != 0) {
+                        flags |= cell.quality; gap = Math.max(gap, cell.gapLength); provenance.add(cell.provenance);
+                    }
+                }
+                rows.add(new ScoreRow(row.tickerId, row.score, row.status, flags, gap, List.copyOf(provenance)));
+            }
         }
         rows.sort(Comparator.comparingLong(ScoreRow::tickerId));
         String dependency = hex(dependencyDigest.digest());
@@ -483,6 +497,7 @@ public final class JavaZScoreCandidate {
                                                        Map<LocalDate, Long> dateIds, List<Long> tickerIds) throws SQLException {
         Map<Long, Map<LocalDate, Cell>> result = new HashMap<>();
         List<Map.Entry<LocalDate, Long>> dates = new ArrayList<>(dateIds.entrySet());
+        var quality = manifest.operational() && column.equals("close") ? RowQuality.load(connection, List.copyOf(dateIds.values())) : Map.<RowQuality.Key, JsonObject>of();
         String sql = "SELECT date_id, ticker_id, " + SqlIdentifiers.quote(column, column) + " FROM "
                 + SqlIdentifiers.quote(table, table) + " WHERE date_id IN (" + placeholders(dates.size()) + ")"
                 + " AND ticker_id IN (" + placeholders(tickerIds.size()) + ") ORDER BY ticker_id, date_id FOR UPDATE";
@@ -498,7 +513,7 @@ public final class JavaZScoreCandidate {
                     LocalDate date = dates.stream().filter(item -> item.getValue() == dateId).findFirst().orElseThrow().getKey();
                     Map<LocalDate, Cell> ticker = result.computeIfAbsent(tickerId, ignored -> new HashMap<>());
                     BigDecimal value = rows.getBigDecimal(3);
-                    if (ticker.put(date, new Cell(value == null ? null : value.doubleValue())) != null) throw new IllegalArgumentException("Duplicate z-score input row");
+                    if (ticker.put(date, RowQuality.cell(value == null ? null : value.doubleValue(), quality.get(new RowQuality.Key(dateId, tickerId)), manifest.root())) != null) throw new IllegalArgumentException("Duplicate z-score input row");
                 }
             }
         }
@@ -520,7 +535,7 @@ public final class JavaZScoreCandidate {
                 if (rows.next()) {
                     if (rows.getInt(1) != 1 || !manifest.sourceScope().equals(rows.getString(2))
                             || !manifest.calendarId().equals(rows.getString(3)) || !family.value.equals(rows.getString(4))
-                            || rows.getInt(5) != window || !CALCULATION_VERSION.equals(rows.getString(6))
+                            || rows.getInt(5) != window || !calculationVersion().equals(rows.getString(6))
                             || !deltaDefinition(family).equals(rows.getString(7)) || !PRECISION.equals(rows.getString(8))
                             || !MISSING_VALUE_POLICY.equals(rows.getString(9))) throw new IllegalArgumentException("Conflicting z-score series metadata");
                     if (rows.next()) throw new IllegalArgumentException("Duplicate z-score series metadata");
@@ -533,7 +548,7 @@ public final class JavaZScoreCandidate {
         try (PreparedStatement statement = connection.prepareStatement(insert)) {
             statement.setString(1, key); statement.setInt(2, 1); statement.setString(3, manifest.sourceScope());
             statement.setString(4, manifest.calendarId()); statement.setString(5, family.value); statement.setInt(6, window);
-            statement.setString(7, CALCULATION_VERSION); statement.setString(8, deltaDefinition(family));
+            statement.setString(7, calculationVersion()); statement.setString(8, deltaDefinition(family));
             statement.setString(9, PRECISION); statement.setString(10, MISSING_VALUE_POLICY); statement.setString(11, publicationReceipt());
             statement.executeUpdate();
         }
@@ -588,6 +603,21 @@ public final class JavaZScoreCandidate {
         }
         }
         String metadata = SqlIdentifiers.quote(names.zscoreSessions(), "z-score sessions");
+        if (manifest.operational()) {
+            try (PreparedStatement delete = connection.prepareStatement("DELETE FROM stockguidance_output_quality WHERE series_key=? AND date_id=?")) {
+                delete.setString(1, seriesKey); delete.setLong(2, snapshot.dateId); delete.executeUpdate();
+            }
+            try (PreparedStatement insert = connection.prepareStatement("INSERT INTO stockguidance_output_quality (series_key,date_id,ticker_id,flags,gap_length,provenance) VALUES (?,?,?,?,?,?)")) {
+                for (ScoreRow row : snapshot.rows) {
+                    if (row.quality == 0) continue;
+                    JsonArray provenance = JsonSupport.array(); provenance.addAll(row.provenance);
+                    insert.setString(1, seriesKey); insert.setLong(2, snapshot.dateId); insert.setLong(3, row.tickerId);
+                    insert.setInt(4, row.quality); insert.setInt(5, row.gapLength);
+                    insert.setString(6, new String(CanonicalJson.bytes(provenance), StandardCharsets.UTF_8)); insert.addBatch();
+                }
+                insert.executeBatch();
+            }
+        }
         try (PreparedStatement delete = connection.prepareStatement("DELETE FROM " + metadata + " WHERE series_key = ? AND date_id = ?")) {
             delete.setString(1, seriesKey); delete.setLong(2, snapshot.dateId); delete.executeUpdate();
         }
@@ -605,9 +635,18 @@ public final class JavaZScoreCandidate {
     JsonObject definition(Family family, int window) {
         JsonObject value = JsonSupport.object();
         value.put("schema_version", 1); value.put("source_scope", manifest.sourceScope()); value.put("calendar_id", manifest.calendarId());
-        value.put("family", family.value); value.put("window", window); value.put("calculation_version", CALCULATION_VERSION);
+        value.put("family", family.value); value.put("window", window); value.put("calculation_version", calculationVersion());
         value.put("delta_definition", deltaDefinition(family)); value.put("precision", PRECISION); value.put("missing_value_policy", MISSING_VALUE_POLICY);
         return value;
+    }
+
+    private String calculationVersion() {
+        JsonObject root = manifest.root();
+        String history = root.get("quality_history") == null ? "clean" : root.get("quality_history").toString();
+        boolean retrospective = Boolean.TRUE.equals(root.get("retrospective_quality"));
+        if (history.equals("clean") && !retrospective) return CALCULATION_VERSION;
+        JsonArray identity = JsonSupport.array(); identity.add(RowQuality.METHOD); identity.add(history); identity.add(retrospective);
+        return CALCULATION_VERSION + ":quality:" + CanonicalJson.sha256(identity).substring(0, 16);
     }
 
     private static String rowsContentId(List<ScoreRow> rows, LocalDate session) {
@@ -616,7 +655,13 @@ public final class JavaZScoreCandidate {
             if (values.length() > 1) values.append(',');
             values.append("[\"").append(session).append("\",").append(row.tickerId).append(',');
             values.append(row.score == null ? "null" : pythonFloat(row.score.doubleValue()));
-            values.append(',').append(row.status.code).append(']');
+            values.append(',').append(row.status.code);
+            if (row.quality != 0) {
+                JsonArray provenance = JsonSupport.array(); provenance.addAll(row.provenance);
+                values.append(',').append(row.quality).append(',').append(row.gapLength).append(',')
+                        .append(new String(CanonicalJson.bytes(provenance), StandardCharsets.UTF_8).strip());
+            }
+            values.append(']');
         }
         values.append("]\n");
         return hex(digest().digest(values.toString().getBytes(StandardCharsets.UTF_8)));
@@ -637,6 +682,7 @@ public final class JavaZScoreCandidate {
     private static void updateDigest(MessageDigest digest, LocalDate date, Long dateId, long tickerId, Cell raw, Cell delta, Evidence evidence) {
         updateDigest(digest, date + "|" + dateId + "|" + tickerId + "|" + decimal(raw) + "|" + decimal(delta) + "|"
                 + (evidence == null ? "null" : evidence.rawId) + "|" + (evidence == null ? "null" : evidence.availableAt));
+        if (raw != null && raw.quality != 0) updateDigest(digest, raw.quality + "|" + raw.gapLength + "|" + raw.provenance + "|" + raw.accepted);
     }
 
     private static void updateDigest(MessageDigest digest, LocalDate date, long tickerId, String state) {
@@ -818,7 +864,9 @@ public final class JavaZScoreCandidate {
         Issue(int rank) { this.rank = rank; }
     }
 
-    static record Cell(Double value) { }
+    static record Cell(Double value, int quality, int gapLength, String provenance, boolean accepted) {
+        Cell(Double value) { this(value, 0, 0, null, true); }
+    }
 
     static record Evidence(boolean expected, String expectedId, String rawId, String availableAt) {
         private boolean verified() { return expected && expectedId != null && expectedId.equals(rawId) && availableAt != null && !availableAt.isBlank(); }
@@ -830,7 +878,9 @@ public final class JavaZScoreCandidate {
 
     private record IssueEntry(int sequence, Issue issue) { }
 
-    static record ScoreRow(long tickerId, Float score, Status status) { }
+    static record ScoreRow(long tickerId, Float score, Status status, int quality, int gapLength, List<String> provenance) {
+        ScoreRow(long tickerId, Float score, Status status) { this(tickerId, score, status, 0, 0, List.of()); }
+    }
 
     record PreparedSeries(LocalDate session, Family family, int window, Snapshot snapshot, Map<String, Double> phases) { }
 

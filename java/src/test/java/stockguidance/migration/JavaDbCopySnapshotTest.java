@@ -70,7 +70,7 @@ class JavaDbCopySnapshotTest {
             assertEquals("id", loaded.get(dates.getFirst()).evidence().rawId());
             assertTrue(loaded.get(dates.getFirst()).evidence().expected());
             assertEquals(100.25, loaded.get(dates.getFirst()).raw().get(1L).close());
-            assertEquals(5, queries.get());
+            assertEquals(6, queries.get());
         }
     }
 

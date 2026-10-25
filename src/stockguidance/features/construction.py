@@ -9,6 +9,7 @@ from stockguidance.market_data.availability import AvailabilityPolicy
 from stockguidance.market_data.closes import CloseIssue, PriceState
 from stockguidance.market_data.openings import OpeningData
 from stockguidance.market_data.publication import DailyPublicationPolicy
+from stockguidance.market_data.quality import QualityFlag, combine_quality
 
 
 @dataclass(frozen=True)
@@ -17,6 +18,9 @@ class FeatureValues:
 	sessions: tuple[TradingSession, ...]
 	values: tuple[float, ...] | None
 	issues: tuple[CloseIssue, ...] = ()
+	quality: QualityFlag = QualityFlag.CLEAN
+	gap_length: int = 0
+	provenance: tuple[str, ...] = ()
 
 	def __post_init__(self) -> None:
 		if not isinstance(self.specification, FeatureSpec) or not isinstance(self.sessions, tuple) or not isinstance(self.issues, tuple):
@@ -36,6 +40,9 @@ def construct_features(specification: FeatureSpec, timing: DecisionTiming, sessi
 		raise ValueError("Feature history must be the exact prior-session window")
 	by_key = {(item.timing.session, item.ticker_id): item for item in data.observations}
 	issues = [issue for issue in data.issues if issue.session in sessions]
+	quality, gap_length, provenance = combine_quality([*(item for item in data.observations if item.timing.session in sessions and item.ticker_id in specification.ticker_ids), *issues])
+	if availability_policy.retrospective and any(item.timing.session in sessions and item.ticker_id in specification.ticker_ids and item.timing.available_at > timing.decision_cutoff for item in data.observations):
+		quality |= QualityFlag.FUTURE_LEAKAGE
 	opening_prices = {} if openings is None else {item.ticker_id: item.price for item in openings.observations}
 	if CloseFeature.ENTRY_OPEN_RETURN in specification.feature_order:
 		if openings is None or openings.query.sessions != (timing.entry_session,) or openings.query.ticker_ids != specification.ticker_ids or openings.query.as_of != timing.decision_cutoff:
@@ -53,7 +60,7 @@ def construct_features(specification: FeatureSpec, timing: DecisionTiming, sessi
 			else:
 				specification.validate_observation(observation.timing, timing, availability_policy=availability_policy, publication=publication)
 	if issues:
-		return FeatureValues(specification, sessions, None, tuple(issues))
+		return FeatureValues(specification, sessions, None, tuple(issues), quality, gap_length, provenance)
 	values: list[float] = []
 	for session in sessions:
 		for ticker_id in specification.ticker_ids:
@@ -65,5 +72,5 @@ def construct_features(specification: FeatureSpec, timing: DecisionTiming, sessi
 				else:
 					values.append(close / anchor - 1 if feature is CloseFeature.RELATIVE_CLOSE else math.log(close))
 	if any(not math.isfinite(value) for value in values):
-		return FeatureValues(specification, sessions, None, (CloseIssue(specification.ticker_ids[0], sessions[0], PriceState.INVALID, "Close transformation is not finite"),))
-	return FeatureValues(specification, sessions, tuple(values))
+		return FeatureValues(specification, sessions, None, (CloseIssue(specification.ticker_ids[0], sessions[0], PriceState.INVALID, "Close transformation is not finite"),), quality, gap_length, provenance)
+	return FeatureValues(specification, sessions, tuple(values), quality=quality, gap_length=gap_length, provenance=provenance)
