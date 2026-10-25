@@ -1,6 +1,8 @@
 import argparse
+from contextlib import nullcontext
 from datetime import date, datetime, timezone
 import json
+import sys
 from pathlib import Path
 from typing import Any, cast
 
@@ -19,6 +21,7 @@ from stockguidance.market_data.securities import security_metadata
 from stockguidance.market_data.atomic import atomic_write
 from stockguidance.market_data.identity import encode_json
 from stockguidance.market_data.consolidation import candidates
+from stockguidance.market_data.cleanup import ArchiveCleanup
 
 
 def configured_source(arguments: argparse.Namespace) -> SourceConfig:
@@ -94,6 +97,10 @@ def migrate(arguments: argparse.Namespace) -> dict[str, object]:
 	for decision in decisions:
 		if decision.get("adjustment") != "unadjusted" or decision.get("complete") is not True or not isinstance(decision.get("evidence"), str) or not decision["evidence"].strip():
 			raise ValueError("Every selected source requires complete unadjusted verification and evidence")
+		for superseded in decision.get("supersedes", []):
+			identity = superseded["sha256"]
+			if not isinstance(identity, str) or len(identity) != 64 or any(character not in "0123456789abcdef" for character in identity) or not isinstance(superseded.get("evidence"), str) or not superseded["evidence"].strip():
+				raise ValueError("Superseded sources require a SHA-256 and explicit replacement evidence")
 		session_date = date.fromisoformat(decision["date"])
 		if session_date in seen:
 			raise ValueError("Duplicate migration date")
@@ -105,6 +112,14 @@ def migrate(arguments: argparse.Namespace) -> dict[str, object]:
 		return {"validated_dates": len(prepared), "applied": False}
 	connect = MySQLConnectionFactory()
 	store = CanonicalArchiveStore(source.data_root, ArchiveCatalog(source, connect))
+	def retain_decision(decision: dict[str, Any], download: DownloadedSession) -> None:
+		if decision.get("supersedes"):
+			metadata = store.load_metadata(cast(SourceIdentity, source.identity), download.session)
+			if metadata is None:
+				raise ValueError("Replacement metadata was not published")
+			approved = {item["sha256"]: item for item in [*metadata.get("supersedes", []), *decision["supersedes"]]}
+			metadata = {**metadata, "supersedes": list(approved.values())}
+			store.catalog.put(download.session.session_date, metadata)
 	with market_update_lock(source, connect):
 		for path, decision in prepared:
 			download = validated_download(path, decision)
@@ -112,11 +127,35 @@ def migrate(arguments: argparse.Namespace) -> dict[str, object]:
 			if existing is not None and not existing.get("pending") and existing["content_id"] == sha256(archive_content(download)).hexdigest():
 				loaded = store.load(cast(SourceIdentity, source.identity), download.session)
 				if loaded is not None:
+					retain_decision(decision, download)
 					continue
 			if existing is not None and datetime.fromisoformat(existing["available_at"]) > download.available_at:
 				raise ValueError(f"A later evidenced canonical source already exists for {download.session.session_date}")
 			store.save_download(cast(SourceIdentity, source.identity), download, evidence=decision["evidence"])
+			retain_decision(decision, download)
 	return {"validated_dates": len(prepared), "applied": True, "retired_files": 0}
+
+
+def cleanup(arguments: argparse.Namespace) -> dict[str, Any]:
+	source = configured_source(arguments)
+	connect = MySQLConnectionFactory()
+	store = CanonicalArchiveStore(source.data_root, ArchiveCatalog(source, connect))
+	with market_update_lock(source, connect) if arguments.apply else nullcontext():
+		operation = ArchiveCleanup(source, store, arguments.output, apply=arguments.apply, progress=lambda message: print(message, file=sys.stderr, flush=True))
+		report = operation.run(consolidate=arguments.consolidate, cleanup_conflicts=arguments.cleanup_conflicts)
+	def quoted(path: Path) -> str:
+		return "'" + str(path).replace("'", "''") + "'"
+	command = ".\\.venv\\Scripts\\python.exe -m stockguidance.cli.consolidate_market_data"
+	command += f" --data-root {quoted(arguments.data_root)} --dbinfo-file {quoted(arguments.dbinfo_file)} --output {quoted(arguments.output)}"
+	flags = (" --consolidate" if arguments.consolidate else "") + (" --cleanup-conflicts" if arguments.cleanup_conflicts else "")
+	report["next_commands"] = [command + flags + ("" if arguments.apply else " --apply")]
+	if report["unresolved"]:
+		report["instructions"] = "Review unresolved entries; publish verified decisions with --decisions FILE (preview, then --apply), then run --cleanup-conflicts (preview, then --apply). Unresolved files are never forcibly deleted. See docs/market_storage.md."
+		report["next_commands"].append(command + " --cleanup-conflicts")
+	else:
+		report["instructions"] = "Review cleanup-report.json and cleanup-journal.jsonl. Repeating the same command safely resumes interrupted work."
+	atomic_write(arguments.output / "cleanup-report.json", encode_json(report))
+	return report
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -127,13 +166,17 @@ def main(argv: list[str] | None = None) -> int:
 	parser.add_argument("--decisions", type=Path, help="Explicit verified-source decisions; omitted for audit-only operation")
 	parser.add_argument("--export-catalog", type=Path, help="Export canonical provenance outside the archive alongside database backups")
 	parser.add_argument("--retire-legacy", action="store_true", help="Move old source directories into a recoverable backup after complete canonical verification")
+	parser.add_argument("--consolidate", action="store_true", help="Consolidate verified daily data, delete redundant copies, and quarantine unresolved files")
+	parser.add_argument("--cleanup-conflicts", action="store_true", help="Reevaluate quarantined files; delete only verified duplicates or explicitly approved superseded sources")
 	parser.add_argument("--dbinfo-file", type=Path, default=Path("dbinfo.id"))
-	parser.add_argument("--apply", action="store_true", help="Publish verified sources and catalog metadata; originals are retained")
+	parser.add_argument("--apply", action="store_true", help="Apply the selected operation; cleanup can permanently delete verified redundant files")
 	arguments = parser.parse_args(argv)
 	try:
-		if sum((arguments.decisions is not None, arguments.export_catalog is not None, arguments.retire_legacy)) > 1:
+		if sum((arguments.decisions is not None, arguments.export_catalog is not None, arguments.retire_legacy, arguments.consolidate or arguments.cleanup_conflicts)) > 1:
 			raise ValueError("Choose one consolidation operation")
-		if arguments.export_catalog is not None:
+		if arguments.consolidate or arguments.cleanup_conflicts:
+			report = cleanup(arguments)
+		elif arguments.export_catalog is not None:
 			report = export_catalog(arguments)
 		elif arguments.retire_legacy:
 			report = retire_legacy(arguments)
@@ -147,7 +190,7 @@ def main(argv: list[str] | None = None) -> int:
 				securities.update(json.loads(arguments.security_metadata.read_text(encoding="utf-8")))
 			report = audit(arguments.data_root, arguments.output, securities=securities)
 		print(json.dumps(report, sort_keys=True))
-		return 0
+		return 2 if report.get("unresolved") else 0
 	except (OSError, ValueError, KeyError, TypeError) as error:
 		print(json.dumps({"successful": False, "error": str(error)}))
 		return 1
