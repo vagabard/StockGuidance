@@ -2,6 +2,7 @@ import argparse
 from collections.abc import Callable, Sequence
 from dataclasses import asdict
 import json
+import sys
 
 from stockguidance.cli.update_arguments import add_update_policy_arguments
 from stockguidance.cli.update_setup import assemble_and_update
@@ -18,6 +19,7 @@ def parser() -> argparse.ArgumentParser:
 	arguments.add_argument("--repair-plan", help="Explicitly apply automatic repairs from validation JSON; manual review items are rejected")
 	add_update_policy_arguments(arguments)
 	arguments.add_argument("--max-retries", type=int, default=3)
+	arguments.add_argument("--verbose", action="store_true", help="Write updater phases, timings, and detailed failures to stderr")
 	return arguments
 
 
@@ -26,9 +28,13 @@ def main(argv: Sequence[str] | None = None, *, run: Callable[[argparse.Namespace
 	try:
 		result = run(arguments)
 	except StageExecutionError as error:
+		if getattr(arguments, "verbose", False):
+			print(f"[updater] failed: {error.failure.stage.value}/{error.failure.code.value}: {error.failure.message}", file=sys.stderr, flush=True)
 		print(json.dumps({"successful": False, "failure": asdict(error.failure)}, sort_keys=True))
 		return 1
-	except ValueError:
+	except ValueError as error:
+		if getattr(arguments, "verbose", False):
+			print(f"[updater] invalid configuration: {type(error).__name__}: {error}", file=sys.stderr, flush=True)
 		print(json.dumps({"successful": False, "error": "Invalid update configuration, policies, or supported-history metadata"}))
 		return 1
 	except Exception:

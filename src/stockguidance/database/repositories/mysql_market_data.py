@@ -1,10 +1,11 @@
 from contextlib import contextmanager
 from collections.abc import Iterator
+from datetime import date
 
 from stockguidance.config.source import SourceConfig
 from stockguidance.database.dates import normalize_date_id
-from stockguidance.database.repositories.market_data import DerivedUpdate, SessionSnapshot
-from stockguidance.database.repositories.mysql_market_read import read_snapshots
+from stockguidance.database.repositories.market_data import DerivedUpdate, SessionMetadata, SessionSnapshot
+from stockguidance.database.repositories.mysql_market_read import _dates, has_orphans, read_metadata, read_snapshots
 from stockguidance.database.repositories.mysql_sessions import Cursor
 from stockguidance.database.repositories.sessions import SessionQuery
 from stockguidance.database.repositories.validation_rows import inspect_rows
@@ -13,7 +14,7 @@ from stockguidance.database.update_schema import assert_source, assert_transacti
 from stockguidance.database.write_connections import WriteConnectionFactory, WriteCursor
 from stockguidance.market_data.legacy_derived import DERIVED_COLUMNS, derived_id
 from stockguidance.market_data.providers.contracts import DownloadedSession, ResponseState
-from stockguidance.market_data.records import records_id
+from stockguidance.market_data.records import is_non_trading_placeholder, records_id
 from stockguidance.market_data.update_planning import SnapshotIndex
 from stockguidance.validation.findings import ValidationFinding
 
@@ -50,6 +51,38 @@ class MySQLMarketDataRepository:
 	def inspect(self, query: SessionQuery) -> tuple[SessionSnapshot, ...]:
 		with self._transaction(query) as cursor:
 			return read_snapshots(cursor, query, self.table_names)
+
+	def has_orphans(self, query: SessionQuery) -> bool:
+		with self._transaction(query) as cursor:
+			return has_orphans(cursor, self.table_names)
+
+	def inspect_metadata(self, query: SessionQuery) -> tuple[SessionMetadata, ...]:
+		with self._transaction(query) as cursor:
+			return read_metadata(cursor, query, self.table_names)
+
+	def cleanup_placeholders(self, query: SessionQuery) -> tuple[date, ...]:
+		with self._transaction(query) as cursor:
+			ids = _dates(cursor, query, self.table_names)
+			if not ids:
+				return ()
+			date_ids = tuple(ids)
+			placeholders = ",".join("%s" for _ in date_ids)
+			cursor.execute(
+				f"SELECT date_id, ticker_id, open, high, low, close, volume, vwap, transactions FROM {quote_identifier(self.table_names.table(TableRole.PRICES))} WHERE date_id IN ({placeholders})",
+				date_ids,
+			)
+			keys = [(normalize_date_id(row[0]), normalize_date_id(row[1])) for row in cursor.fetchall() if len(row) == 9 and is_non_trading_placeholder(tuple(row[2:]))]
+		if not keys:
+			return ()
+		with self._transaction(query, write=True) as cursor:
+			key_placeholders = ",".join("(%s,%s)" for _ in keys)
+			parameters = tuple(value for key in keys for value in key)
+			cursor.execute(f"DELETE FROM {quote_identifier(self.table_names.table(TableRole.DELTAS))} WHERE (date_id, ticker_id) IN ({key_placeholders})", parameters)
+			cursor.execute(f"DELETE FROM {quote_identifier(self.table_names.table(TableRole.PRICES))} WHERE (date_id, ticker_id) IN ({key_placeholders})", parameters)
+			affected = tuple(sorted({ids[date_id] for date_id, _ in keys}))
+			date_placeholders = ",".join("%s" for _ in affected)
+			cursor.execute(f"DELETE FROM {quote_identifier(self.table_names.table(TableRole.IMPORTS))} WHERE session_date IN ({date_placeholders})", affected)
+			return affected
 
 	def inspect_integrity(self, query: SessionQuery) -> tuple[ValidationFinding, ...]:
 		with self._transaction(query) as cursor:

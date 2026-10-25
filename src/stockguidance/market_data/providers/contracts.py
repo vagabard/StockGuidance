@@ -85,6 +85,7 @@ class ProviderResponse:
 	has_more: bool = False
 	evidence: str | None = None
 	source_timestamps: tuple[tuple[str, int], ...] = ()
+	ignored_placeholders: tuple[str, ...] = ()
 
 	def __post_init__(self) -> None:
 		require_enum(self.state, ResponseState, "response state")
@@ -101,7 +102,9 @@ class ProviderResponse:
 		keys = {bar.ticker for bar in self.records}
 		if not isinstance(self.source_timestamps, tuple) or len(dict(self.source_timestamps)) != len(self.source_timestamps) or any(ticker not in keys or type(timestamp) is not int or timestamp < 0 for ticker, timestamp in self.source_timestamps):
 			raise ValueError("Invalid source observation timestamps")
-		if self.state is ResponseState.COMPLETE and (not self.records or self.has_more or self.provider_status != "OK" or dict(self.counts).get("resultsCount") != len(self.records)):
+		if not isinstance(self.ignored_placeholders, tuple) or len(set(self.ignored_placeholders)) != len(self.ignored_placeholders) or any(not isinstance(ticker, str) or not ticker or ticker in keys for ticker in self.ignored_placeholders):
+			raise ValueError("Invalid ignored placeholder keys")
+		if self.state is ResponseState.COMPLETE and (not self.records or self.has_more or self.provider_status != "OK" or dict(self.counts).get("resultsCount") != len(self.records) + len(self.ignored_placeholders)):
 			raise ValueError("Complete response requires exact count and exhausted continuation")
 		if self.state is ResponseState.NO_TRADING and (self.records or self.has_more or not self.evidence):
 			raise ValueError("No trading requires explicit authoritative evidence and no records")

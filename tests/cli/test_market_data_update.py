@@ -41,6 +41,15 @@ def test_cli_configuration_failure_does_not_leak_exception_text(capsys):
 	assert "fixture secret" not in capsys.readouterr().out
 
 
+def test_cli_verbose_configuration_failure_reports_detail_on_stderr(capsys):
+	def run(arguments):
+		raise ValueError("unsupported requested session range")
+	assert main([*POLICY_ARGS, "--verbose"], run=run) == 1
+	captured = capsys.readouterr()
+	assert "unsupported requested session range" in captured.err
+	assert json.loads(captured.out)["successful"] is False
+
+
 def test_default_policy_is_applied_before_running(harness):
 	seen = {}
 

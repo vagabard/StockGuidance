@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from functools import cached_property
 from typing import Protocol
 
@@ -64,6 +64,27 @@ class SessionSnapshot:
 
 
 @dataclass(frozen=True)
+class SessionMetadata:
+	session: TradingSession
+	date_id: int
+	receipt: ImportReceipt | None
+	raw_count: int
+	derived_count: int
+	raw_keys: tuple[str, ...]
+
+	def __post_init__(self) -> None:
+		require_positive_int(self.date_id, "session metadata date_id")
+		if not isinstance(self.session, TradingSession):
+			raise ValueError("Invalid session metadata session")
+		if self.receipt is not None and (not isinstance(self.receipt, ImportReceipt) or self.receipt.available_at < self.session.closes_at):
+			raise ValueError("Invalid session metadata receipt")
+		if type(self.raw_count) is not int or self.raw_count < 0 or type(self.derived_count) is not int or self.derived_count < 0:
+			raise ValueError("Invalid session metadata counts")
+		if not isinstance(self.raw_keys, tuple) or any(not isinstance(key, str) for key in self.raw_keys) or len(set(self.raw_keys)) != len(self.raw_keys):
+			raise ValueError("Invalid session metadata keys")
+
+
+@dataclass(frozen=True)
 class DerivedUpdate:
 	snapshot: SessionSnapshot
 	rows: tuple[LegacyDerivedRow, ...]
@@ -71,6 +92,9 @@ class DerivedUpdate:
 
 
 class MarketDataRepository(Protocol):
+	def has_orphans(self, query: SessionQuery) -> bool: ...
+	def inspect_metadata(self, query: SessionQuery) -> tuple[SessionMetadata, ...]: ...
+	def cleanup_placeholders(self, query: SessionQuery) -> tuple[date, ...]: ...
 	def inspect(self, query: SessionQuery) -> tuple[SessionSnapshot, ...]: ...
 	def inspect_integrity(self, query: SessionQuery) -> tuple[ValidationFinding, ...]: ...
 	def import_session(self, query: SessionQuery, download: DownloadedSession) -> None: ...

@@ -34,6 +34,16 @@ def test_grouped_response_validates_and_preserves_scope_counts(harness, calendar
 	assert response.source_timestamps[0][1] == payload["results"][0]["t"]
 
 
+def test_all_zero_placeholder_is_omitted_from_canonical_records(harness, calendar, payload):
+	payload["results"].append({"T": "TTE", "o": 0, "h": 0, "l": 0, "c": 0, "v": 0, "vw": None, "n": 0, "t": payload["results"][0]["t"]})
+	payload["resultsCount"] = 2
+	response = PolygonGroupedProvider(Transport(payload)).fetch(harness.source, calendar.session(date(2024, 7, 1)))
+	assert response.state is ResponseState.COMPLETE
+	assert tuple(bar.ticker for bar in response.records) == ("AAA",)
+	assert response.ignored_placeholders == ("TTE",)
+	assert dict(response.counts)["resultsCount"] == 2
+
+
 @pytest.mark.parametrize("change", ["error", "http", "wrong-adjustment", "missing-adjustment", "bad-array", "truncated", "duplicate", "bad-price", "nan-price", "negative-count", "fractional-count", "wrong-day", "utc-day-only", "bad-continuation", "bad-count"])
 def test_invalid_provider_responses_are_sanitized_failures(harness, calendar, payload, change):
 	status = 200

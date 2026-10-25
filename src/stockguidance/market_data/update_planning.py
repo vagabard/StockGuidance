@@ -3,7 +3,7 @@ from datetime import datetime
 
 from stockguidance.calendar.sessions import TradingSession
 from stockguidance.config.source import SourceIdentity
-from stockguidance.database.repositories.market_data import MarketDataRepository, SessionSnapshot
+from stockguidance.database.repositories.market_data import MarketDataRepository, SessionMetadata, SessionSnapshot
 from stockguidance.database.repositories.sessions import SessionQuery, StoredSession
 from stockguidance.market_data.corrections import CorrectionPolicy
 from stockguidance.market_data.coverage import CoveragePlan
@@ -19,11 +19,21 @@ from stockguidance.validation.derived import derived_values_match
 class SnapshotCoverageReader:
 	def __init__(self, repository: MarketDataRepository) -> None:
 		self.repository = repository
+		self.metadata: tuple[SessionMetadata, ...] = ()
 		self.snapshots: tuple[SessionSnapshot, ...] = ()
+		self.cleaned_dates: tuple[date, ...] = ()
+		self.has_orphans = False
 
 	def read(self, query: SessionQuery) -> tuple[StoredSession, ...]:
+		self.cleaned_dates = self.repository.cleanup_placeholders(query)
+		self.has_orphans = self.repository.has_orphans(query)
+		self.metadata = self.repository.inspect_metadata(query)
+		self.snapshots = ()
+		return tuple(StoredSession(item.date_id, item.session.session_date, CoverageState.UNVERIFIED, "Source manifests and dependent rows require reconciliation", None if item.receipt is None else item.receipt.available_at) for item in self.metadata)
+
+	def load(self, query: SessionQuery) -> tuple[SessionSnapshot, ...]:
 		self.snapshots = self.repository.inspect(query)
-		return tuple(StoredSession(snapshot.date_id, snapshot.session.session_date, CoverageState.UNVERIFIED, "Source manifests and dependent rows require reconciliation", None if snapshot.receipt is None else snapshot.receipt.available_at) for snapshot in self.snapshots)
+		return self.snapshots
 
 
 @dataclass(frozen=True)
@@ -43,8 +53,8 @@ def _fetch_authorized(plan: CoveragePlan, session: TradingSession) -> bool:
 	return (plan.fetchable_start is None or session.session_date >= plan.fetchable_start) and (plan.fetchable_end is None or session.session_date <= plan.fetchable_end)
 
 
-def plan_updates(plan: CoveragePlan, snapshots: tuple[SessionSnapshot, ...], store: ManifestStore, correction: CorrectionPolicy, now: datetime) -> tuple[UpdateWork, ...]:
-	by_date = {snapshot.session.session_date: snapshot for snapshot in snapshots}
+def plan_updates(plan: CoveragePlan, metadata: tuple[SessionMetadata, ...], store: ManifestStore, correction: CorrectionPolicy, now: datetime, force_refresh_dates: frozenset[date] = frozenset()) -> tuple[UpdateWork, ...]:
+	by_date = {item.session.session_date: item for item in metadata}
 	work: list[UpdateWork] = []
 	for item in plan.sessions:
 		if item.state is CoverageState.NOT_YET_AVAILABLE or item.expected_available_at is None:
@@ -53,13 +63,16 @@ def plan_updates(plan: CoveragePlan, snapshots: tuple[SessionSnapshot, ...], sto
 			manifest = store.load(plan.request.source, item.session)
 		except InvalidManifest:
 			manifest = None
-		snapshot = by_date.get(item.session.session_date)
+		stored = by_date.get(item.session.session_date)
 		needs_download = manifest is None and _fetch_authorized(plan, item.session)
 		detail = "No validated request-scoped source evidence"
 		refresh_blocked = False
 		if manifest is not None:
 			response = manifest.download.response
 			refresh_due = response.state not in {ResponseState.COMPLETE, ResponseState.NO_TRADING} or correction.refresh_due(item.session, manifest.download.available_at, now)
+			expected_keys = tuple(sorted(bar.ticker for bar in response.records))
+			receipt_matches = stored is not None and stored.receipt is not None and stored.receipt.raw_id == records_id(response.records) and stored.raw_count == len(response.records) and stored.raw_keys == expected_keys
+			derived_matches = receipt_matches and stored.receipt is not None and stored.receipt.derived_dependency_id is not None and stored.receipt.derived_content_id is not None and stored.derived_count == len(response.records)
 			needs_download = refresh_due and _fetch_authorized(plan, item.session)
 			refresh_blocked = refresh_due and not needs_download
 			detail = "Provider verification or scheduled correction refresh" if needs_download else "Reconcile persisted evidence with database keys and content"
@@ -69,9 +82,11 @@ def plan_updates(plan: CoveragePlan, snapshots: tuple[SessionSnapshot, ...], sto
 				needs_download = False
 				refresh_blocked = False
 				detail = "Source evidence is unavailable at the current clock"
+			if not refresh_due and receipt_matches and derived_matches and item.session.session_date not in force_refresh_dates:
+				continue
 		elif not _fetch_authorized(plan, item.session):
 			detail = plan.provider_capability_detail or "Provider fetch capability is unresolved; retained local evidence is audit-only"
-		if snapshot is not None and snapshot.receipt is not None and snapshot.receipt.available_at > now:
+		if stored is not None and stored.receipt is not None and stored.receipt.available_at > now:
 			continue
 		work.append(UpdateWork(item.session, manifest, needs_download, detail, refresh_blocked))
 	return tuple(work)

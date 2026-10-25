@@ -83,6 +83,18 @@ def test_repeated_run_does_not_download_duplicate_or_rewrite_verified_rows(harne
 	assert harness.database.sql("SELECT COUNT(*) FROM raw_stock_data") == [(5,)]
 
 
+def test_existing_all_zero_placeholder_is_removed_and_reconciled(harness):
+	first = harness.run()
+	date_id = harness.database.sql("SELECT id FROM transaction_dates WHERE transaction_date = ?", ("2024-07-01",))[0][0]
+	harness.database.sql("INSERT INTO ticker_symbol(label, exchange) VALUES (?, ?)", ("TTE", "XNYS"))
+	ticker_id = harness.database.sql("SELECT id FROM ticker_symbol WHERE label = ?", ("TTE",))[0][0]
+	harness.database.sql("INSERT INTO raw_stock_data(ticker_id, date_id, open, high, low, close, volume, vwap, transactions) VALUES (?, ?, 0, 0, 0, 0, 0, NULL, 0)", (ticker_id, date_id))
+	second = harness.run()
+	assert second.successful
+	assert harness.database.sql("SELECT COUNT(*) FROM raw_stock_data WHERE ticker_id = ?", (ticker_id,)) == [(0,)]
+	assert first.data_revision == second.data_revision
+
+
 def test_interior_provider_failure_does_not_hide_behind_later_success(harness):
 	missing = date(2024, 7, 2)
 	harness.provider.errors.add(missing)

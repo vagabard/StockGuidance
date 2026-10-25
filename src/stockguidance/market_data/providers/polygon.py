@@ -6,7 +6,7 @@ from stockguidance.calendar.sessions import TradingSession
 from stockguidance.config.source import PriceAdjustment, SourceConfig, SourceIdentity, canonical_source_family
 from stockguidance.market_data.identity import mapping, text_field
 from stockguidance.market_data.providers.contracts import ProviderResponse, ResponseState, ProviderCapability, unknown_capability
-from stockguidance.market_data.records import count_value, provider_bar
+from stockguidance.market_data.records import count_value, is_non_trading_placeholder, provider_bar
 from stockguidance.workflows.failures import FailureCode, StageExecutionError, StageFailure, WorkflowStage
 
 
@@ -49,18 +49,27 @@ class PolygonGroupedProvider:
 			results = payload.get("results", [])
 			if not isinstance(results, list):
 				raise ValueError("Expected a results array")
-			records = tuple(sorted((provider_bar(row, session) for row in results), key=lambda bar: bar.ticker))
+			ignored: list[str] = []
+			validated = []
+			for value in results:
+				row = mapping(value)
+				ticker = text_field(row, "T")
+				if is_non_trading_placeholder(tuple(row.get(field) for field in ("o", "h", "l", "c", "v", "vw", "n"))):
+					ignored.append(ticker)
+				else:
+					validated.append(provider_bar(row, session))
+			records = tuple(sorted(validated, key=lambda bar: bar.ticker))
 			counts = tuple((name, count_value(payload[name])) for name in ("resultsCount", "queryCount", "count") if name in payload)
 			continuation = payload.get("next_url")
 			if continuation is not None and (not isinstance(continuation, str) or not continuation):
 				raise ValueError("Invalid continuation metadata")
-			if "resultsCount" in dict(counts) and dict(counts)["resultsCount"] != len(records):
+			if "resultsCount" in dict(counts) and dict(counts)["resultsCount"] != len(records) + len(ignored):
 				raise ValueError("Truncated response")
 			state = ResponseState.COMPLETE if records and "resultsCount" in dict(counts) and not continuation and status == "OK" else ResponseState.UNVERIFIED
 			if not records and status == "DELAYED":
 				state = ResponseState.NOT_YET_PUBLISHED
-			timestamps = tuple((text_field(row, "T"), count_value(row["t"])) for row in map(mapping, results))
-			return ProviderResponse(state, records, response.status, str(status), counts, bool(continuation), source_timestamps=timestamps)
+			timestamps = tuple((text_field(row, "T"), count_value(row["t"])) for row in map(mapping, results) if text_field(row, "T") not in ignored)
+			return ProviderResponse(state, records, response.status, str(status), counts, bool(continuation), source_timestamps=timestamps, ignored_placeholders=tuple(sorted(ignored)))
 		except Exception:
 			raise provider_failure() from None
 

@@ -28,7 +28,7 @@ class SourceManifest:
 
 
 def response_payload(response: ProviderResponse) -> dict[str, object]:
-	return {"state": response.state.value, "http_status": response.http_status, "provider_status": response.provider_status, "counts": dict(response.counts), "has_more": response.has_more, "evidence": response.evidence, "source_timestamps": dict(response.source_timestamps), "records": [bar_payload(bar) for bar in response.records]}
+	return {"state": response.state.value, "http_status": response.http_status, "provider_status": response.provider_status, "counts": dict(response.counts), "has_more": response.has_more, "evidence": response.evidence, "source_timestamps": dict(response.source_timestamps), "ignored_placeholders": list(response.ignored_placeholders), "records": [bar_payload(bar) for bar in response.records]}
 
 
 def decode_response(value: object) -> ProviderResponse:
@@ -44,7 +44,10 @@ def decode_response(value: object) -> ProviderResponse:
 	if any(type(timestamp) is not int for timestamp in timestamps.values()):
 		raise ValueError("Invalid source timestamps")
 	validated_timestamps = tuple((ticker, timestamp) for ticker, timestamp in timestamps.items() if isinstance(timestamp, int))
-	return ProviderResponse(ResponseState(text_field(payload, "state")), tuple(decode_bar(row) for row in rows), status, text_field(payload, "provider_status"), validated_counts, has_more, evidence, validated_timestamps)
+	ignored = payload.get("ignored_placeholders", [])
+	if not isinstance(ignored, list) or any(not isinstance(ticker, str) for ticker in ignored):
+		raise ValueError("Invalid ignored placeholder metadata")
+	return ProviderResponse(ResponseState(text_field(payload, "state")), tuple(decode_bar(row) for row in rows), status, text_field(payload, "provider_status"), validated_counts, has_more, evidence, validated_timestamps, tuple(ignored))
 
 
 class ManifestStore:

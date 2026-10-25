@@ -24,6 +24,7 @@ from stockguidance.market_data.publication import DailyPublicationPolicy
 from stockguidance.validation.repair import load_repair_plan
 from stockguidance.workflows.update_market_data import UpdateSettings, update_market_data
 from stockguidance.workflows.update_result import UpdateResult
+from stockguidance.workflows.progress import ProgressReporter
 
 
 def _capability_from_cache(store: JsonHistoryStore, identity: SourceIdentity) -> tuple[ProviderCapability | None, str | None]:
@@ -78,9 +79,11 @@ def _query_boundary(source: SourceConfig, calendar: ExchangeCalendar, discovery:
 
 
 def assemble_and_update(arguments: argparse.Namespace) -> UpdateResult:
+	reporter = ProgressReporter(enabled=getattr(arguments, "verbose", False))
+	reporter.message("starting market-data update")
 	clock = SystemClock()
-	database_path = resolve_cli_path(arguments.dbinfo_file, "dbinfo.id")
-	database_configuration = load_database_configuration(database_path)
+	database_path = reporter.measure("load database configuration", lambda: resolve_cli_path(arguments.dbinfo_file, "dbinfo.id"))
+	database_configuration = reporter.measure("read database configuration", lambda: load_database_configuration(database_path))
 	if database_configuration.data_configuration_file is None:
 		data_configuration = DataConfiguration("polygon", GROUPED_ENDPOINT, "us-stocks", GROUPED_UNIVERSE, PriceAdjustment(arguments.adjustment) is PriceAdjustment.ADJUSTED, False)
 	else:
@@ -106,9 +109,9 @@ def assemble_and_update(arguments: argparse.Namespace) -> UpdateResult:
 	boundary = history_store.load(identity)
 	calendar = _calendar_for_update(arguments, boundary, clock, data_configuration.calendar_id)
 	manifest_store = ManifestStore(source.data_root)
-	manifest_inventory = manifest_store.inventory(identity, calendar, start=calendar.start, end=calendar.end)
+	manifest_inventory = reporter.measure("inventory source manifests", lambda: manifest_store.inventory(identity, calendar, start=calendar.start, end=calendar.end))
 	include_database = arguments.dbinfo_file != "dbinfo.id" or arguments.data_root == "data" or bool(manifest_inventory.observations) or boundary is not None
-	local_inventory = _local_inventory(source, calendar, manifest_inventory, connect, table_names, include_database=include_database)
+	local_inventory = reporter.measure("inventory database coverage", lambda: _local_inventory(source, calendar, manifest_inventory, connect, table_names, include_database=include_database))
 	cached_capability, capability_issue = _capability_from_cache(history_store, identity)
 	if capability_issue is not None:
 		local_inventory = LocalCoverageInventory.merge((local_inventory, LocalCoverageInventory(identity, calendar.calendar_id, issues=(InventoryIssue(calendar.calendar_id, capability_issue),))))
@@ -127,12 +130,12 @@ def assemble_and_update(arguments: argparse.Namespace) -> UpdateResult:
 	else:
 		history_override = None
 	publication = DailyPublicationPolicy(timedelta(minutes=arguments.publication_delay_minutes), arguments.publication_evidence)
-	discovery = discover_coverage(
+	discovery = reporter.measure("discover provider capability and history", lambda: discover_coverage(
 		identity, calendar, clock, publication,
 		request=DiscoveryRequest(identity, requested_start, requested_end, clock.now()),
 		local_inventory=local_inventory, provider=provider, provider_capability=cached_capability,
 		history_boundary=boundary, history_override=history_override,
-	)
+	))
 	if discovery.effective_start is None or discovery.effective_end is None:
 		raise UnknownHistoryBoundary("No supported-history scope is known and no fresh provider capability establishes a fetch boundary")
 	start = requested_start or discovery.effective_start
@@ -155,9 +158,10 @@ def assemble_and_update(arguments: argparse.Namespace) -> UpdateResult:
 		repair_plan, discovery,
 	)
 	if arguments.initialize_schema:
-		initialize_update_schema(source, connect, table_names)
+		reporter.measure("initialize updater schema", lambda: initialize_update_schema(source, connect, table_names))
 	if arguments.history_start is not None and boundary is None and discovery.history_boundary is not None:
 		history_store.save(discovery.history_boundary)
-	result = update_market_data(source, settings, query_boundary, calendar, provider, MySQLMarketDataRepository(source, connect, table_names), clock)
+	result = update_market_data(source, settings, query_boundary, calendar, provider, MySQLMarketDataRepository(source, connect, table_names), clock, reporter=reporter)
 	history_store.save_discovery_metadata(discovery.metadata())
+	reporter.finish(successful=result.successful, failures=len(result.failures))
 	return result

@@ -11,13 +11,24 @@ _PRICE_LIMIT = Decimal("1e60")
 _PRICE_QUANTA = {8: Decimal("1e-8"), 22: Decimal("1e-22")}
 
 
+def is_non_trading_placeholder(values: tuple[object, ...]) -> bool:
+	if len(values) != 7:
+		return False
+	open_value, high, low, close, volume, vwap, transactions = values
+	try:
+		prices = tuple(Decimal(str(value)) for value in (open_value, high, low, close, volume))
+	except (InvalidOperation, TypeError, ValueError):
+		return False
+	return all(value == 0 for value in prices) and vwap is None and (transactions is None or transactions == 0)
+
+
 def _decimal_price(value: object, places: int) -> Decimal:
 	if isinstance(value, bool) or not isinstance(value, (str, int, float, Decimal)):
 		raise ValueError("Expected a numeric price")
 	try:
 		result = value if isinstance(value, Decimal) else Decimal(str(value))
 		if not result.is_finite() or result <= 0 or result >= _PRICE_LIMIT:
-			raise ValueError("Price must be finite, positive, and representable")
+			raise ValueError(f"Price must be finite, positive, and representable: {value!r}")
 		with localcontext() as context:
 			context.prec = 90
 			result = result.quantize(_PRICE_QUANTA[places], rounding=ROUND_HALF_UP)

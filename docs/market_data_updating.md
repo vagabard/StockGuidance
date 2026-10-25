@@ -8,6 +8,16 @@ only when explicitly invoked and rejects plans requiring manual review.
 Run commands from the repository root using PyCharm's configured Python. The
 supported frontend is `python -m stockguidance.cli.update_market_data`.
 Installing `pyproject.toml` also exposes the `update_market_data` console command.
+Add `--verbose` to report phase progress and elapsed times on stderr while
+keeping the final machine-readable result on stdout. Verbose failures include
+the underlying validation or storage exception to identify the failing phase.
+Planning reads bounded session metadata, receipts, row counts, and raw ticker
+IDs rather than decoding the entire raw and delta history. Full records are
+loaded only for sessions requiring import or repair (plus dependency neighbors).
+Exact all-zero OHLCV placeholder rows are removed transactionally and treated as
+non-trading; downloaded source files are retained unchanged. Small request
+scopes still run full integrity verification, while large scopes trust the
+database receipt identities during normal updates.
 
 ## Required evidence and policy
 
