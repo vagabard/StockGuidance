@@ -90,7 +90,7 @@ def verify(arguments: argparse.Namespace) -> dict[str, Any]:
 
 def main(argv: list[str] | None = None) -> int:
 	parser = argparse.ArgumentParser(description="Verify and optionally relabel the database source configuration")
-	parser.add_argument("--dbinfo-file", type=Path, default=Path("dbinfo.id"))
+	parser.add_argument("--dbinfo-file", default="dbinfo.id")
 	parser.add_argument("--data-root", type=Path, default=Path("data"))
 	parser.add_argument("--output", type=Path, default=Path("output/storage-consolidation"))
 	parser.add_argument("--expected-adjustment", choices=("unadjusted",), default="unadjusted")
