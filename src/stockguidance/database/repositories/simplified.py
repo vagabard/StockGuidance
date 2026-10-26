@@ -23,6 +23,7 @@ from stockguidance.database.simplified_contract import (
 	RepairMetadata,
 	SessionCompletion,
 	SourceConfigurationRecord,
+	UnitKind,
 )
 from stockguidance.database.simplified_schema import require_simplified_schema
 from stockguidance.database.table_names import TableNames, TableRole, load_table_names, quote_identifier
@@ -366,9 +367,67 @@ class RepairMetadataRepository(_Repository):
 class PendingUpdateRepositoryProtocol(Protocol):
 	def register(self, scope: PendingScope, created_at: datetime) -> PendingUpdate: ...
 	def load_active(self) -> PendingUpdate | None: ...
+	def begin_clearing(self, operation_id: int, started_at: datetime) -> None: ...
 	def record_failure(self, operation_id: int, failure: FailureDetail, failed_at: datetime) -> None: ...
 	def mark_cleared(self, operation_id: int, cleared_at: datetime) -> None: ...
 	def delete_completed(self, operation_id: int, completed_at: datetime) -> None: ...
+
+
+def _assert_clear_scope_is_empty(cursor: Cursor, scope: PendingScope, table_names: TableNames) -> None:
+	"""Verify the durable clear evidence before setting its committed flag."""
+
+	prices = quote_identifier(table_names.table(TableRole.PRICES))
+	repairs = quote_identifier(table_names.table(TableRole.REPAIR_METADATA))
+	deltas = quote_identifier(table_names.table(TableRole.DELTAS))
+	sessions = quote_identifier(table_names.table(TableRole.SESSIONS))
+	for unit in scope.clear.raw:
+		cursor.execute(f"SELECT 1 FROM {prices} WHERE date_id = %s LIMIT 1", (unit.date_id,))
+		if cursor.fetchall():
+			raise ValueError("Cannot commit clearing while raw rows remain")
+	for unit in scope.clear.repairs:
+		cursor.execute(f"SELECT 1 FROM {repairs} WHERE date_id = %s AND ticker_id = %s LIMIT 1", (unit.date_id, unit.ticker_id))
+		if cursor.fetchall():
+			raise ValueError("Cannot commit clearing while repair metadata remains")
+	for unit in scope.clear.deltas:
+		cursor.execute(f"SELECT 1 FROM {deltas} WHERE date_id = %s AND ticker_id = %s LIMIT 1", (unit.date_id, unit.ticker_id))
+		if cursor.fetchall():
+			raise ValueError("Cannot commit clearing while delta rows remain")
+	for unit in scope.clear.zscores:
+		if unit.series_key is None or unit.window is None:
+			raise ValueError("Invalid z-score clear unit")
+		series = quote_identifier(table_names.table(TableRole.ZSCORE_SERIES))
+		cursor.execute(f"SELECT family FROM {series} WHERE series_key = %s", (unit.series_key,))
+		series_rows = cursor.fetchall()
+		if len(series_rows) != 1:
+			raise ValueError("Cannot verify a z-score clear without its series definition")
+		family = series_rows[0][0].decode("ascii") if isinstance(series_rows[0][0], bytes) else str(series_rows[0][0])
+		resolved = table_names.resolve_zscore_tables((unit.window,))[unit.window]
+		if family == "price":
+			table = resolved.price
+		elif family == "price_delta":
+			table = resolved.price_delta
+		else:
+			raise ValueError("Unknown z-score series family")
+		cursor.execute(f"SELECT 1 FROM {quote_identifier(table)} WHERE date_id = %s AND ticker_id = %s LIMIT 1", (unit.date_id, unit.ticker_id))
+		if cursor.fetchall():
+			raise ValueError("Cannot commit clearing while z-score rows remain")
+	for unit in scope.clear.completion:
+		if unit.unit_kind == UnitKind.RAW_SESSION.value:
+			cursor.execute(f"SELECT raw_complete, raw_available_at, raw_completed_at, raw_revision FROM {sessions} WHERE id = %s", (unit.date_id,))
+			rows = cursor.fetchall()
+			if len(rows) != 1 or rows[0][0] not in (0, False) or any(value is not None for value in rows[0][1:]):
+				raise ValueError("Cannot commit clearing while raw completion evidence remains")
+		elif unit.unit_kind == UnitKind.DELTA_SESSION.value:
+			cursor.execute(f"SELECT delta_complete, delta_completed_at FROM {sessions} WHERE id = %s", (unit.date_id,))
+			rows = cursor.fetchall()
+			if len(rows) != 1 or rows[0][0] not in (0, False) or rows[0][1] is not None:
+				raise ValueError("Cannot commit clearing while delta completion evidence remains")
+		elif unit.unit_kind == UnitKind.ZSCORE_SESSION.value:
+			cursor.execute(f"SELECT 1 FROM {quote_identifier(table_names.table(TableRole.ZSCORE_SESSIONS))} WHERE series_key = %s AND date_id = %s LIMIT 1", (unit.series_key, unit.date_id))
+			if cursor.fetchall():
+				raise ValueError("Cannot commit clearing while z-score completion evidence remains")
+		else:
+			raise ValueError("Unknown completion clear unit")
 
 
 class PendingUpdateRepository(_Repository, PendingUpdateRepositoryProtocol):
@@ -420,7 +479,14 @@ class PendingUpdateRepository(_Repository, PendingUpdateRepositoryProtocol):
 		operation_id = _db_id(operation_id, "operation_id")
 		cleared_at = _utc(cleared_at, "cleared_at")
 		with self._transaction(write=True) as (_, cursor):
-			self._require_operation(cursor, operation_id)
+			cursor.execute(f"SELECT scope, affected_rows_cleared FROM {quote_identifier(self.table_names.table(TableRole.PENDING_UPDATES))} WHERE id = %s FOR UPDATE", (operation_id,))
+			rows = cursor.fetchall()
+			if len(rows) != 1:
+				raise ValueError("Unknown pending operation")
+			if _db_bool(rows[0][1], "affected_rows_cleared"):
+				return
+			scope = PendingScope.from_json(_db_json(rows[0][0], "pending scope"))
+			_assert_clear_scope_is_empty(cursor, scope, self.table_names)
 			cursor.execute(f"UPDATE {quote_identifier(self.table_names.table(TableRole.PENDING_UPDATES))} SET affected_rows_cleared = 1, clearing_started_at = COALESCE(clearing_started_at, %s) WHERE id = %s", (cleared_at, operation_id))
 
 	def delete_completed(self, operation_id: int, completed_at: datetime) -> None:

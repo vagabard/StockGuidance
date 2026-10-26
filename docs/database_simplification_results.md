@@ -225,3 +225,153 @@ contracts, including complete persisted clear/rebuild scope and independently
 verified dependency closure. Do not treat this Stage 3 schema/repository gate
 as evidence that later recovery, reader locking, numerical rebuilding, or
 production migration is complete.
+
+## Stage 4 — dependency closure planner
+
+Status: complete for the pure Stage 4 planner and acceptance gates. The planner
+is database-neutral; it performed no database writes, provider calls, file
+access, schema initialization, or production inspection. No commit was created.
+
+### Changed files and interfaces
+
+* `src/stockguidance/database/dependency_planner.py` adds the immutable
+  `UpdateRequest`, `SnapshotSession`, `InterpolationInterval`,
+  `ZScoreSeriesSnapshot`, `CacheEntry`, `CacheRevision`, and `DatabaseSnapshot`
+  inputs (including prepared replacement ticker IDs) plus the concrete `DependencyPlanner.plan()` implementation. The
+  planner emits the existing versioned `PendingScope` contract, with separate
+  clear and rebuild units for raw sessions, repair rows, delta rows, z-score
+  sessions, and raw/delta/z-score completion records.
+* `tests/database/test_database_simplification_stage4.py` adds independent
+  closure expectations for corrections, consecutive changes, interpolation
+  endpoints, derived-only holes, holiday/session boundaries, ranking breadth,
+  latest incomplete targets, cache bounds, deterministic deduplication, and
+  scope serialization.
+* `docs/database_simplification_contract.md` records the concrete Stage 4
+  planner inputs, bounded cache behavior, and formula-window closure.
+* `docs/database_simplification_results.md` records this handoff.
+
+### Decisions recorded
+
+The planner treats exchange-session sequence numbers, never calendar-day
+offsets, as the dependency coordinate. A raw change plans only its raw session,
+the actual predecessor/current/follower delta keys, and the full actual
+predecessor population when the follower-session top-100 boundary can change.
+Interpolation closure is limited to persisted exceptional rows inside the
+affected endpoint interval. Missing or withdrawn keys are not expanded into a
+Cartesian ticker/date set.
+
+Configured z-score series are read from the snapshot. A price window of `W`
+plans scored sessions from the changed close through `W-1` following sessions;
+a price-delta window plans through `W` following sessions because it consumes
+the predecessor close. Derived-only delta holes affect price-delta series, while
+missing z-score completion records are planned explicitly for the requested
+session. Future-dependent legacy label columns remain in delta closure and are
+not treated as feature inputs.
+
+The durable scope is sorted and deduplicated by unit kind, session, integer
+relationship IDs, series key, and window. Cache entries use their recorded
+dependency dates; aggregate cache revisions are bounded using the existing
+feature lookback, normalization warm-up, and target horizon. The planner is
+pure and does not infer relationships from hashes.
+
+### Verification
+
+* **Passed:** `.venv\Scripts\python.exe -m pytest tests\database\test_database_simplification_stage4.py -q` — 8 tests.
+* **Passed:** `.venv\Scripts\python.exe -m pytest tests\database -q` — 80 tests, with the 4 existing pandas deprecation warnings.
+* **Passed:** `.venv\Scripts\python.exe -m mypy src\stockguidance\database\dependency_planner.py tests\database\test_database_simplification_stage4.py` — no issues in 2 files.
+* **Passed:** `.venv\Scripts\python.exe -m mypy src\stockguidance\database` — no issues in 34 source files.
+* **Passed:** `git diff --check`; an explicit trailing-whitespace scan found no
+  trailing whitespace in the changed tracked and untracked files.
+
+### Limitations and next-stage prerequisites
+
+Stage 4 does not register pending operations, acquire the maintenance lock,
+clear rows, rebuild calculations, guard readers, invalidate caches, or switch
+any runtime entrypoint. `DatabaseSnapshot` is the coordinator-facing evidence
+boundary; later code must populate it from one consistent database snapshot and
+must provide date IDs and actual ticker keys before registration. Stage 5 must
+persist this complete scope before clearing, validate prepared reconstruction
+payloads, coordinate recovery, and implement idempotent bounded clearing and
+reader exclusion. SQLite/unit planner tests do not establish MySQL transaction
+or concurrency behavior.
+
+## Stage 5 — pending-operation coordination and idempotent clearing
+
+Status: complete for the Stage 5 coordination, clearing, recovery, cache
+invalidation, and reader-guard acceptance gates. No production entrypoint was
+cut over, no production database was selected or modified, and no commit was
+created.
+
+### Changed files and interfaces
+
+* `src/stockguidance/database/operation_recovery.py` adds
+  `PendingOperationCoordinator`, `DatabasePendingClearer`,
+  `DatabaseReadinessGuard`, `consistent_read_transaction`, prepared-payload
+  validation, `ClearResult`, `ReadScope`, `Readiness`, and the later-stage
+  `RebuildRunner`/`RebuildResult` boundary. The coordinator recovers the one
+  durable pending row before planning another request, registers complete
+  scope before deleting, and does not implement numerical rebuilding.
+* `src/stockguidance/database/repositories/simplified.py` makes
+  `mark_cleared` verify every persisted raw, repair, delta, z-score, and
+  completion unit before committing `affected_rows_cleared = 1`. The scope and
+  source/dictionary rows are never rewritten or deleted.
+* `src/stockguidance/workflows/market_lock.py` retains the existing advisory
+  lock name and adds connection-identity heartbeats with `IS_USED_LOCK` so
+  lock loss aborts clearing before another chunk or the flag transition.
+* `tests/database/test_database_simplification_stage5.py` covers registration
+  recovery, bounded interruptions, failure before the flag commit, idempotent
+  repeats, unrelated data, cache invalidation, lock loss, reader overlap, and
+  the no-rebuild boundary.
+* `tools/database_simplification_stage5.py` is a disposable-MySQL acceptance
+  runner for transaction visibility and advisory-lock contention.
+* `docs/database_simplification_contract.md` records the Stage 5 boundaries;
+  this handoff records the implementation evidence.
+
+### Decisions
+
+The clearer commits one bounded unit-kind chunk at a time. Raw and delta
+completion remain on `transaction_dates` and are reset rather than deleting
+the session row. Z-score rows and completion metadata are removed by their
+integer date/ticker or series/date keys; source configuration, state
+dictionary, ticker/date dictionaries, prepared payload descriptors, and saved
+models are preserved. Cache invalidation is an injected idempotent sink and is
+performed only after database chunks succeed; a sink failure leaves the
+durable clear flag false for safe retry.
+
+The pending row is reloaded before clearing and its canonical scope must match
+the registered scope. `mark_cleared` independently verifies that all scoped
+database evidence is absent, so a process interruption before or during the
+flag transaction cannot make recalculation reachable. Recovery revalidates
+prepared payload existence and SHA-256 content before repeating deletes. A
+Stage 5-only coordinator raises `RebuildRequiredError` once clearing is
+committed instead of silently accepting a second update; a supplied later
+runner is invoked only after the true flag is visible.
+
+Readiness is checked through the caller's open repeatable-read transaction.
+The guard compares the requested date-level or explicit work-unit scope with
+both clear and rebuild units. A pending overlap returns
+`unfinished_operation`; an unrelated read remains available from its own
+consistent snapshot. Missing rows are not used as a readiness signal.
+
+### Verification
+
+* **Passed:** `.venv\Scripts\python.exe -m pytest tests\database\test_database_simplification_stage5.py -q` — 7 tests.
+* **Passed:** `.venv\Scripts\python.exe -m pytest tests\database -q` — 87 tests, with the 4 existing pandas deprecation warnings.
+* **Passed:** `.venv\Scripts\python.exe -m mypy src\stockguidance\database src\stockguidance\workflows\market_lock.py tools\database_simplification_stage5.py` — no issues in 37 source files.
+* **Passed:** `.venv\Scripts\python.exe tools\database_simplification_stage5.py --dbinfo-file replacement-dbinfo.id --schema stockguidance_disposable_stage5_20261026` — disposable MySQL coordination and visibility acceptance passed; the prefixed schema was dropped in cleanup.
+* **Passed:** Python compilation for the new Stage 5 module and runner.
+* **Passed:** `mvn -q -f java\pom.xml test` — Java regression suite passed; Maven emitted the existing JVM warnings and expected credential-safe connection-failure test trace.
+* **Passed:** `git diff --check` before this handoff update; the final check is rerun after documentation changes.
+
+### Limitations and next-stage prerequisites
+
+The current maintenance and update CLIs still use the historical workflow by
+design; coordinated runtime cutover remains Stage 8. Stage 5 supplies no raw
+loader, interpolation rebuild, delta calculator, z-score writer, cache store,
+or production migration. The default cache sink is intentionally inert until
+the later cache implementation supplies a real idempotent invalidator; callers
+that own caches must inject it before relying on invalidation. SQLite tests
+cover failure injection, while the disposable-MySQL runner covers actual
+transaction visibility and advisory-lock behavior; neither is evidence about
+production capacity or migration readiness. Stage 6 must consume the prepared
+payloads and only start rebuilding after the committed clear flag.

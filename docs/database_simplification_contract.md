@@ -1,9 +1,11 @@
 # Database simplification replacement contract
 
-Status: Stage 2 contract update. This document specifies the replacement that
+Status: Stage 5 contract update. This document specifies the replacement that
 later stages must implement. It does not initialize, migrate, or alter a
 production database. The Stage 2 disposable-MySQL measurement gate passed and
-selected the raw-column layout below under the required decision rule.
+selected the raw-column layout below under the required decision rule. Stages
+4-5 now provide the pure dependency planner and recovery boundary described
+below.
 
 ## 1. Scope and compatibility rules
 
@@ -495,6 +497,55 @@ class DependencyPlanner(Protocol):
     def plan(self, request: UpdateRequest, snapshot: DatabaseSnapshot) -> PendingScope: ...
 ```
 
+Stage 4 implements this boundary in
+`src/stockguidance/database/dependency_planner.py`. Its immutable
+`DatabaseSnapshot` contains the exchange-session/date-ID inventory, actual
+raw/delta/repair ticker keys, prepared replacement ticker keys, interpolation endpoint intervals, configured
+`ZScoreSeriesDefinition` windows and completion IDs, and explicit cache
+revision evidence. `FeatureSpec`, `TargetSpec`, and normalization warm-up
+settings are carried with that snapshot for bounded cache invalidation. The
+planner performs no database, provider, or filesystem operation and rejects a
+snapshot whose supplied source configuration or calendar disagrees with the
+request. A missing optional configuration key is accepted only for fixture
+snapshots; a populated key must match the request.
+
+The planner records raw sessions, exceptional repair rows, predecessor/current/
+follower delta rows, ranking-session populations, z-score rows and completion
+records independently in `clear` and `rebuild`. Price windows cover `W`
+exchange sessions and price-delta windows cover `W+1` close sessions. Cache
+entries with dependency evidence are selected by actual overlap; cache scopes
+without entry lineage are bounded by the configured feature lookback,
+normalization warm-up, and target horizon. No Cartesian placeholder keys are
+created for withdrawn or unavailable tickers.
+
+Stage 5 implements the coordination boundary in
+`src/stockguidance/database/operation_recovery.py`. The coordinator acquires
+the existing `stockguidance_daily_maintenance` advisory lock, loads and
+validates any active pending scope before planning a new request, and validates
+all `PreparedPayload` files and SHA-256 identities before registration or
+recovery clearing. `DatabasePendingClearer` deletes only the persisted raw,
+repair, delta, z-score, and completion units in bounded committed chunks. It
+preserves sessions, tickers, source configuration, the data-state dictionary,
+the pending scope, and prepared payloads. Cache invalidation is an injected,
+retryable sink; saved model files are outside this operation and are never
+deleted.
+
+The `affected_rows_cleared` transition is committed only after the pending
+scope is reloaded and every scoped database row/completion record is absent.
+The transition remains false after chunk or cache failure, so repeating the
+clear is harmless. The coordinator has no rebuild implementation: an injected
+later-stage runner is called only after the true flag is committed, and a
+Stage 5-only coordinator raises `RebuildRequiredError` instead of accepting a
+new operation over uncleared or unrecalculated work.
+
+`DatabaseReadinessGuard.check` reads pending state through the transaction
+supplied by the caller. `consistent_read_transaction` establishes a MySQL
+`REPEATABLE READ` snapshot before the guard and dependent reads; overlapping
+scopes return `unfinished_operation`, while unrelated scopes remain readable.
+Readers never infer readiness from a missing data row. `MaintenanceWriterLock`
+also verifies the owning MySQL connection with `IS_USED_LOCK` before each clear
+chunk, and lock loss aborts without setting the clear flag.
+
 The supporting types are fixed at this boundary:
 
 ```python
@@ -557,6 +608,7 @@ it does not delete, insert, download, or mutate a repository.
 class PendingUpdateRepository(Protocol):
     def register(self, scope: PendingScope, created_at: datetime) -> PendingUpdate: ...
     def load_active(self) -> PendingUpdate | None: ...
+    def begin_clearing(self, operation_id: int, started_at: datetime) -> None: ...
     def record_failure(self, operation_id: int, failure: FailureDetail, failed_at: datetime) -> None: ...
     def mark_cleared(self, operation_id: int, cleared_at: datetime) -> None: ...
     def delete_completed(self, operation_id: int, completed_at: datetime) -> None: ...
