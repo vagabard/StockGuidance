@@ -375,3 +375,89 @@ cover failure injection, while the disposable-MySQL runner covers actual
 transaction visibility and advisory-lock behavior; neither is evidence about
 production capacity or migration readiness. Stage 6 must consume the prepared
 payloads and only start rebuilding after the committed clear flag.
+
+## Stage 6 — raw observations and interpolation
+
+Status: complete for the Stage 6 raw/payload/interpolation acceptance gates.
+No production entrypoint was cut over, no production database was selected or
+modified, no live provider was contacted, and no commit was created.
+
+### Changed files and interfaces
+
+* `src/stockguidance/database/raw_rebuild.py` adds `RawPayloadPreparer`,
+  `FilePreparedPayloadReader`, `read_canonical_file`, `RawRebuildRunner`, and
+  the validated-payload/error contracts. Preparation reads the exact canonical
+  file without archive-catalog or file-stat invalidation, uses an injected
+  provider only when the canonical input is absent or a forced replacement is
+  requested, and stages a fresh hash-bound artifact before clearing.
+* `src/stockguidance/database/simplified_contract.py` allows original repair
+  payload fields to retain nonnumeric source text as well as Decimal values;
+  effective and endpoint values remain Decimal-precision fields.
+* `src/stockguidance/database/repositories/simplified.py` decodes preserved
+  nonnumeric original repair values without losing the source payload.
+* `tests/database/test_database_simplification_stage6.py` covers canonical and
+  provider preparation, forced refresh, adjustment mismatch, malformed and
+  duplicate inputs, exact source identity, missing placeholders, no Cartesian
+  expansion, bounded interpolation with and without endpoints, resume skip,
+  and rollback/retry after an interruption.
+* `tools/database_simplification_stage6.py` runs the raw/interpolation gate on
+  an explicitly prefixed disposable MySQL schema.
+* `docs/database_simplification_contract.md` records the concrete Stage 6
+  payload and runner boundary; this handoff records the evidence.
+
+### Decisions and limitations
+
+Canonical NDJSON is decoded by the existing `decode_archive` path, so complete
+response counts, duplicate ticker rejection, source timestamps, Decimal
+precision, and OHLC/field validation remain shared with the current source
+implementation. Provider fallback responses are normalized through the same
+complete-response checks. No-trading responses complete the session without
+creating rows; explicit zero placeholders or ignored provider keys create only
+their own NULL-valued `missing` rows. Other invalid records retain safe,
+representable raw fragments and the complete original values in repair metadata
+with state `bad`.
+
+Raw sessions commit rows, repair metadata, availability/observation timing, and
+raw completion together. Repair commits are separate atomic work units and
+preserve the existing `linear-trading-session-v1` interpolation formula. The
+injected calendar supplies session ordinals; explicit missing rows block an
+interpolation interval, and absent rows never become inferred placeholders.
+Completed raw revisions and stable repair revisions are skipped during resume.
+The runner deliberately returns later delta/z-score units as deferred, so it is
+not yet a complete operation runner and is not wired into the Stage 5
+coordinator. Stage 7 must compose it with the existing numerical kernels before
+the pending operation can be deleted. The existing Stage 4/5 scope model still
+requires prepared payload descriptors for any raw unit that reaches this
+runner.
+
+### Verification
+
+* **Passed:** `.venv\Scripts\python.exe -m pytest
+  tests\database\test_database_simplification_stage6.py -q` — 8 tests.
+* **Passed:** `.venv\Scripts\python.exe -m pytest tests\database -q` — 95
+  tests, with the 4 existing pandas deprecation warnings.
+* **Passed:** `.venv\Scripts\python.exe -m mypy
+  src\stockguidance\database tools\database_simplification_stage6.py` — no
+  issues in 37 source files.
+* **Passed:** Python compilation for `raw_rebuild.py` and the Stage 6 runner.
+* **Passed:** `.venv\Scripts\python.exe tools\database_simplification_stage6.py
+  --dbinfo-file replacement-dbinfo.id
+  --schema stockguidance_disposable_stage6_20261026` — raw rows, source states,
+  interpolation metadata, MySQL Decimal values, and repeat-resume behavior
+  passed; the prefixed disposable schema was dropped in cleanup.
+* **Passed:** `mvn -q -f java\pom.xml test` — the Java regression suite passed;
+  Maven emitted the existing JVM warnings and expected credential-safe
+  connection-failure test trace.
+* **Passed:** the Stage 6 SQLite interruption fixture verified that a raw-batch
+  failure rolls back both rows and `raw_complete`, and a retry completes it.
+* **Passed:** no provider calls were made by the acceptance runner and no
+  production database/configuration was selected.
+
+### Next-stage prerequisites
+
+Stage 7 must consume the committed raw/repair units before rebuilding deltas
+and z-scores, preserve the current numerical kernels and quality propagation,
+and handle deferred future-dependent outcomes without retry loops. It must
+compose the Stage 6 runner with the later calculation units and only remove a
+pending operation after all persisted scope units validate. Runtime maintenance
+cutover remains Stage 8; this stage intentionally does not modify those paths.

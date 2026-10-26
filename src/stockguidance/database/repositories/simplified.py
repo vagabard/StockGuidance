@@ -337,6 +337,23 @@ class RepairMetadataRepository(_Repository):
 				raise ValueError(f"Invalid {name} decimal") from None
 		return tuple(result)
 
+	@staticmethod
+	def _original_array(value: object, name: str) -> tuple[Decimal | str | None, ...]:
+		if not isinstance(value, list) or len(value) != 7:
+			raise ValueError(f"Invalid {name}")
+		result: list[Decimal | str | None] = []
+		for item in value:
+			if item is None:
+				result.append(None)
+			elif not isinstance(item, str):
+				raise ValueError(f"Invalid {name} value")
+			else:
+				try:
+					result.append(Decimal(item))
+				except InvalidOperation:
+					result.append(item)
+		return tuple(result)
+
 	@classmethod
 	def _record(cls, row: Sequence[object]) -> RepairMetadata:
 		if len(row) != 15:
@@ -357,7 +374,7 @@ class RepairMetadataRepository(_Repository):
 			endpoint = (cls._decimal_array(endpoint_raw[0], "endpoint_values"), cls._decimal_array(endpoint_raw[1], "endpoint_values"))
 		return RepairMetadata(
 			_db_id(row[0], "date_id"), _db_id(row[1], "ticker_id"), _hash(row[2], "revision"), state,
-			cls._decimal_array(_db_json(row[4], "original_values"), "original_values"), effective, tuple(invalid),
+			cls._original_array(_db_json(row[4], "original_values"), "original_values"), effective, tuple(invalid),
 			None if row[7] is None else _text(row[7], "interpolation_method"), None if row[8] is None else _db_id(row[8], "prior_date_id"),
 			None if row[9] is None else _db_id(row[9], "following_date_id"), endpoint, None if row[11] is None else _utc(row[11], "observed_at"),
 			None if row[12] is None else _utc(row[12], "available_at"), None if row[13] is None else _utc(row[13], "endpoints_available_at"), _utc(row[14], "recorded_at"),

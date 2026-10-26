@@ -472,7 +472,7 @@ class RepairMetadata:
 	ticker_id: int
 	revision: str
 	state: DataState
-	original_values: tuple[Decimal | None, ...]
+	original_values: tuple[Decimal | str | None, ...]
 	effective_values: tuple[Decimal | None, ...] | None
 	invalid_fields: tuple[str, ...]
 	interpolation_method: str | None

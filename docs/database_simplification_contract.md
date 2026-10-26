@@ -768,3 +768,47 @@ convention. No temporary adapter or dual-write path was introduced. Existing
 production entrypoints continue to use the old initializer and repositories
 until the coordinated cutover stage. Stage 4 then implements and tests the
 dependency closure described above.
+
+### Stage 6 raw rebuild boundary
+
+`stockguidance.database.raw_rebuild` implements the raw portion of the later
+rebuild-runner boundary without wiring it into a production entrypoint. Its
+interfaces are:
+
+```python
+class PreparedPayloadReader(Protocol):
+    def read(self, payload: PreparedPayload,
+             session: TradingSession) -> ValidatedRawPayload: ...
+
+class RawPayloadPreparer:
+    def prepare(self, session: TradingSession, *, force_refresh: bool = False,
+                available_at: datetime | None = None) -> PreparedPayload: ...
+
+class RawRebuildRunner:
+    def rebuild(self, operation: PendingUpdate,
+                connection: WriteConnection) -> RebuildResult: ...
+```
+
+Normal preparation reads only the exact canonical
+`data/market_summary/YYYY/YYYY-MM-DD.ndjson` path and copies its validated
+bytes into an operation-owned staged payload. A forced preparation always calls
+the injected source provider and creates a new staged artifact; it cannot adopt
+the old canonical file. Adjusted sources cannot use the unadjusted canonical
+path. Complete responses are checked through the existing archive decoder and
+response-count/timestamp/Decimal validation; explicit no-trading responses use
+an operation-owned response envelope. The staged descriptor binds both the
+payload checksum and the existing validated-record identity.
+
+The raw runner requires `affected_rows_cleared` and commits each raw session
+unit in one transaction, including raw rows, source states, exceptional repair
+metadata, receipt timing, and `raw_complete`/`raw_revision`. It creates rows
+only for returned source keys and explicit provider placeholders. Known
+placeholders are NULL-valued `missing` rows; no-trading and absent/unlisted
+keys do not expand into a ticker/date Cartesian product. Invalid source rows
+retain representable fragments plus their original JSON values in `bad`
+metadata. Repair units reuse `linear-trading-session-v1`, use exchange-session
+ordinals from the injected calendar, refuse interpolation across explicit
+missing rows, and commit their effective values/state and endpoint metadata
+atomically. A completed raw unit is skipped on resume by its completion and
+payload revision; a completed repair revision is skipped by its persisted
+metadata. Delta and z-score units remain deferred to Stage 7.
