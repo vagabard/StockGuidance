@@ -44,8 +44,9 @@ def verify(arguments: argparse.Namespace) -> dict[str, Any]:
 			first = date.fromisoformat(str(arguments.start_date)) if arguments.start_date else date.fromisoformat(str(bounds[0][0]))
 			last = date.fromisoformat(str(arguments.end_date)) if arguments.end_date else date.fromisoformat(str(bounds[0][1]))
 			calendar = ExchangeCalendar(source.calendar_id, date(1970, 1, 1), last)
+			trading_dates = {session.session_date for session in calendar.sessions(first, last)}
 			cursor.execute(f"SELECT transaction_date FROM {quote_identifier(names.table(TableRole.SESSIONS))} WHERE transaction_date BETWEEN %s AND %s ORDER BY transaction_date", (first, last))
-			dates = tuple(date.fromisoformat(str(row[0])) for row in cursor.fetchall())
+			dates = tuple(date.fromisoformat(str(row[0])) for row in cursor.fetchall() if date.fromisoformat(str(row[0])) in trading_dates)
 			for session_date in dates:
 				path = archive_path(source.data_root, session_date)
 				try:
@@ -55,11 +56,11 @@ def verify(arguments: argparse.Namespace) -> dict[str, Any]:
 					records = []
 					for row in rows:
 						try:
-							records.append(decode_raw_row((0, *row))[1])
+							records.append(decode_raw_row((1, *row))[1])
 						except (TypeError, ValueError):
 							continue
-					if len(rows) != len(response.records) + len(response.bad_records) or records_id(tuple(records)) != records_id(response.records):
-						mismatches.append({"date": session_date.isoformat(), "reason": "raw rows differ from canonical archive", "database_rows": len(rows), "canonical_rows": len(response.records) + len(response.bad_records)})
+					if len(rows) != len(response.records) or records_id(tuple(records)) != records_id(response.records):
+						mismatches.append({"date": session_date.isoformat(), "reason": "raw rows differ from canonical archive", "database_rows": len(rows), "canonical_rows": len(response.records)})
 				except (OSError, TypeError, ValueError, KeyError) as error:
 					mismatches.append({"date": session_date.isoformat(), "reason": str(error), "path": str(path)})
 		finally:
