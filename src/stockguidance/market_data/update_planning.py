@@ -107,7 +107,7 @@ def plan_updates(plan: CoveragePlan, metadata: tuple[SessionMetadata, ...], stor
 			refresh_due = response.state not in {ResponseState.COMPLETE, ResponseState.NO_TRADING} or correction.refresh_due(item.session, manifest.download.available_at, now)
 			expected_keys = tuple(sorted(bar.ticker for bar in response.records))
 			receipt_matches = stored is not None and stored.receipt is not None and stored.receipt.raw_id == records_id(response.records) and stored.raw_count == len(response.records) and stored.raw_keys == expected_keys
-			derived_matches = receipt_matches and stored.receipt is not None and stored.receipt.derived_dependency_id is not None and stored.receipt.derived_content_id is not None and stored.derived_count == len(response.records)
+			derived_matches = stored is not None and receipt_matches and stored.receipt is not None and stored.receipt.derived_dependency_id is not None and stored.receipt.derived_content_id is not None and stored.derived_count == len(response.records)
 			needs_download = refresh_due and _fetch_authorized(plan, item.session)
 			refresh_blocked = refresh_due and not needs_download
 			detail = "Provider verification or scheduled correction refresh" if needs_download else "Reconcile persisted evidence with database keys and content"

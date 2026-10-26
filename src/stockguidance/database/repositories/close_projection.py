@@ -21,7 +21,7 @@ def project_closes(query: CloseQuery, inspection: DatabaseInspection, manifests:
 		for ticker_id in query.ticker_ids:
 			symbol = symbols.get(ticker_id)
 			quality = None if snapshot is None else next((record for record in snapshot.quality if record.observation.ticker == symbol), None)
-			if quality is not None:
+			if quality is not None and snapshot is not None:
 				values, flags = quality.usable(query.quality_policy, query.scope.as_of)
 				if values is not None and snapshot.receipt is not None and snapshot.raw_verified:
 					available = max(snapshot.receipt.available_at, quality.available_at or quality.observation.available_at)

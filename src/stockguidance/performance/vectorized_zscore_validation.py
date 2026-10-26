@@ -11,7 +11,10 @@ from queue import Empty, Full
 from threading import Thread
 from time import perf_counter
 import traceback
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
+
+if TYPE_CHECKING:
+	import numpy as np
 
 from stockguidance.database.table_names import quote_identifier
 from stockguidance.market_data.atomic import atomic_write

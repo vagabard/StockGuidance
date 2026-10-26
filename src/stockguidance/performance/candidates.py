@@ -115,7 +115,7 @@ def _calendar_sessions(data_root: Path, calendar_id: str = DEFAULT_CALENDAR_ID) 
 	paths = inventory(data_root)
 	first, last = date.fromisoformat(paths[0].stem), date.fromisoformat(paths[-1].stem)
 	calendar = ExchangeCalendar(calendar_id, first, last)
-	return calendar, tuple(path.stem for path in paths)
+	return calendar, tuple(date.fromisoformat(path.stem) for path in paths)
 
 
 def _shift_date(calendar: ExchangeCalendar, value: date, offset: int) -> date | None:
@@ -200,8 +200,8 @@ def build_manifest(paths: ManifestPaths, output: Path, *, table_names: TableName
 	dependency_dates: set[date] = set()
 	target_payloads: list[dict[str, object]] = []
 	for session in sorted(roles):
-		prior = tuple(_shift_date(calendar, session, -offset) for offset in range(1, 61))
-		prior = tuple(item for item in reversed(prior) if item is not None)
+		prior_candidates = tuple(_shift_date(calendar, session, -offset) for offset in range(1, 61))
+		prior: tuple[date, ...] = tuple(item for item in reversed(prior_candidates) if isinstance(item, date))
 		following = _shift_date(calendar, session, 1)
 		derived_dependencies = tuple(item for item in (_shift_date(calendar, session, -1), following) if item is not None)
 		zscore_dependencies = prior + (session,)
@@ -218,12 +218,12 @@ def build_manifest(paths: ManifestPaths, output: Path, *, table_names: TableName
 	file_by_date = {date.fromisoformat(path.stem): path.resolve() for path in inventory(data_root)}
 	for session in sorted(needed_dates):
 		path = file_by_date.get(session)
-		item = entries_by_session.get(session.isoformat(), {})
-		valid = bool(item.get("valid", False))
+		entry = entries_by_session.get(session.isoformat(), {})
+		valid = bool(entry.get("valid", False))
 		validate_records = session in roles
 		if path is not None:
 			current_hash = _file_hash(path)
-			recorded_hash = item.get("file_sha256")
+			recorded_hash = entry.get("file_sha256")
 			if recorded_hash is not None and current_hash != recorded_hash:
 				raise ValueError(f"Archive input hash changed for {session.isoformat()}")
 		else:
@@ -233,7 +233,7 @@ def build_manifest(paths: ManifestPaths, output: Path, *, table_names: TableName
 			bars, exact_hash = read_exact_archive(path)
 			if exact_hash != current_hash:
 				raise ValueError(f"Archive reader hash mismatch for {session.isoformat()}")
-			if item.get("records_id") != exact_records_id(bars):
+			if entry.get("records_id") != exact_records_id(bars):
 				raise ValueError(f"Archive records identity changed for {session.isoformat()}")
 		files.append({
 			"session": session.isoformat(),
@@ -241,33 +241,33 @@ def build_manifest(paths: ManifestPaths, output: Path, *, table_names: TableName
 			"relative_path": None if path is None else _relative(path, data_root),
 			"file_sha256": current_hash,
 			"valid": valid,
-			"record_count": len(bars) if bars else int(item.get("record_count", 0)),
-			"records_id": exact_records_id(bars) if bars else item.get("records_id"),
+			"record_count": len(bars) if bars else int(entry.get("record_count", 0)),
+			"records_id": exact_records_id(bars) if bars else entry.get("records_id"),
 			"key_count": len(bars) if bars else None,
 			"key_digest": _digest_rows(item.ticker for item in bars) if bars else None,
 			"record_validation": "exact_revalidated" if validate_records else "hash_and_stage5_inventory; exact_revalidated_at_trial",
 			"roles": sorted(roles.get(session, set())),
 			"dependency": session not in roles,
-			"finding": item.get("finding"),
+			"finding": entry.get("finding"),
 		})
 	mapped_sessions = tuple(item["session"] for item in files if item["valid"])
-	mappings = {"status": "not_requested", "ticker_count": None, "ticker_mappings": [], "date_mappings": []}
+	mappings: dict[str, Any] = {"status": "not_requested", "ticker_count": None, "ticker_mappings": [], "date_mappings": []}
 	if paths.dbinfo_file is not None:
 		mappings = _read_database_mappings(paths.dbinfo_file.resolve(), names, tuple(_session_date(value) for value in mapped_sessions))
 	ticker_by_label = {item["label"]: item["id"] for item in mappings["ticker_mappings"]}
-	for item in files:
-		bars = ()
-		if item["path"] is not None and item["valid"] and item["session"] in roles:
-			bars, _ = read_exact_archive(Path(item["path"]))
-		item["ticker_mapping"] = {
-			"status": "exact_target_mapping" if bars else "deferred_exact_mapping_at_trial",
-			"mapped_count": sum(1 for bar in bars if bar.ticker in ticker_by_label) if bars else None,
-			"unmapped_count": sum(1 for bar in bars if bar.ticker not in ticker_by_label) if bars else None,
-			"mapping_digest": _digest_rows((bar.ticker, ticker_by_label.get(bar.ticker)) for bar in bars) if bars else None,
+	for file_entry in files:
+		target_bars: tuple[ExactArchiveBar, ...] = ()
+		if file_entry["path"] is not None and file_entry["valid"] and file_entry["session"] in roles:
+			target_bars, _ = read_exact_archive(Path(str(file_entry["path"])))
+		file_entry["ticker_mapping"] = {
+			"status": "exact_target_mapping" if target_bars else "deferred_exact_mapping_at_trial",
+			"mapped_count": sum(1 for bar in target_bars if bar.ticker in ticker_by_label) if target_bars else None,
+			"unmapped_count": sum(1 for bar in target_bars if bar.ticker not in ticker_by_label) if target_bars else None,
+			"mapping_digest": _digest_rows((bar.ticker, ticker_by_label.get(bar.ticker)) for bar in target_bars) if target_bars else None,
 		}
 	date_by_session = {item["session"]: item["id"] for item in mappings["date_mappings"]}
-	for item in files:
-		item["database_date_id"] = date_by_session.get(item["session"])
+	for file_entry in files:
+		file_entry["database_date_id"] = date_by_session.get(str(file_entry["session"]))
 	corrected_schema_hash = precision.get("schema_selection", {}).get("schema_hash")
 	manifest: dict[str, object] = {
 		"schema_version": MANIFEST_SCHEMA_VERSION,

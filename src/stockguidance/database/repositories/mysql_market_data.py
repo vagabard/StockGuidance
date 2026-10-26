@@ -97,7 +97,7 @@ class MySQLMarketDataRepository:
 		key = content_id([self.source.data_configuration.semantic_payload(), query.boundary.calendar_id, [session.session_date.isoformat() for session in query.sessions]])
 		with self._transaction(query) as cursor:
 			cursor.execute(f"SELECT last_session FROM {SCANS} WHERE scope_key = %s", (key,))
-			rows = cursor.fetchall()
+			rows = list(cursor.fetchall())
 		last = None if not rows else date.fromisoformat(str(rows[0][0]))
 		remaining = tuple(session for session in query.sessions if last is None or session.session_date > last)
 		changed: set[date] = set()
@@ -200,7 +200,7 @@ class MySQLMarketDataRepository:
 		parameters = (download.session.session_date,)
 		cursor.execute(f"INSERT IGNORE INTO {quote_identifier(self.table_names.table(TableRole.SESSIONS))} (transaction_date) VALUES (%s)", parameters)
 		cursor.execute(f"SELECT id FROM {quote_identifier(self.table_names.table(TableRole.SESSIONS))} WHERE transaction_date = %s", parameters)
-		rows = cursor.fetchall()
+		rows = list(cursor.fetchall())
 		if len(rows) != 1 or len(rows[0]) != 1:
 			raise ValueError("Date lookup must resolve exactly one ingested session")
 		return normalize_date_id(rows[0][0])
@@ -216,7 +216,7 @@ class MySQLMarketDataRepository:
 			return normalize_date_id(rows[0][0])
 		cursor.execute(f"INSERT INTO {quote_identifier(self.table_names.table(TableRole.TICKERS))} (label, exchange) VALUES (%s, %s)", (ticker, exchange))
 		cursor.execute(f"SELECT id FROM {quote_identifier(self.table_names.table(TableRole.TICKERS))} WHERE label = %s", (ticker,))
-		rows = cursor.fetchall()
+		rows = list(cursor.fetchall())
 		if len(rows) != 1 or len(rows[0]) != 1:
 			raise ValueError("Ticker lookup must resolve exactly one key")
 		return normalize_date_id(rows[0][0])

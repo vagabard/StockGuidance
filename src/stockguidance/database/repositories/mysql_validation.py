@@ -1,6 +1,7 @@
 from collections.abc import Iterable
 from datetime import date
 import warnings
+from typing import Any
 
 from stockguidance.config.source import SourceConfig
 from stockguidance.database.validity import DataValidityNotice, DataValidityWarning, enforce_minimum_valid_session
@@ -48,7 +49,7 @@ class MySQLValidationRepository:
 		finally:
 			connection.close()
 
-	def guard_statuses(self, cursor, query: SessionQuery, windows: Iterable[int] = (20, 60)) -> tuple[DataValidityNotice, ...]:
+	def guard_statuses(self, cursor: Any, query: SessionQuery, windows: Iterable[int] = (20, 60)) -> tuple[DataValidityNotice, ...]:
 		"""Read non-ready z-score statuses for a bounded range without changing data."""
 		dates = tuple(session.session_date for session in query.sessions)
 		placeholders = ",".join("%s" for _ in dates)

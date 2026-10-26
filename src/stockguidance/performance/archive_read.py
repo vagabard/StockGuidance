@@ -69,7 +69,8 @@ def decode_archive_bar(row: dict[str, Any]) -> ArchiveBar:
 	ticker = row["T"]
 	if not isinstance(ticker, str) or not ticker or len(ticker) > 16 or any(character.isspace() for character in ticker):
 		raise ValueError("Invalid archive ticker")
-	bar = ArchiveBar(ticker, *(archive_price(row[field]) for field in ("o", "h", "l", "c")), volume, None if row.get("vw") is None else archive_price(row["vw"]), None if row.get("n") is None else count_value(row["n"]))
+	prices = tuple(archive_price(row[field]) for field in ("o", "h", "l", "c"))
+	bar = ArchiveBar(ticker, prices[0], prices[1], prices[2], prices[3], volume, None if row.get("vw") is None else archive_price(row["vw"]), None if row.get("n") is None else count_value(row["n"]))
 	if bar.low > min(bar.open, bar.close) or bar.high < max(bar.open, bar.close) or bar.low > bar.high:
 		raise ValueError("Inconsistent archive OHLC")
 	return bar
@@ -425,7 +426,7 @@ def run_request(request: dict[str, Any]) -> dict[str, Any]:
 		if not isinstance(configuration, str) or not configuration:
 			raise ValueError("Derived study requires database configuration")
 		chunks = [(paths[index::workers], neighbors, configuration) for index in range(workers) if paths[index::workers]]
-		measurements = []
+		measurements: list[dict[str, Any]] = []
 		with ProcessPoolExecutor(max_workers=workers) if workers > 1 else _SerialExecutor() as executor:
 			for repeat in range(repeats):
 				started = perf_counter()
@@ -444,12 +445,12 @@ def run_request(request: dict[str, Any]) -> dict[str, Any]:
 					}
 				)
 		return {"schema_version": 1, "backend": "python", "workers": workers, "mode": mode, "measurements": measurements}
-	chunks = [(paths[index::workers], mode, request.get("dbinfo_file")) for index in range(workers) if paths[index::workers]]
+		run_chunks: list[tuple[list[str], str, str | None]] = [(paths[index::workers], mode, request.get("dbinfo_file")) for index in range(workers) if paths[index::workers]]
 	measurements = []
 	with ProcessPoolExecutor(max_workers=workers) if workers > 1 else _SerialExecutor() as executor:
 		for repeat in range(repeats):
 			started = perf_counter()
-			parts = list(executor.map(run_chunk, chunks))
+			parts = list(executor.map(run_chunk, run_chunks))
 			sessions = sorted((session for part in parts for session in part["sessions"]), key=lambda item: item["session"])
 			measurements.append({"seconds": perf_counter() - started, "cpu_seconds": sum(part["cpu_seconds"] for part in parts), "digest": sha256(encode_json(sessions)).hexdigest(), "sessions": sessions})
 	return {"schema_version": 1, "backend": "python", "workers": workers, "mode": mode, "measurements": measurements}

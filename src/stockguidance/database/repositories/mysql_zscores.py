@@ -700,12 +700,12 @@ class MySQLZScoreRepository(ZScoreRepository):
 			cursor.execute(f"SELECT date_id,ticker_id,flags,gap_length,provenance FROM {OUTPUTS} WHERE series_key = %s AND date_id IN ({_placeholders(date_ids)})", (definition.series_key, *date_ids))
 			for item in cursor.fetchall():
 				quality_metadata[(definition.series_key, normalize_date_id(item[0]), normalize_date_id(item[1]))] = (QualityFlag(int(str(item[2]))), int(str(item[3])), tuple(json.loads(str(item[4]))))
-		parsed = {}
+		parsed: dict[tuple[str, int], tuple[ZScoreRow, ...]] = {}
 		for key, stored_rows in result.items():
-			qualified = []
-			for row in stored_rows:
-				quality = quality_metadata.get((*key, row.ticker_id))
-				qualified.append(row if quality is None else replace(row, quality=quality[0], gap_length=quality[1], provenance=quality[2]))
+			qualified: list[ZScoreRow] = []
+			for stored_row in stored_rows:
+				quality = quality_metadata.get((*key, stored_row.ticker_id))
+				qualified.append(stored_row if quality is None else replace(stored_row, quality=quality[0], gap_length=quality[1], provenance=quality[2]))
 			parsed[key] = tuple(qualified)
 		for key, rows in parsed.items():
 			if len({row.ticker_id for row in rows}) != len(rows):

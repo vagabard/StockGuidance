@@ -36,10 +36,11 @@ def _canonical_decimal(value: Decimal) -> str:
 
 def _digits(value: Decimal) -> tuple[int, int]:
 	tuple_value = value.as_tuple()
+	exponent = int(tuple_value.exponent)
 	if value == 0:
-		return 1, max(0, -tuple_value.exponent)
-	integer_digits = max(1, len(tuple_value.digits) + tuple_value.exponent)
-	return integer_digits, max(0, -tuple_value.exponent)
+		return 1, max(0, -exponent)
+	integer_digits = max(1, len(tuple_value.digits) + exponent)
+	return integer_digits, max(0, -exponent)
 
 
 @dataclass(frozen=True)
@@ -97,8 +98,11 @@ def _exact_row(row: dict[str, Any], session: date) -> ExactArchiveBar:
 		if type(transactions) is not int or not 0 <= transactions <= 2**63 - 1:
 			raise ValueError("Invalid archive transactions")
 	volume = _decimal(row.get("v"), "volume")
+	ticker = row.get("T")
+	if not isinstance(ticker, str):
+		raise ValueError("Invalid archive ticker")
 	return ExactArchiveBar(
-		row.get("T"),
+		ticker,
 		_decimal(row.get("o"), "open"),
 		_decimal(row.get("h"), "high"),
 		_decimal(row.get("l"), "low"),

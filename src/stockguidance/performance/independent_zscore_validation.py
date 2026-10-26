@@ -53,8 +53,8 @@ def _validate_metadata(connection: Any, names: Any, manifest: dict[str, Any], ta
 			counts = {int(code): int(count) for code, count in json.loads(payload).items()} if payload.startswith("{") else {int(part.split(":", 1)[0]): int(part.split(":", 1)[1]) for part in payload.split(",") if ":" in part}
 		except (TypeError, ValueError):
 			counts = {}
-		expected = expected_counts[(date_id, family, window)]
-		if int(row[2]) != ticker_count or int(row[3]) != expected[0] or counts != expected or any(not isinstance(row[index], str) or len(row[index]) != 64 for index in (5, 6, 7)):
+		expected_count_row = expected_counts[(date_id, family, window)]
+		if int(row[2]) != ticker_count or int(row[3]) != expected_count_row[0] or counts != expected_count_row or any(not isinstance(row[index], str) or len(row[index]) != 64 for index in (5, 6, 7)):
 			metadata_findings.append({"series_key": series_key, "date_id": date_id, "finding": "metadata_count_or_digest_shape_mismatch"})
 		reference = published.get((target_by_id[date_id]["session"], family, window))
 		if reference is None or any(str(row[index]) != reference.get(field) for index, field in ((5, "content_digest"), (6, "dependency_digest"), (7, "availability_digest"))):

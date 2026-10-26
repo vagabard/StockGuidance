@@ -152,11 +152,13 @@ def _database_groups(cursor: Any, names: Any, start: date | None, end: date | No
 			if row[0] != current_date:
 				yield current_date, current
 				current_date, current = row[0], DatabaseSession()
-			values = tuple(Decimal(str(value)) if isinstance(value, (int, float)) and not isinstance(value, bool) else value for value in row[2:8])
-			bar = ArchiveBar(row[1], *values, row[8])
+				values = tuple(Decimal(str(value)) if isinstance(value, (int, float)) and not isinstance(value, bool) else value for value in row[2:8])
+				if not isinstance(row[1], str) or len(values) != 6:
+					raise ValueError("Invalid stored archive row")
+				bar = ArchiveBar(row[1], values[0], values[1], values[2], values[3], values[4], values[5], row[8])
 			current.rows.append(bar)
 			try:
-				ExactArchiveBar(bar.ticker, *values, bar.transactions)
+					ExactArchiveBar(bar.ticker, values[0], values[1], values[2], values[3], values[4], values[5], bar.transactions)
 			except (ValueError, TypeError, ArithmeticError) as error:
 				current.invalid_count += 1
 				finding = {"ticker": row[1], "ticker_id": row[9], "error": str(error), "values": {name: None if getattr(bar, name) is None else str(getattr(bar, name)) for name in RAW_FIELDS}}
@@ -222,6 +224,9 @@ def _compare_session(session: str, path: Path, item: ArchiveFileInventory, datab
 	result["missing_keys"], result["extra_keys"] = missing[:100], extra[:100]
 	result["missing_key_count"], result["extra_key_count"] = len(missing), len(extra)
 	field_counts = result["field_difference_counts"]
+	if not isinstance(field_counts, dict):
+		raise ValueError("Invalid field difference count state")
+	field_counts = {str(name): int(value) for name, value in field_counts.items()}
 	examples: list[dict[str, object]] = []
 	differing_rows = 0
 	for ticker in sorted(set(expected_by_key) & set(actual_by_key)):
@@ -232,8 +237,8 @@ def _compare_session(session: str, path: Path, item: ArchiveFileInventory, datab
 		if differences and len(examples) < 100:
 			examples.append({"ticker": ticker, "fields": differences})
 	result["difference_examples"] = examples
-	result["omitted_missing_keys"] = max(0, len(missing) - len(result["missing_keys"]))
-	result["omitted_extra_keys"] = max(0, len(extra) - len(result["extra_keys"]))
+	result["omitted_missing_keys"] = max(0, len(missing) - 100)
+	result["omitted_extra_keys"] = max(0, len(extra) - 100)
 	result["different_row_count"] = differing_rows
 	result["omitted_difference_examples"] = max(0, differing_rows - len(examples))
 	result["matches"] = not missing and not extra and not differing_rows and not database.invalid_count and not database.duplicate_count
@@ -321,12 +326,12 @@ def audit_archive(root: Path, database_config: Path | None = None, *, start: dat
 		"archive_file_count": len(archive.files),
 		"valid_archive_file_count": len(archive.valid_files),
 		"invalid_archive_files": [item.__dict__ for item in archive.invalid_files],
-		"database_only_dates": sorted(item["session"] for item in reports if item.get("state") == "database_only"),
+		"database_only_dates": sorted(str(item.get("session")) for item in reports if item.get("state") == "database_only"),
 		"orphan_counts": orphans,
 		"session_count": len(reports),
-		"database_row_count": sum(item.get("database_count") or 0 for item in reports),
-		"invalid_database_row_count": sum(item.get("invalid_database_row_count", 0) for item in reports),
-		"duplicate_database_key_count": sum(item.get("duplicate_database_key_count", 0) for item in reports),
+		"database_row_count": sum(int(str(item.get("database_count") or 0)) for item in reports),
+		"invalid_database_row_count": sum(int(str(item.get("invalid_database_row_count", 0) or 0)) for item in reports),
+		"duplicate_database_key_count": sum(int(str(item.get("duplicate_database_key_count", 0) or 0)) for item in reports),
 		"sessions": sorted(reports, key=lambda item: str(item.get("session"))),
 		"checkpoint_reuse": 0,
 		"checkpoint_policy": "Recompare every session in the new database snapshot; no prior database comparisons are trusted",

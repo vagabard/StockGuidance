@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import math
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+	import numpy as np
 
 from stockguidance.zscores.calculation import _calculate_ticker, _dependency_issue, _observation_issue
 from stockguidance.zscores.inputs import ZScoreInput

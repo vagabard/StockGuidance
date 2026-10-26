@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 import subprocess
 from time import perf_counter
-from typing import Any, Iterable
+from typing import Any, Iterable, cast
 
 from stockguidance.database.configuration import load_database_configuration
 from stockguidance.database.table_names import TableNames, quote_identifier
@@ -233,7 +233,7 @@ def _quote(name: str) -> str:
 	return quote_identifier(name)
 
 
-def _database_revision(connection, names: TableNames) -> str:
+def _database_revision(connection: Any, names: TableNames) -> str:
 	cursor = connection.cursor()
 	try:
 		cursor.execute(f"SELECT workload, session_date, series_key, content_digest FROM {_quote(MIGRATION_COMPLETION)} ORDER BY workload, session_date, series_key", ())
@@ -247,7 +247,7 @@ def _database_revision(connection, names: TableNames) -> str:
 		cursor.close()
 
 
-def _active_writer_guard(connection) -> None:
+def _active_writer_guard(connection: Any) -> None:
 	if _active_writers(connection):
 		raise Stage13Error("Competing production writers are active")
 
@@ -269,7 +269,7 @@ def _run_java_derived(dbinfo_file: Path, manifest_path: Path, sessions: tuple[st
 		raise Stage13Error("Selected Java derived entry point returned invalid JSON") from error
 	if result.returncode != 0 or payload.get("failed") or payload.get("status") != "complete":
 		raise Stage13Error("Selected Java derived entry point failed")
-	return payload
+	return cast(dict[str, Any], payload)
 
 
 def _write_json(path: Path, value: dict[str, Any]) -> None:
@@ -296,7 +296,7 @@ def _chunked(values: tuple[str, ...], size: int) -> Iterable[tuple[str, ...]]:
 		yield values[start:start + size]
 
 
-def _completion_summary(connection, names: TableNames) -> dict[str, int]:
+def _completion_summary(connection: Any, names: TableNames) -> dict[str, int]:
 	cursor = connection.cursor()
 	try:
 		cursor.execute(f"SELECT workload, COUNT(*) FROM {_quote(MIGRATION_COMPLETION)} GROUP BY workload", ())
@@ -305,7 +305,7 @@ def _completion_summary(connection, names: TableNames) -> dict[str, int]:
 		cursor.close()
 
 
-def _mapping_snapshot(connection, names: TableNames) -> dict[str, Any]:
+def _mapping_snapshot(connection: Any, names: TableNames) -> dict[str, Any]:
 	cursor = connection.cursor()
 	try:
 		cursor.execute(f"SELECT id, label FROM {_quote(names.tickers)} ORDER BY id", ())

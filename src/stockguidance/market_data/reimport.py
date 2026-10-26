@@ -3,7 +3,7 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 import json
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 from stockguidance.calendar.exchange import ExchangeCalendar
 from stockguidance.config.source import SourceConfig, SourceIdentity
@@ -103,7 +103,7 @@ def _delete_period(cursor: Any, names: TableNames, first: date, last: date) -> d
 
 
 def _upsert_archive(cursor: Any, source: SourceConfig, item: ReimportFile, response: Any, available_at: str) -> None:
-	identity = cast(SourceIdentity, source.identity)
+	identity = source.identity
 	metadata = {"source": asdict(identity), "calendar_id": source.calendar_id, "session_date": item.day.isoformat(), "available_at": available_at, "content_id": item.content_id, "records_id": records_id(response.records), "pending": False, "evidence": "Canonical market_summary archive adopted during controlled reimport"}
 	key = data_configuration_key(source.data_configuration)
 	cursor.execute(f"DELETE FROM stockguidance_archive_files WHERE source_key = %s AND session_date = %s", (key, item.day))

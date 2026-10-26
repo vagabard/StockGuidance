@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 
 from stockguidance.config.source import SourceConfig
 from stockguidance.database.repositories.mysql_sessions import Cursor
+from stockguidance.database.dates import normalize_date_id
 from stockguidance.database.repositories.quality import schema_statements as quality_schema_statements
 from stockguidance.database.write_connections import WriteConnectionFactory
 from stockguidance.market_data.identity import data_configuration_key
@@ -187,7 +188,7 @@ def register_configuration_verification(source: SourceConfig, connect: WriteConn
 			)
 			pending = cursor.fetchall()
 			if pending:
-				return pending[0][0]
+				return None if pending[0][0] is None else normalize_date_id(pending[0][0])
 			verification_id = register_verification(cursor, selected_names, verification_type, str(baseline_key), candidate_key, requested_count, seed, datetime.now(timezone.utc))
 			connection.commit()
 			return verification_id

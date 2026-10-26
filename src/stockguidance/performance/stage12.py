@@ -10,7 +10,7 @@ import shutil
 import subprocess
 from pathlib import Path
 from time import perf_counter
-from typing import Any, Iterable
+from typing import Any, Iterable, cast
 
 from stockguidance.database.configuration import load_database_configuration
 from stockguidance.database.table_names import TableNames, load_table_names, quote_identifier
@@ -143,7 +143,7 @@ def validate_prerequisites(
 	)
 
 
-def _connect(dbinfo_file: Path, database: str | None = None):
+def _connect(dbinfo_file: Path, database: str | None = None) -> Any:
 	try:
 		import mysql.connector
 	except ImportError as error:
@@ -177,7 +177,7 @@ def _manifest_names(manifest: dict[str, Any]) -> TableNames:
 		raise Stage12Error("Invalid authoritative table registry") from error
 
 
-def _table_inventory(connection, names: TableNames) -> dict[str, Any]:
+def _table_inventory(connection: Any, names: TableNames) -> dict[str, Any]:
 	cursor = connection.cursor()
 	try:
 		cursor.execute("SELECT TABLE_NAME, ENGINE, TABLE_ROWS, DATA_LENGTH, INDEX_LENGTH, CREATE_OPTIONS FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() ORDER BY TABLE_NAME", ())
@@ -193,7 +193,7 @@ def _table_inventory(connection, names: TableNames) -> dict[str, Any]:
 		cursor.close()
 
 
-def _mapping_digest(connection, names: TableNames) -> dict[str, Any]:
+def _mapping_digest(connection: Any, names: TableNames) -> dict[str, Any]:
 	cursor = connection.cursor()
 	try:
 		cursor.execute(f"SELECT id, label FROM {_quote(names.tickers)} ORDER BY id", ())
@@ -205,7 +205,7 @@ def _mapping_digest(connection, names: TableNames) -> dict[str, Any]:
 		cursor.close()
 
 
-def _existing_tables(connection, names: TableNames, include_zscores: bool = False) -> set[str]:
+def _existing_tables(connection: Any, names: TableNames, include_zscores: bool = False) -> set[str]:
 	known = set(names.tables(include_verification=True).values())
 	if include_zscores:
 		known.update((names.zscore_series, names.zscore_sessions))
@@ -222,7 +222,7 @@ def _existing_tables(connection, names: TableNames, include_zscores: bool = Fals
 		cursor.close()
 
 
-def _counts(connection, names: TableNames, include_zscores: bool = False) -> dict[str, int]:
+def _counts(connection: Any, names: TableNames, include_zscores: bool = False) -> dict[str, int]:
 	tables = [names.tickers, names.sessions, names.prices, names.deltas, names.imports]
 	if include_zscores:
 		tables += [names.zscore_series, names.zscore_sessions]
@@ -242,7 +242,7 @@ def _counts(connection, names: TableNames, include_zscores: bool = False) -> dic
 		cursor.close()
 
 
-def _source_binding(connection, names: TableNames) -> list[list[Any]]:
+def _source_binding(connection: Any, names: TableNames) -> list[list[Any]]:
 	if names.source not in _existing_tables(connection, names):
 		return []
 	cursor = connection.cursor()
@@ -253,7 +253,7 @@ def _source_binding(connection, names: TableNames) -> list[list[Any]]:
 		cursor.close()
 
 
-def _schema_snapshot(connection, names: TableNames, *, include_zscores: bool = False) -> dict[str, Any]:
+def _schema_snapshot(connection: Any, names: TableNames, *, include_zscores: bool = False) -> dict[str, Any]:
 	existing = _existing_tables(connection, names, include_zscores)
 	known = set(names.tables(include_verification=True).values())
 	if include_zscores:
@@ -273,7 +273,7 @@ def _disk_snapshot(datadir: str | None) -> dict[str, Any]:
 	return {"path": datadir, "total_bytes": usage.total, "free_bytes": usage.free, "used_bytes": usage.used}
 
 
-def _server_disk(connection) -> dict[str, Any]:
+def _server_disk(connection: Any) -> dict[str, Any]:
 	cursor = connection.cursor()
 	try:
 		cursor.execute("SELECT @@datadir", ())
@@ -282,7 +282,7 @@ def _server_disk(connection) -> dict[str, Any]:
 		cursor.close()
 
 
-def _active_writers(connection) -> list[list[Any]]:
+def _active_writers(connection: Any) -> list[list[Any]]:
 	cursor = connection.cursor()
 	try:
 		cursor.execute("SELECT CONNECTION_ID()", ())
@@ -293,7 +293,7 @@ def _active_writers(connection) -> list[list[Any]]:
 		cursor.close()
 
 
-def _decimal_limits(connection, names: TableNames) -> dict[str, str | None]:
+def _decimal_limits(connection: Any, names: TableNames) -> dict[str, str | None]:
 	cursor = connection.cursor()
 	try:
 		cursor.execute(f"SELECT MAX(`open`), MAX(`high`), MAX(`low`), MAX(`close`), MAX(volume), MAX(vwap) FROM {_quote(names.prices)}", ())
@@ -311,10 +311,10 @@ def _migration_ddl(names: TableNames, engines: dict[str, str], inventory: dict[s
 		columns = {str(row[1]): (str(row[2]), row[6]) for row in inventory["columns"]}
 	statements: tuple[str, ...] = ()
 	raw_expected = {"open": "decimal(28,8)", "high": "decimal(28,8)", "low": "decimal(28,8)", "close": "decimal(28,8)", "volume": "decimal(20,8)", "vwap": "decimal(42,22)"}
-	if any(columns.get(column, (None, None))[0].casefold() != expected for column, expected in raw_expected.items()):
+	if any(str(columns.get(column, (None, None))[0]).casefold() != expected for column, expected in raw_expected.items()):
 		statements += (f"ALTER TABLE {_quote(names.prices)} MODIFY `open` DECIMAL(28,8) NOT NULL, MODIFY `high` DECIMAL(28,8) NOT NULL, MODIFY `low` DECIMAL(28,8) NOT NULL, MODIFY `close` DECIMAL(28,8) NOT NULL, MODIFY `volume` DECIMAL(20,8) NOT NULL, MODIFY `vwap` DECIMAL(42,22) NULL",)
 	ticker_type, ticker_collation = columns.get("label", (None, None))
-	if ticker_type.casefold() != "varchar(16)" or str(ticker_collation).casefold() != "utf8mb4_bin":
+	if str(ticker_type).casefold() != "varchar(16)" or str(ticker_collation).casefold() != "utf8mb4_bin":
 		statements += (f"ALTER TABLE {_quote(names.tickers)} MODIFY `label` VARCHAR(16) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL",)
 	if engines.get(names.sessions) != "InnoDB":
 		statements += (f"ALTER TABLE {_quote(names.sessions)} ENGINE=InnoDB",)
@@ -330,7 +330,7 @@ def _schema_engines(inventory: dict[str, Any]) -> dict[str, str]:
 	return {str(row[0]): str(row[1]) for row in inventory["tables"] if row[1] is not None}
 
 
-def _execute_ddl(connection, statements: Iterable[str]) -> list[dict[str, Any]]:
+def _execute_ddl(connection: Any, statements: Iterable[str]) -> list[dict[str, Any]]:
 	results = []
 	for statement in statements:
 		started = perf_counter()
@@ -439,12 +439,12 @@ def _file_item(manifest: dict[str, Any], session: str) -> dict[str, Any]:
 	items = [item for item in manifest.get("files", ()) if item.get("session") == session and item.get("valid") is True and item.get("records_id")]
 	if len(items) != 1:
 		raise Stage12Error(f"Session is not a uniquely validated archive file: {session}")
-	return items[0]
+	return cast(dict[str, Any], items[0])
 
 
 def _adopt_raw_session(
-	connection,
-	context: Stage12Context,
+	connection: Any,
+	context: Any,
 	names: TableNames,
 	session: str,
 	adoption_time: str,
@@ -555,7 +555,7 @@ def _adopt_raw_session(
 
 def _pilot_sessions(manifest: dict[str, Any], data_root: Path, zscore_sample_count: int) -> dict[str, Any]:
 	try:
-		import exchange_calendars as xcals
+		import exchange_calendars as xcals  # type: ignore[import-untyped]
 	except ImportError as error:
 		raise Stage12Error("The configured Python interpreter lacks exchange_calendars") from error
 	valid = {date.fromisoformat(str(item["session"])) for item in manifest.get("files", ()) if item.get("valid") is True and item.get("records_id")}
@@ -636,7 +636,7 @@ def _run_java(command: list[str], timeout: float) -> dict[str, Any]:
 		raise Stage12Error("Selected Java Stage 12 backend returned invalid JSON") from error
 	if completed.returncode != 0 or result.get("failed"):
 		raise Stage12Error("Selected Java Stage 12 backend failed")
-	return result
+	return cast(dict[str, Any], result)
 
 
 def _run_derived(dbinfo_file: Path, manifest_path: Path, sessions: list[str], checkpoint: Path, timeout: float) -> dict[str, Any]:
@@ -649,7 +649,7 @@ def _run_zscores(dbinfo_file: Path, manifest_path: Path, sessions: list[str], ch
 	return _run_java(command, timeout)
 
 
-def _audit_raw(connection, context: Stage12Context, names: TableNames, sessions: Iterable[str]) -> dict[str, Any]:
+def _audit_raw(connection: Any, context: Stage12Context, names: TableNames, sessions: Iterable[str]) -> dict[str, Any]:
 	results = []
 	for session in sessions:
 		item = _file_item(context.manifest, session)
@@ -678,7 +678,7 @@ def _audit_raw(connection, context: Stage12Context, names: TableNames, sessions:
 	return {"status": "passed", "sessions": results}
 
 
-def _audit_derived(connection, context: Stage12Context, names: TableNames, sessions: Iterable[str]) -> dict[str, Any]:
+def _audit_derived(connection: Any, context: Stage12Context, names: TableNames, sessions: Iterable[str]) -> dict[str, Any]:
 	results = []
 	valid = sorted(entry["session"] for entry in context.manifest.get("files", ()) if entry.get("valid") is True and entry.get("records_id"))
 	for session in sessions:
@@ -717,7 +717,7 @@ def _audit_derived(connection, context: Stage12Context, names: TableNames, sessi
 	return {"status": "passed", "sessions": results}
 
 
-def _audit_zscores(connection, names: TableNames, sessions: Iterable[str], expected_tickers: int) -> dict[str, Any]:
+def _audit_zscores(connection: Any, names: TableNames, sessions: Iterable[str], expected_tickers: int) -> dict[str, Any]:
 	results = []
 	cursor = connection.cursor()
 	try:
@@ -817,7 +817,7 @@ def run_stage12(
 		migration_preview = {"statements": list(_migration_ddl(names, engines, before["inventory"])), "raw_table_bytes": raw_size, "disk_before": disk_before, "backup_bytes": backup_size, "formula": "raw data+index bytes plus backup; free space is checked before DDL", "numeric_maxima_before": _decimal_limits(connection, names)}
 		if disk_before["free_bytes"] is not None and disk_before["free_bytes"] < raw_size + backup_size:
 			raise Stage12Error("Insufficient disk space for the measured table copy and recovery backup")
-		ddl_results = _execute_ddl(connection, migration_preview["statements"])
+		ddl_results: list[dict[str, Any]] = _execute_ddl(connection, cast(Iterable[str], migration_preview["statements"]))
 		after = _schema_snapshot(connection, names, include_zscores=True)
 		disk_after = _server_disk(connection)
 		if before["mapping_identity"] != after["mapping_identity"]:

@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 import json
 from pathlib import Path
+from typing import cast
 
 from stockguidance.config.validation import require_enum, require_text
 from stockguidance.market_data.intervals import ObservationInterval, require_daily_interval
@@ -119,6 +120,20 @@ def _text(value: dict[str, object], name: str) -> str:
 	return result
 
 
+def _bool(value: dict[str, object], name: str) -> bool:
+	result = value.get(name)
+	if type(result) is not bool:
+		raise ValueError(f"{name} must be a boolean")
+	return result
+
+
+def _positive_int(value: dict[str, object], name: str) -> int:
+	result = value.get(name)
+	if type(result) is not int or result <= 0:
+		raise ValueError(f"{name} must be a positive integer")
+	return result
+
+
 def load_data_configuration(path: Path) -> DataConfiguration:
 	try:
 		payload = _mapping(json.loads(path.read_text(encoding="utf-8")), "data configuration")
@@ -131,12 +146,12 @@ def load_data_configuration(path: Path) -> DataConfiguration:
 			raise ValueError("Verification policy fields are incomplete or unknown")
 		return DataConfiguration(
 			_text(payload, "source_family"), _text(payload, "endpoint"), _text(payload, "market"), _text(payload, "universe"),
-			payload["raw_price_split_adjusted"], payload["raw_price_dividend_adjusted"],
+			_bool(payload, "raw_price_split_adjusted"), _bool(payload, "raw_price_dividend_adjusted"),
 			None if payload["raw_price_vendor_defined_adjustment"] is None else _text(payload, "raw_price_vendor_defined_adjustment"),
 			ObservationInterval(_text(payload, "interval")),
 			VerificationPolicy(
-				VerificationMode(policy_payload["source_family_mismatch"]), VerificationMode(policy_payload["endpoint_mismatch"]),
-				policy_payload["source_family_sample_days"], policy_payload["endpoint_sample_pulls"],
+				VerificationMode(_text(policy_payload, "source_family_mismatch")), VerificationMode(_text(policy_payload, "endpoint_mismatch")),
+				_positive_int(policy_payload, "source_family_sample_days"), _positive_int(policy_payload, "endpoint_sample_pulls"),
 			),
 			DEFAULT_CALENDAR_ID if "calendar_id" not in payload else _text(payload, "calendar_id"),
 		)
@@ -170,21 +185,24 @@ class SourceIdentity:
 
 @dataclass(frozen=True)
 class SourceConfig:
-	identity: SourceIdentity | DataConfiguration
+	# The constructor accepts a DataConfiguration for compatibility, but __post_init__
+	# normalizes the public value to a SourceIdentity immediately.
+	identity: SourceIdentity
 	data_root: Path
 	database_config: Path
 	credential_reference: str | None = field(default=None, repr=False)
 	_configuration: DataConfiguration | None = field(default=None, repr=False, compare=False)
 
 	def __post_init__(self) -> None:
-		if isinstance(self.identity, DataConfiguration):
-			configuration = self.identity
+		raw_identity = cast(SourceIdentity | DataConfiguration, self.identity)
+		if isinstance(raw_identity, DataConfiguration):
+			configuration = raw_identity
 			object.__setattr__(self, "identity", configuration.to_source_identity())
 			object.__setattr__(self, "_configuration", configuration)
-		elif not isinstance(self.identity, SourceIdentity):
+		elif not isinstance(raw_identity, SourceIdentity):
 			raise ValueError("identity must be a SourceIdentity or DataConfiguration")
 		elif self._configuration is None:
-			object.__setattr__(self, "_configuration", self.identity.to_data_configuration())
+			object.__setattr__(self, "_configuration", raw_identity.to_data_configuration())
 		elif not isinstance(self._configuration, DataConfiguration):
 			raise ValueError("_configuration must be a DataConfiguration")
 		if not isinstance(self.data_root, Path) or not isinstance(self.database_config, Path):

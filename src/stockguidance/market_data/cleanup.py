@@ -6,7 +6,7 @@ from decimal import Decimal
 import json
 import os
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 from stockguidance.calendar.exchange import ExchangeCalendar
 from stockguidance.config.source import SourceConfig, SourceIdentity
@@ -88,7 +88,7 @@ def equivalent(left: dict[str, dict[str, Any]], right: dict[str, dict[str, Any]]
 class ArchiveCleanup:
 	def __init__(self, source: SourceConfig, store: CanonicalArchiveStore, output: Path, *, apply: bool, progress: Callable[[str], None] | None = None) -> None:
 		self.source, self.store, self.output, self.apply = source, store, output.absolute(), apply
-		self.identity = cast(SourceIdentity, source.identity)
+		self.identity = source.identity
 		self.progress = progress
 		self.root = source.data_root.absolute()
 		if self.output.resolve().is_relative_to(self.root.resolve()):
