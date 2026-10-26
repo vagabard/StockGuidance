@@ -12,16 +12,18 @@ from stockguidance.market_data.providers.contracts import MarketDataProvider
 from stockguidance.market_data.publication import DailyPublicationPolicy
 from stockguidance.training.result import TrainingResult
 from stockguidance.workflows.train_model import HistoryTrainingRequest
+from stockguidance.workflows.simplified_readiness import SimplifiedReadinessWorkflow
 
 
 @dataclass(frozen=True)
 class RecommendationServices:
 	provider: MarketDataProvider
-	market_data: MarketDataRepository
-	validation: ValidationRepository
+	market_data: MarketDataRepository | None
+	validation: ValidationRepository | None
 	closes: CloseRepository
 	eligibility: EligibilityRepository
 	openings: OpeningRefresh | None = None
+	simplified_readiness: SimplifiedReadinessWorkflow | None = None
 
 
 class HistoryTrainer(Protocol):

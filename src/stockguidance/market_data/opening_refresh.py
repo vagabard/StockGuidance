@@ -1,12 +1,14 @@
 from dataclasses import dataclass
 from datetime import timedelta
+from typing import Protocol
 
 from stockguidance.calendar.clock import Clock
 from stockguidance.calendar.decisions import DecisionTiming
 from stockguidance.config.source import SourceConfig
 from stockguidance.database.repositories.closes import CloseQuery
 from stockguidance.database.repositories.sessions import SessionQuery
-from stockguidance.database.repositories.verified_closes import VerifiedCloseRepository
+from stockguidance.database.repositories.closes import CloseData
+from stockguidance.database.repositories.validation import DatabaseInspection
 from stockguidance.features.specification import FeatureSpec, SignalMode
 from stockguidance.market_data.history import HistoryBoundary
 from stockguidance.market_data.opening_store import OpeningStore
@@ -14,12 +16,16 @@ from stockguidance.market_data.openings import OpeningData, OpeningQuery
 from stockguidance.market_data.providers.openings import OpeningProvider
 
 
+class CloseInspectionRepository(Protocol):
+	def inspect(self, query: CloseQuery) -> tuple[CloseData, DatabaseInspection]: ...
+
+
 @dataclass(frozen=True)
 class OpeningRefresh:
 	source: SourceConfig
 	store: OpeningStore
 	provider: OpeningProvider
-	closes: VerifiedCloseRepository
+	closes: CloseInspectionRepository
 
 	def refresh(self, features: FeatureSpec, timing: DecisionTiming, boundary: HistoryBoundary, clock: Clock) -> OpeningData:
 		if features.signal_mode is not SignalMode.ENTRY_OPEN or boundary.source != self.source.identity or features.adjustment is not self.source.identity.adjustment:

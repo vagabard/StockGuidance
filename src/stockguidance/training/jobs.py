@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 import json
 from pathlib import Path
@@ -11,13 +11,16 @@ from stockguidance.calendar.protocols import SessionCalendar
 from stockguidance.config.training import decode_training_configuration, number
 from stockguidance.config.source import SourceConfig
 from stockguidance.config.validation import require_aware_datetime
+from stockguidance.calendar.clock import Clock
 from stockguidance.database.repositories.mysql_validation import MySQLValidationRepository
 from stockguidance.database.repositories.verified_closes import VerifiedCloseRepository
 from stockguidance.database.repositories.closes import CloseRepository
 from stockguidance.database.validity import enforce_minimum_valid_session
 from stockguidance.database.repositories.signals import SignalRepository
 from stockguidance.database.connections import MySQLConnectionFactory
+from stockguidance.database.raw_rebuild import RawPayloadProvider
 from stockguidance.database.configuration import load_database_configuration
+from stockguidance.database.simplified_runtime import source_from_database, target_schema_state
 from stockguidance.database.write_connections import WriteConnectionFactory
 from stockguidance.features.specification import FeatureSpec
 from stockguidance.market_data.history import HistoryBoundary, UnknownHistoryBoundary
@@ -30,6 +33,8 @@ from stockguidance.targets.specification import TargetSpec
 from stockguidance.training.configuration import TrainingConfig
 from stockguidance.training.result import TrainingResult
 from stockguidance.workflows.train_model import HistoryTrainingRequest, train_from_history
+from stockguidance.workflows.simplified_training import execute_simplified_training
+from stockguidance.market_data.providers.configured_polygon import ConfiguredPolygonProvider
 
 
 @dataclass(frozen=True)
@@ -117,7 +122,33 @@ def open_job_history(job: TrainingJob, *, connect: WriteConnectionFactory | None
 	return JobHistory(boundary, calendar, SignalRepository(repository, OpeningStore(job.source.data_root)), repository, decisions(job.start, job.end), evaluation_decisions)
 
 
-def execute_job(job: TrainingJob, artifact_path: Path, *, checkpoint_path: Path | None = None, resume_from: Path | None = None) -> TrainingResult:
-	history = open_job_history(job)
+def execute_job(
+	job: TrainingJob,
+	artifact_path: Path,
+	*,
+	checkpoint_path: Path | None = None,
+	resume_from: Path | None = None,
+	connect: WriteConnectionFactory | None = None,
+	provider: RawPayloadProvider | None = None,
+	clock: Clock | None = None,
+) -> TrainingResult:
+	connection = connect or MySQLConnectionFactory()
+	names = load_database_configuration(job.source.database_config).load_table_names()
+	try:
+		target = target_schema_state(connection, job.source.database_config, names) == "target"
+	except RuntimeError:
+		# Existing history-only jobs retain their established read-only behavior
+		# when the optional database is unavailable.  A present but incompatible
+		# target schema raises SchemaVersionError and is never downgraded.
+		target = False
+	if target:
+		database_source, _target_names = source_from_database(job.source.database_config, job.source.data_root, connection, names)
+		if database_source.identity != job.source.identity:
+			raise ValueError("Training source differs from the database-owned configuration")
+		job = replace(job, source=database_source)
+		if provider is None:
+			provider = ConfiguredPolygonProvider()
+		return execute_simplified_training(job, artifact_path, connect=connection, provider=provider, clock=clock, checkpoint_path=checkpoint_path, resume_from=resume_from)
+	history = open_job_history(job, connect=connection)
 	request = HistoryTrainingRequest(history.decisions, job.cutoff, job.features, TargetSpec(), job.configuration, artifact_path, history.evaluation_decisions, job.evaluation_cutoff, checkpoint_path, resume_from, job.availability_policy, job.data_snapshot)
 	return train_from_history(request, history.boundary, history.calendar, job.publication, history.repository)

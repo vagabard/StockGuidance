@@ -607,3 +607,100 @@ Java tests, so no production database was modified.
 Stage 9 may consume the simplified readiness/completion boundary for training,
 prediction, and evaluation orchestration. Stage 8 did not modify those paths,
 remove historical migration fixtures, or implement later cleanup stages.
+
+## Stage 9 — training, prediction, and historical-evaluation integration
+
+Status: complete for the Stage 9 Python integration and acceptance gates. No
+production database, production configuration, live provider, or commit was
+used. Stage 10 was not implemented.
+
+### Changed files and interfaces
+
+* `src/stockguidance/workflows/simplified_readiness.py` adds the shared Stage 9
+  readiness boundary. It expands exchange-session scope for feature lookback,
+  optional labels, normalization warm-up, and explicit execution sessions;
+  applies strict or retrospective cutoffs; verifies the database-owned source;
+  delegates missing raw/derived work to the Stage 8 coordinator; and validates
+  completion before model computation.
+* `src/stockguidance/database/simplified_runtime.py` carries the readiness data
+  revision through the existing target update result and keeps session-context
+  expansion bounded at exchange-session edges for the shared planner.
+* The same module adds read-only target-schema close and liquidity repositories.
+  They use `consistent_read_transaction` and `DatabaseReadinessGuard`, preserve
+  availability/revision evidence and interpolation exclusions, and return
+  structured date/ticker/phase coverage failures. They do not initialize,
+  repair, or refresh the database. A target data revision is exposed for
+  result/cache identity and changes after a forced correction.
+* `src/stockguidance/workflows/simplified_training.py` connects the existing
+  `HistoryTrainingRequest`/`train_from_history` path to target readiness. The
+  existing feature construction, target construction, training service,
+  checkpoint behavior, and artifact format remain unchanged.
+* `training/jobs.py` dispatches target-schema jobs through the new readiness
+  workflow while preserving the legacy history-only path when the target
+  schema is absent. Target jobs use the database-owned source singleton and
+  reject source identity mismatch.
+* `recommend.py`, `recommendation_runtime.py`,
+  `recommendation_dependencies.py`, `recommendation_result.py`, and
+  `market_data/opening_refresh.py` connect target-schema prediction and
+  retraining to the same existing sample/eligibility/inference path. Current
+  artifact and model-policy preflight remains before target probing, and
+  legacy frontends retain their established behavior.
+* `simulation_runtime.py` connects fixed historical scoring and chronological
+  walk-forward scoring to the target close/liquidity repositories. Evaluation
+  execution frames still use the existing `RepositoryExecutionPrices` path,
+  while training decisions are filtered by the existing cutoff/precedence
+  rules.
+* `tests/workflows/test_database_simplification_stage9.py` covers exchange
+  session expansion, insufficient history, provider-filled target coverage,
+  fileless completion reuse, correction revision changes, and pending-range
+  read exclusion.
+
+### Decisions and boundaries
+
+The readiness workflow is the only Stage 9 orchestration layer allowed to
+request missing target coverage. Feature/query repositories remain read-only;
+the existing Stage 8 coordinator owns source preparation, pending scopes,
+raw/derived rebuilds, recovery, and completion. The existing close/open/target
+feature definitions are passed through without generalized SQL vectors,
+volume features, new z-score families, or model-architecture changes.
+
+Session dependencies use exchange-session adjacency rather than calendar-day
+arithmetic and never create a ticker/date Cartesian product. Strict reads use
+the decision cutoff; retrospective reads require an explicit data snapshot.
+Completed raw sessions are provider/file independent, and a pending operation
+overlapping any requested date blocks close and liquidity reads inside the
+reader transaction. Interpolated and bad observations remain excluded by the
+default clean quality policy. Result revisions include the target completion
+revision so corrections cannot silently reuse an older recommendation/sample
+identity; saved artifacts are not automatically retrained.
+
+### Verification
+
+* **Passed:** `.venv\Scripts\python.exe -m pytest
+  tests\workflows\test_database_simplification_stage9.py -q` — 5 tests.
+* **Passed:** focused Stage 8, Stage 9, training, recommendation, and
+  readiness regressions — 52 tests, with 12 existing pandas deprecation
+  warnings.
+* **Passed:** affected Python directories —
+  `.venv\Scripts\python.exe -m pytest tests\workflows tests\training
+  tests\recommendations tests\database -q` — 327 passed, 1 skipped, with 52
+  existing pandas deprecation warnings.
+* **Passed:** CLI integration suite — `.venv\Scripts\python.exe -m pytest
+  tests\cli -q` — 54 passed, with 24 existing pandas deprecation warnings.
+* **Passed:** affected mypy check over the 10 changed/new Python source
+  surfaces; no issues reported.
+* **Passed:** Python compilation for the new readiness/training modules and
+  modified target frontends.
+* No disposable-MySQL Stage 9 run was performed; the new acceptance fixture
+  uses the existing SQLite-compatible fake database. No live provider call or
+  production database write was made; provider behavior was injected through
+  the fake fixture.
+
+### Limitations and next-stage prerequisites
+
+The target frontend integration is Python-only and relies on the Stage 8
+target runtime and existing model/feature services. The full repository guard
+continues to have the previously documented legacy z-score documentation
+failure outside this stage's changed files; the affected Stage 9 directories
+passed. Stage 10 may now remove retired operational storage only after its
+own scope is explicitly requested; no Stage 10 cleanup was included here.

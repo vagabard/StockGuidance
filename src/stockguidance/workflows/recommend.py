@@ -25,6 +25,9 @@ from stockguidance.workflows.recommendation_result import RecommendationRunResul
 from stockguidance.workflows.train_model import HistoryTrainingRequest, train_from_history
 from stockguidance.workflows.update_market_data import UpdateSettings, update_market_data
 from stockguidance.workflows.validate_database import ValidationSettings, validate_database
+from stockguidance.workflows.update_result import UpdateResult
+from stockguidance.database.simplified_runtime import SimplifiedUpdateResult, SimplifiedValidationResult
+from stockguidance.validation.result import ValidationResult
 
 
 def _failure(stage: WorkflowStage, code: FailureCode, message: str) -> StageExecutionError:
@@ -46,8 +49,23 @@ def recommend(job: RecommendationJob, boundary: HistoryBoundary, calendar: Sessi
 			require_compatible_artifact(artifact, job, request.timing, calendar)
 		except Exception:
 			raise _failure(WorkflowStage.ARTIFACT, FailureCode.INCOMPATIBLE_ARTIFACT, "Explicit current artifact is unavailable or incompatible; legacy models require rebuilding") from None
+	refresh: UpdateResult | SimplifiedUpdateResult
+	validation: ValidationResult | SimplifiedValidationResult
 	try:
-		refresh = update_market_data(job.source, UpdateSettings(job.start, job.end, job.publication, job.corrections), boundary, calendar, services.provider, services.market_data, clock)
+		if services.simplified_readiness is None:
+			if services.market_data is None:
+				raise ValueError("Legacy recommendation services lack a market-data repository")
+			refresh = update_market_data(job.source, UpdateSettings(job.start, job.end, job.publication, job.corrections), boundary, calendar, services.provider, services.market_data, clock)
+		else:
+			readiness_decisions = (request.timing,) if job.retraining is None else tuple((*job.retraining.decisions, request.timing))
+			readiness = services.simplified_readiness.ensure(
+				readiness_decisions,
+				job.features,
+				job.target,
+				label_cutoff=None if job.retraining is None else request.timing.decision_cutoff,
+				availability_policy=job.availability_policy,
+			)
+			refresh, validation = readiness.update, readiness.validation
 		if not refresh.successful:
 			raise ValueError("Incomplete refresh")
 		if job.features.signal_mode is SignalMode.ENTRY_OPEN:
@@ -59,10 +77,15 @@ def recommend(job: RecommendationJob, boundary: HistoryBoundary, calendar: Sessi
 		raise _failure(WorkflowStage.REFRESH, FailureCode.NOT_READY, "Required source reconciliation failed or coverage remains incomplete") from None
 	try:
 		request = prepare_request(job, boundary, calendar, clock)
-		close_features = replace(job.features, signal_mode=SignalMode.PREVIOUS_CLOSE, feature_order=tuple(feature for feature in job.features.feature_order if feature is not CloseFeature.ENTRY_OPEN_RETURN))
-		validation = validate_database(job.source, ValidationSettings(job.start, job.end, job.publication, request.timing.decision_cutoff, close_features, job.target), boundary, calendar, services.validation, clock)
-		if not validation.complete:
-			raise ValueError("Incomplete validation")
+		if services.simplified_readiness is None:
+			if services.validation is None:
+				raise ValueError("Legacy recommendation services lack a validation repository")
+			close_features = replace(job.features, signal_mode=SignalMode.PREVIOUS_CLOSE, feature_order=tuple(feature for feature in job.features.feature_order if feature is not CloseFeature.ENTRY_OPEN_RETURN))
+			validation = validate_database(job.source, ValidationSettings(job.start, job.end, job.publication, request.timing.decision_cutoff, close_features, job.target), boundary, calendar, services.validation, clock)
+			if not validation.complete:
+				raise ValueError("Incomplete validation")
+		elif not getattr(validation, "complete", False):
+			raise ValueError("Incomplete target-schema readiness")
 		sample = build_sample(job.features, job.target, request.timing, boundary, calendar, job.publication, services.closes, availability_policy=job.availability_policy)
 		if sample.features.values is None:
 			raise ValueError("Unavailable inference sample")

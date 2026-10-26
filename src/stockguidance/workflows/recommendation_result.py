@@ -8,6 +8,7 @@ from stockguidance.recommendations.result import RankedTicker, RecommendationRes
 from stockguidance.training.result import TrainingResult
 from stockguidance.validation.result import ValidationResult
 from stockguidance.workflows.update_result import UpdateResult
+from stockguidance.database.simplified_runtime import SimplifiedUpdateResult, SimplifiedValidationResult
 
 
 @dataclass(frozen=True)
@@ -16,8 +17,8 @@ class RecommendationRunResult:
 	scores: tuple[RankedTicker, ...]
 	eligibility: tuple[TickerEligibility, ...]
 	sample: Sample
-	refresh: UpdateResult
-	validation: ValidationResult
+	refresh: UpdateResult | SimplifiedUpdateResult
+	validation: ValidationResult | SimplifiedValidationResult
 	member_artifact_ids: tuple[str, ...]
 	member_weights: tuple[float, ...]
 	training: TrainingResult | None
