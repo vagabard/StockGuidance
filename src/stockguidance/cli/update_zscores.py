@@ -1,17 +1,21 @@
 import argparse
 from datetime import date, timedelta
 import json
+from pathlib import Path
 from typing import Callable, Sequence
 
 from stockguidance.calendar.clock import SystemClock
 from stockguidance.calendar.exchange import ExchangeCalendar
 from stockguidance.cli.paths import resolve_cli_path
 from stockguidance.config.source import DEFAULT_CALENDAR_ID, DataConfiguration, PriceAdjustment, SourceConfig, SourceIdentity
-from stockguidance.database.configuration import load_database_configuration
+from stockguidance.database.configuration import DatabaseConfiguration, load_database_configuration
 from stockguidance.database.connections import MySQLConnectionFactory
-from stockguidance.database.repositories.mysql_sessions import ConnectionFactory, MySQLSessionRepository
+from stockguidance.database.repositories.mysql_sessions import MySQLSessionRepository
 from stockguidance.database.repositories.mysql_zscores import MySQLZScoreRepository
 from stockguidance.database.table_names import TableNames
+from stockguidance.database.write_connections import WriteConnectionFactory
+from stockguidance.database.simplified_contract import OperationKind
+from stockguidance.database.simplified_runtime import SimplifiedRuntimeError, target_schema_state
 from stockguidance.database.update_schema import initialize_zscore_schema
 from stockguidance.market_data.history import HistoryBoundary, HistoryProvenance, UnknownHistoryBoundary
 from stockguidance.market_data.history_store import JsonHistoryStore
@@ -59,7 +63,7 @@ def _boundary(
 	calendar: ExchangeCalendar,
 	clock: SystemClock,
 	table_names: TableNames,
-	connect: ConnectionFactory,
+	connect: WriteConnectionFactory,
 ) -> HistoryBoundary:
 	cutoff = clock.now()
 	if arguments.history_start is not None:
@@ -88,17 +92,19 @@ def _boundary(
 	return HistoryBoundary(source.identity, calendar.calendar_id, calendar.session(first).session_date, HistoryProvenance.SOURCE_HISTORY, "Earliest retained local observation; not a provider coverage claim", cutoff)
 
 
-def assemble_and_update_zscores(arguments: argparse.Namespace) -> ZScoreUpdateResult:
+def assemble_and_update_zscores(arguments: argparse.Namespace) -> ZScoreUpdateResult | dict[str, object]:
 	clock = SystemClock()
 	database_path = resolve_cli_path(arguments.dbinfo_file, "dbinfo.id")
 	database_configuration = load_database_configuration(database_path)
+	table_names = database_configuration.load_table_names()
+	if target_schema_state(MySQLConnectionFactory(), database_path, table_names) == "target":
+		return assemble_simplified_zscores(arguments, database_path, database_configuration, table_names)
 	if database_configuration.data_configuration_file is None:
 		data_configuration = DataConfiguration("polygon", GROUPED_ENDPOINT, "us-stocks", GROUPED_UNIVERSE, PriceAdjustment(arguments.adjustment) is PriceAdjustment.ADJUSTED, False)
 	else:
 		data_configuration = database_configuration.load_data_configuration()
 	identity = data_configuration.to_source_identity()
 	source = SourceConfig(identity, resolve_cli_path(arguments.data_root, "data"), database_path, "unused-by-local-z-score-update", _configuration=data_configuration)
-	table_names = database_configuration.load_table_names()
 	connect = MySQLConnectionFactory()
 	calendar = _calendar(arguments, clock, data_configuration.calendar_id)
 	boundary = _boundary(arguments, source, calendar, clock, table_names, connect)
@@ -109,6 +115,37 @@ def assemble_and_update_zscores(arguments: argparse.Namespace) -> ZScoreUpdateRe
 		initialize_zscore_schema(source, connect, settings.windows, table_names)
 	repository = MySQLZScoreRepository(source, connect, table_names, archive_store(source, connect), quality_policy=policy)
 	return update_zscores(source, settings, boundary, calendar, repository, clock, initialized_schema=settings.initialize_schema)
+
+
+def assemble_simplified_zscores(arguments: argparse.Namespace, database_path: Path, database_configuration: DatabaseConfiguration, table_names: TableNames) -> dict[str, object]:
+	from stockguidance.database.simplified_runtime import published_sessions, run_simplified_update, source_from_database, validate_simplified_database
+	if arguments.initialize_schema:
+		raise ValueError("--initialize-schema is retired for the target schema; initialize the versioned schema explicitly before running updates")
+	clock = SystemClock()
+	connect = MySQLConnectionFactory()
+	source, names = source_from_database(database_path, resolve_cli_path(arguments.data_root, "data"), connect, table_names)
+	if database_configuration.data_configuration_file is not None and database_configuration.load_data_configuration() != source.data_configuration:
+		raise ValueError("The selected data configuration conflicts with the database-owned source configuration")
+	calendar = _calendar(arguments, clock, source.calendar_id)
+	sessions = published_sessions(calendar, arguments.start_date, arguments.end_date, clock.now(), timedelta(minutes=arguments.publication_delay_minutes))
+	update = run_simplified_update(
+		source, connect, calendar, sessions, provider=None, operation_kind=OperationKind.DERIVED_REPAIR,
+		windows=arguments.windows, clock=clock, table_names=names,
+	)
+	validation = validate_simplified_database(source, connect, calendar, sessions, table_names=names)
+	return {
+		"successful": update.successful and validation.complete,
+		"complete": validation.complete,
+		"exit_code": 0 if update.successful and validation.complete else 2,
+		"mode": "simplified",
+		"schema": "stockguidance-simplified-runtime-1",
+		"requested_scope": [item.session_date.isoformat() for item in sessions],
+		"windows": arguments.windows,
+		"written_sessions": [item.session_date.isoformat() for item in sessions],
+		"provider_calls": update.downloaded_sessions,
+		"update": update.payload(),
+		"validation": validation.payload(),
+	}
 
 
 def _payload(result: ZScoreUpdateResult) -> dict[str, object]:
@@ -133,7 +170,7 @@ def _payload(result: ZScoreUpdateResult) -> dict[str, object]:
 	}
 
 
-def main(argv: Sequence[str] | None = None, *, run: Callable[[argparse.Namespace], ZScoreUpdateResult] = assemble_and_update_zscores) -> int:
+def main(argv: Sequence[str] | None = None, *, run: Callable[[argparse.Namespace], ZScoreUpdateResult | dict[str, object]] = assemble_and_update_zscores) -> int:
 	arguments = parser().parse_args(argv)
 	try:
 		result = run(arguments)
@@ -146,6 +183,12 @@ def main(argv: Sequence[str] | None = None, *, run: Callable[[argparse.Namespace
 	except Exception:
 		print(json.dumps({"successful": False, "complete": False, "exit_code": 1, "error": "Z-score storage or local input inspection failed"}))
 		return 1
+	if isinstance(result, dict):
+		print(json.dumps(result, sort_keys=True))
+		exit_code = result.get("exit_code")
+		if type(exit_code) is not int:
+			raise ValueError("Simplified z-score result has no integer exit code")
+		return exit_code
 	print(json.dumps(_payload(result), sort_keys=True))
 	return result.exit_code
 

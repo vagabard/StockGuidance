@@ -53,6 +53,15 @@ def _report(
 
 
 def run_daily_maintenance(arguments: Any) -> dict[str, object]:
+	from stockguidance.config.paths import resolve_cli_path
+	from stockguidance.database.configuration import load_database_configuration
+	from stockguidance.database.simplified_runtime import target_schema_state
+	database_path = resolve_cli_path(arguments.dbinfo_file, "dbinfo.id")
+	database_configuration = load_database_configuration(database_path)
+	connect = MySQLConnectionFactory()
+	if target_schema_state(connect, database_path, database_configuration.load_table_names()) == "target":
+		from stockguidance.workflows.simplified_maintenance import run_simplified_daily_maintenance
+		return run_simplified_daily_maintenance(arguments)
 	stage = getattr(arguments, "stage", None)
 	run_source = stage in (None, "source")
 	run_java = stage in (None, "java")

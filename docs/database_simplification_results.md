@@ -541,3 +541,69 @@ historical workflow. Stage 8 must wire the shared coordinator and both numerical
 writers into the supported maintenance paths, retain the reader/completion
 guards, and remove old workflow assumptions. No Stage 8 implementation was
 started here.
+
+## Stage 8 — maintenance and validator cutover
+
+Status: implemented for the supported Python entrypoints and the retired Java
+daily-writer guard. No production database, production configuration, provider
+request, or commit was used.
+
+### Changed files and interfaces
+
+* `src/stockguidance/database/simplified_runtime.py` is the target-schema
+  runtime boundary. It reads the database-owned source singleton and one
+  consistent target snapshot, registers only missing exchange sessions, stages
+  raw payloads only for planned missing/forced raw units, runs the existing
+  raw/derived/z-score kernels through `PendingOperationCoordinator`, and removes
+  completed pending rows only after every persisted unit is committed or
+  explicitly non-ready. It refuses schema-version mismatches instead of
+  falling back to legacy writers.
+* `src/stockguidance/database/operation_recovery.py` now accepts a snapshot
+  provider so recovery is completed before planning a new request, invokes the
+  composed rebuild runner, and verifies that the returned committed/non-ready
+  units exactly cover the durable scope.
+* `update_market_data`, `maintain_daily`, and `update_zscores` dispatch to the
+  same simplified coordinator when the versioned schema is present. Retired
+  target-schema options (`--scan-quality`, `--force-verify`, `--repair-plan`,
+  `--initialize-schema`, and daily `--stage`) return actionable errors.
+  `validate_database` dispatches to the read-only state/completion validator.
+* `validate_simplified_database` reports coverage, unfinished operations, bad
+  raw observations, missing/invalid deltas, and expected non-ready z-score
+  statuses with date/ticker/phase/reason fields; it never repairs or initializes
+  a schema.
+* `JavaDailyMaintenanceMain` is now a hard-retired entrypoint. It cannot write
+  using the old archive/import/migration assumptions; the shared Python/Java
+  scope and numerical contracts remain the interchange surface, while the
+  supported target maintenance path uses the composed Python coordinator.
+
+### Acceptance checks
+
+* **Passed:** `.venv\Scripts\python.exe -m pytest
+  tests\database\test_database_simplification_stage8.py -q` — 7 tests covering
+  fileless completed history without provider calls, initial import, forced
+  refresh, cleared-pending recovery without a provider retry, validator
+  diagnostics, and incompatible-schema refusal.
+* **Passed:** the Stage 3–8/database, CLI, validation, and daily-maintenance
+  regression selection — 92 passed, 1 skipped, including target-schema
+  dispatch tests for update, daily maintenance, z-score, and validation CLIs.
+* **Passed:** focused `mypy` over the 9 changed Python source surfaces and
+  `py_compile` over the changed runtime/CLI modules.
+* **Passed:** `mvn -q -f java\pom.xml test`; Maven emitted its existing JVM
+  warnings and expected credential-safe connection-failure trace.
+* **Passed:** `java -cp java\target\classes
+  stockguidance.migration.JavaDailyMaintenanceMain` returned the actionable
+  retired-writer response.
+* **Passed:** `git diff --check`.
+
+The full repository run remains subject to an unrelated pre-existing
+documentation guard: `tests\documentation\test_zscore_documentation.py` flags
+the legacy physical-name reference in `src\stockguidance\market_data\reimport.py`.
+That file was not changed as part of Stage 8. A disposable MySQL Stage 8 runner
+was not executed; all checks above used disposable SQLite fixtures or offline
+Java tests, so no production database was modified.
+
+### Next-stage prerequisites
+
+Stage 9 may consume the simplified readiness/completion boundary for training,
+prediction, and evaluation orchestration. Stage 8 did not modify those paths,
+remove historical migration fixtures, or implement later cleanup stages.

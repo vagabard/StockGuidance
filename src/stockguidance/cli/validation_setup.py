@@ -1,5 +1,6 @@
 import argparse
 from datetime import date, datetime, timedelta
+from pathlib import Path
 
 from stockguidance.calendar.clock import SystemClock
 from stockguidance.calendar.exchange import ExchangeCalendar
@@ -10,6 +11,8 @@ from stockguidance.database.repositories.mysql_tickers import read_ticker_calend
 from stockguidance.database.repositories.mysql_validation import MySQLValidationRepository
 from stockguidance.database.repositories.mysql_zscores import MySQLZScoreRepository
 from stockguidance.database.connections import MySQLConnectionFactory
+from stockguidance.database.configuration import DatabaseConfiguration
+from stockguidance.database.table_names import TableNames
 from stockguidance.database.configuration import load_database_configuration
 from stockguidance.features.specification import CloseFeature, FeatureSpec, SignalMode
 from stockguidance.market_data.discovery import DiscoveryRequest, HistoryOverride, discover_coverage
@@ -21,6 +24,7 @@ from stockguidance.market_data.providers.polygon import GROUPED_ENDPOINT, GROUPE
 from stockguidance.market_data.providers.contracts import CapabilityState, ProviderCapability
 from stockguidance.market_data.publication import DailyPublicationPolicy
 from stockguidance.validation.result import ValidationResult
+from stockguidance.database.simplified_runtime import SimplifiedValidationResult, published_sessions, source_from_database, validate_simplified_database, target_schema_state
 from stockguidance.workflows.validate_database import ValidationSettings, validate_database
 
 
@@ -42,10 +46,14 @@ def _capability_from_cache(store: JsonHistoryStore, identity: SourceIdentity) ->
 		return None, f"Invalid cached provider capability: {error}"
 
 
-def assemble_and_validate(arguments: argparse.Namespace) -> ValidationResult:
+def assemble_and_validate(arguments: argparse.Namespace) -> ValidationResult | SimplifiedValidationResult:
 	clock = SystemClock()
 	database_path = resolve_cli_path(arguments.dbinfo_file, "dbinfo.id")
 	database_configuration = load_database_configuration(database_path)
+	table_names = database_configuration.load_table_names()
+	connect = MySQLConnectionFactory()
+	if target_schema_state(connect, database_path, table_names) == "target":
+		return assemble_simplified_validation(arguments, database_path, database_configuration, table_names)
 	if database_configuration.data_configuration_file is None:
 		data_configuration = DataConfiguration("polygon", GROUPED_ENDPOINT, "us-stocks", GROUPED_UNIVERSE, PriceAdjustment(arguments.adjustment) is PriceAdjustment.ADJUSTED, False)
 	else:
@@ -58,7 +66,6 @@ def assemble_and_validate(arguments: argparse.Namespace) -> ValidationResult:
 		"unused-by-read-only-validation",
 		_configuration=data_configuration,
 	)
-	table_names = database_configuration.load_table_names()
 	if (arguments.ticker_ids is None) != (arguments.lookback_sessions is None):
 		raise ValueError("Feature validation requires both ticker IDs and lookback")
 	mode = SignalMode(arguments.signal_mode)
@@ -113,3 +120,24 @@ def assemble_and_validate(arguments: argparse.Namespace) -> ValidationResult:
 	settings = ValidationSettings(requested_start, requested_end, publication, cutoff, features, zscore_windows=getattr(arguments, "zscore_windows", None))
 	zscore_repository = None if settings.zscore_windows is None else MySQLZScoreRepository(source, MySQLConnectionFactory(), table_names, manifest_store)
 	return validate_database(source, settings, boundary, calendar, MySQLValidationRepository(source, MySQLConnectionFactory(), table_names), clock, discovery=discovery, zscore_repository=zscore_repository, manifest_store=manifest_store)
+
+
+def assemble_simplified_validation(arguments: argparse.Namespace, database_path: Path, database_configuration: DatabaseConfiguration, table_names: TableNames) -> SimplifiedValidationResult:
+	from datetime import date
+	from stockguidance.database.simplified_runtime import source_from_database
+	connect = MySQLConnectionFactory()
+	source, names = source_from_database(database_path, resolve_cli_path(arguments.data_root, "data"), connect, table_names)
+	if database_configuration.data_configuration_file is not None and database_configuration.load_data_configuration() != source.data_configuration:
+		raise ValueError("The selected data configuration conflicts with the database-owned source configuration")
+	cutoff = datetime.fromisoformat(arguments.as_of) if arguments.as_of else SystemClock().now()
+	if arguments.start_date:
+		requested_start = date.fromisoformat(arguments.start_date)
+	else:
+		try:
+			requested_start = cutoff.date().replace(year=cutoff.year - 2)
+		except ValueError:
+			requested_start = cutoff.date().replace(year=cutoff.year - 2, day=28)
+	requested_end = date.fromisoformat(arguments.end_date) if arguments.end_date else cutoff.date()
+	calendar = ExchangeCalendar(source.calendar_id, min(date(1970, 1, 1), requested_start), max(requested_end, cutoff.date()) + timedelta(days=14))
+	sessions = published_sessions(calendar, requested_start, requested_end, cutoff, timedelta(minutes=arguments.publication_delay_minutes or 0))
+	return validate_simplified_database(source, connect, calendar, sessions, table_names=names)

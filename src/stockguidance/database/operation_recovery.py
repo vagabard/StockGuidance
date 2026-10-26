@@ -505,7 +505,7 @@ class PendingOperationCoordinator:
 		self.clock = clock or (lambda: datetime.now(timezone.utc))
 		self.lock_factory = lock_factory or (lambda: MaintenanceWriterLock(source, connect))
 
-	def accept(self, request: UpdateRequest, snapshot: DatabaseSnapshot) -> PendingUpdate:
+	def accept(self, request: UpdateRequest, snapshot: DatabaseSnapshot | Callable[[], DatabaseSnapshot]) -> PendingUpdate:
 		"""Recover the active operation, then register and clear one new scope.
 
 		Without a rebuild runner this method intentionally returns a pending row
@@ -528,11 +528,15 @@ class PendingOperationCoordinator:
 						raise RecoveryError("Pending operation remained active after rebuild")
 
 			assert_lock() if callable(assert_lock) else None
-			scope = self.planner.plan(request, snapshot)
+			current_snapshot = snapshot() if callable(snapshot) else snapshot
+			scope = self.planner.plan(request, current_snapshot)
 			self.payload_validator(scope)
 			created_at = self.clock().astimezone(timezone.utc)
 			operation = self.pending.register(scope, created_at)
-			return self._clear_registered(operation, assert_lock)
+			cleared = self._clear_registered(operation, assert_lock)
+			if self.rebuild_runner is not None:
+				self._run_rebuild(cleared, assert_lock)
+			return cleared
 
 	def _finish_active(self, operation: PendingUpdate, assert_lock: object) -> PendingUpdate | None:
 		self.payload_validator(operation.scope)
@@ -584,6 +588,9 @@ class PendingOperationCoordinator:
 			result = self.rebuild_runner.rebuild(operation, connection) if self.rebuild_runner is not None else None
 			if result is None or result.failed_units or result.deferred_units:
 				raise RecoveryError("Rebuild did not complete the persisted scope")
+			completed = set(result.committed_units) | set(result.explicit_non_ready)
+			if completed != set(operation.scope.rebuild):
+				raise RecoveryError("Rebuild did not publish every persisted work unit")
 		finally:
 			connection.close()
 		self.pending.delete_completed(operation.operation_id, self.clock().astimezone(timezone.utc))

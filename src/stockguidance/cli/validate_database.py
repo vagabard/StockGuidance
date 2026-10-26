@@ -6,6 +6,7 @@ from stockguidance.cli.validation_setup import assemble_and_validate
 from stockguidance.market_data.history import UnknownHistoryBoundary
 from stockguidance.validation.reporting import render_text, report_payload
 from stockguidance.validation.result import ValidationResult
+from stockguidance.database.simplified_runtime import SimplifiedValidationResult
 from stockguidance.cli.zscore_args import parse_windows
 
 
@@ -29,7 +30,7 @@ def parser() -> argparse.ArgumentParser:
 	return arguments
 
 
-def main(argv: Sequence[str] | None = None, *, run: Callable[[argparse.Namespace], ValidationResult] = assemble_and_validate) -> int:
+def main(argv: Sequence[str] | None = None, *, run: Callable[[argparse.Namespace], ValidationResult | SimplifiedValidationResult] = assemble_and_validate) -> int:
 	arguments = parser().parse_args(argv)
 	error = None
 	try:
@@ -43,6 +44,15 @@ def main(argv: Sequence[str] | None = None, *, run: Callable[[argparse.Namespace
 	if error is not None:
 		print(json.dumps({"complete": False, "failed": True, "exit_code": 1, "error": error}) if arguments.format == "json" else f"Database validation failed: {error}")
 		return 1
+	if isinstance(result, SimplifiedValidationResult):
+		if arguments.format == "json":
+			print(json.dumps(result.payload(), sort_keys=True))
+		else:
+			print(f"Database validation: {'complete' if result.complete else 'incomplete'} (exit {result.exit_code})")
+			for finding in result.findings:
+				day = "request" if finding.date is None else finding.date.isoformat()
+				print(f"{day}: {finding.phase}: {finding.reason} (ticker {finding.ticker_id or 'all'})")
+		return result.exit_code
 	print(json.dumps(report_payload(result), sort_keys=True) if arguments.format == "json" else render_text(result))
 	return result.exit_code
 

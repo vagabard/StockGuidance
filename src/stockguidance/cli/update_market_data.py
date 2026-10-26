@@ -9,6 +9,7 @@ from stockguidance.cli.update_arguments import add_update_policy_arguments
 from stockguidance.cli.update_setup import assemble_and_update
 from stockguidance.workflows.failures import StageExecutionError
 from stockguidance.workflows.update_result import UpdateResult
+from stockguidance.database.simplified_runtime import SimplifiedUpdateResult
 
 
 def parser() -> argparse.ArgumentParser:
@@ -28,7 +29,7 @@ def parser() -> argparse.ArgumentParser:
 	return arguments
 
 
-def main(argv: Sequence[str] | None = None, *, run: Callable[[argparse.Namespace], UpdateResult] = assemble_and_update) -> int:
+def main(argv: Sequence[str] | None = None, *, run: Callable[[argparse.Namespace], UpdateResult | SimplifiedUpdateResult] = assemble_and_update) -> int:
 	arguments = parser().parse_args(argv)
 	try:
 		if arguments.download_only:
@@ -62,6 +63,9 @@ def main(argv: Sequence[str] | None = None, *, run: Callable[[argparse.Namespace
 	except Exception:
 		print(json.dumps({"successful": False, "error": "Required updater setup or storage operation failed"}))
 		return 1
+	if isinstance(result, SimplifiedUpdateResult):
+		print(json.dumps(result.payload(), sort_keys=True))
+		return result.exit_code
 	discovery = result.discovery
 	history_boundary = None if discovery is not None and discovery.history_boundary is None else result.plan.boundary
 	payload = {

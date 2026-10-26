@@ -12,6 +12,7 @@ from stockguidance.database.repositories.mysql_market_data import MySQLMarketDat
 from stockguidance.database.repositories.mysql_sessions import ConnectionFactory, MySQLSessionRepository
 from stockguidance.database.table_names import TableNames
 from stockguidance.database.table_names import quote_identifier
+from stockguidance.database.simplified_contract import OperationKind
 from stockguidance.database.update_schema import initialize_update_schema, register_configuration_verification
 from stockguidance.market_data.corrections import CorrectionPolicy
 from stockguidance.market_data.discovery import CoverageDiscoveryResult, DiscoveryRequest, HistoryOverride, discover_coverage
@@ -25,6 +26,7 @@ from stockguidance.market_data.publication import DailyPublicationPolicy
 from stockguidance.validation.repair import load_repair_plan
 from stockguidance.workflows.update_market_data import UpdateSettings, update_market_data
 from stockguidance.workflows.update_result import UpdateResult
+from stockguidance.database.simplified_runtime import SimplifiedUpdateResult
 from stockguidance.workflows.progress import ProgressReporter
 from stockguidance.market_data.canonical_store import CanonicalArchiveStore
 from stockguidance.database.repositories.archive_catalog import ArchiveCatalog
@@ -81,12 +83,17 @@ def _query_boundary(source: SourceConfig, calendar: ExchangeCalendar, discovery:
 	)
 
 
-def assemble_and_update(arguments: argparse.Namespace) -> UpdateResult:
+def assemble_and_update(arguments: argparse.Namespace) -> UpdateResult | SimplifiedUpdateResult:
 	reporter = ProgressReporter(enabled=getattr(arguments, "verbose", False))
 	reporter.message("starting market-data update")
 	clock = SystemClock()
 	database_path = reporter.measure("load database configuration", lambda: resolve_cli_path(arguments.dbinfo_file, "dbinfo.id"))
 	database_configuration = reporter.measure("read database configuration", lambda: load_database_configuration(database_path))
+	table_names = database_configuration.load_table_names()
+	connect = MySQLConnectionFactory()
+	from stockguidance.database.simplified_runtime import target_schema_state
+	if target_schema_state(connect, database_path, table_names) == "target":
+		return assemble_and_update_simplified(arguments, database_path, database_configuration, connect, table_names)
 	if database_configuration.data_configuration_file is None:
 		data_configuration = DataConfiguration("polygon", GROUPED_ENDPOINT, "us-stocks", GROUPED_UNIVERSE, PriceAdjustment(arguments.adjustment) is PriceAdjustment.ADJUSTED, False)
 	else:
@@ -103,10 +110,8 @@ def assemble_and_update(arguments: argparse.Namespace) -> UpdateResult:
 		"polygon_fetch.DEFAULT_API_KEY or POLYGON_API_KEY",
 		_configuration=data_configuration,
 	)
-	table_names = database_configuration.load_table_names()
 	if arguments.data_root != "data" and arguments.start_date is None and arguments.history_start is None and JsonHistoryStore(source.data_root / "history").load(identity) is None and not any((source.data_root / "market_summary").glob("*/*.ndjson")):
 		raise UnknownHistoryBoundary("No supported-history evidence exists in the selected data root")
-	connect = MySQLConnectionFactory()
 	if database_configuration.data_configuration_file is None and not arguments.initialize_schema:
 		connection = connect(source.database_config)
 		try:
@@ -192,3 +197,41 @@ def assemble_and_update(arguments: argparse.Namespace) -> UpdateResult:
 	history_store.save_discovery_metadata(discovery.metadata())
 	reporter.finish(successful=result.successful, failures=len(result.failures))
 	return result
+
+
+def assemble_and_update_simplified(
+	arguments: argparse.Namespace,
+	database_path: Path,
+	database_configuration: object,
+	connect: MySQLConnectionFactory,
+	table_names: TableNames,
+) -> SimplifiedUpdateResult:
+	"""Assemble the target-schema update without legacy discovery or metadata."""
+	from stockguidance.database.configuration import DatabaseConfiguration
+	from stockguidance.database.simplified_runtime import published_sessions, run_simplified_update, source_from_database
+	from stockguidance.market_data.providers.configured_polygon import ConfiguredPolygonProvider
+	if not isinstance(database_configuration, DatabaseConfiguration):
+		raise ValueError("Invalid database configuration")
+	retired = []
+	for flag, label in ((getattr(arguments, "scan_quality", False), "--scan-quality"), (getattr(arguments, "force_verify", False), "--force-verify"), (getattr(arguments, "repair_plan", None) is not None, "--repair-plan"), (getattr(arguments, "initialize_schema", False), "--initialize-schema")):
+		if flag:
+			retired.append(label)
+	if retired:
+		raise ValueError(f"{', '.join(retired)} is retired for the target schema; use a normal update or explicit pending-operation recovery")
+	clock = SystemClock()
+	source, selected_names = source_from_database(database_path, resolve_cli_path(arguments.data_root, "data"), connect, table_names)
+	if arguments.adjustment is not None and PriceAdjustment(arguments.adjustment) is not source.identity.adjustment:
+		raise ValueError("Requested adjustment conflicts with the database-owned source configuration")
+	if database_configuration.data_configuration_file is not None and database_configuration.load_data_configuration() != source.data_configuration:
+		raise ValueError("The selected data configuration conflicts with the database-owned source configuration")
+	requested_start = date.fromisoformat(arguments.start_date) if arguments.start_date else clock.now().date()
+	requested_end = date.fromisoformat(arguments.end_date) if arguments.end_date else requested_start
+	calendar = ExchangeCalendar(source.calendar_id, min(date(1970, 1, 1), requested_start), max(requested_end, clock.now().date()) + timedelta(days=14))
+	sessions = published_sessions(calendar, requested_start, requested_end, clock.now(), timedelta(minutes=arguments.publication_delay_minutes))
+	forced = frozenset(session.session_date for session in sessions) if arguments.refresh_source else frozenset()
+	provider = ConfiguredPolygonProvider(arguments.max_retries)
+	return run_simplified_update(
+		source, connect, calendar, sessions, provider=provider, forced_sessions=forced,
+		operation_kind=OperationKind.FORCED_REPLACEMENT if forced else OperationKind.INITIAL_IMPORT,
+		staging_root=source.data_root / ".database-simplification" / "pending", clock=clock, table_names=selected_names,
+	)
