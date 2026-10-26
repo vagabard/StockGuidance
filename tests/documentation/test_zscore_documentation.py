@@ -63,7 +63,8 @@ def test_canonical_registry_is_packaged_and_shared_with_java() -> None:
 	assert set(registry) == {"schema_version", "tables", "zscore_templates"}
 	assert set(registry["tables"]) == {
 		"source", "sessions", "tickers", "prices", "deltas", "imports",
-		"zscore_series", "zscore_sessions",
+		"zscore_series", "zscore_sessions", "schema", "data_states",
+		"pending_updates", "repair_metadata",
 	}
 	assert set(registry["zscore_templates"]) == {"price", "price_delta"}
 

@@ -393,11 +393,17 @@ public final class JavaWriterCandidate {
     private boolean registryMatches(String registry) {
         JsonObject value = JsonSupport.parse(registry);
         Map<String, String> expected = names.tables();
+        Map<String, String> replacement = names.replacementTables();
         Set<String> fields = new HashSet<>();
         fields.addAll(value.keySet());
-        if (!fields.equals(expected.keySet())) return false;
+        Set<String> allowed = new HashSet<>(expected.keySet());
+        allowed.addAll(replacement.keySet());
+        if (!fields.equals(expected.keySet()) && !fields.equals(allowed)) return false;
         for (Map.Entry<String, String> entry : expected.entrySet()) {
             if (!entry.getValue().equals(JsonSupport.stringOrEmpty(value.get(entry.getKey())))) return false;
+        }
+        for (Map.Entry<String, String> entry : replacement.entrySet()) {
+            if (fields.contains(entry.getKey()) && !entry.getValue().equals(JsonSupport.stringOrEmpty(value.get(entry.getKey())))) return false;
         }
         return true;
     }

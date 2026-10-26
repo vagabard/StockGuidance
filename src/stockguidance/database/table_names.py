@@ -11,11 +11,15 @@ from typing import Any, cast
 class TableRole(StrEnum):
 	DATA_CONFIGURATION = "source"
 	SOURCE = "source"
+	SCHEMA = "schema"
 	SESSIONS = "sessions"
 	TICKERS = "tickers"
 	PRICES = "prices"
 	DELTAS = "deltas"
 	IMPORTS = "imports"
+	DATA_STATES = "data_states"
+	PENDING_UPDATES = "pending_updates"
+	REPAIR_METADATA = "repair_metadata"
 	ZSCORE_SERIES = "zscore_series"
 	ZSCORE_SESSIONS = "zscore_sessions"
 	VERIFICATIONS = "data_verifications"
@@ -84,6 +88,10 @@ class TableNames:
 	price_delta_template: str
 	data_verifications: str = "stockguidance_data_verifications"
 	data_verification_samples: str = "stockguidance_data_verification_samples"
+	schema: str = "stockguidance_schema_version"
+	data_states: str = "stockguidance_data_states"
+	pending_updates: str = "stockguidance_pending_updates"
+	repair_metadata: str = "stockguidance_repair_metadata"
 
 	def __post_init__(self) -> None:
 		for role in _TABLE_ROLES:
@@ -101,8 +109,11 @@ class TableNames:
 		field_name = "source" if role in (TableRole.DATA_CONFIGURATION, TableRole.SOURCE) else role.value
 		return cast(str, getattr(self, field_name))
 
-	def tables(self, *, include_verification: bool = False) -> dict[str, str]:
-		roles = _TABLE_ROLES if include_verification else tuple(role for role in _TABLE_ROLES if role not in (TableRole.VERIFICATIONS, TableRole.VERIFICATION_SAMPLES))
+	def tables(self, *, include_verification: bool = False, include_simplified: bool = False) -> dict[str, str]:
+		legacy = (TableRole.SOURCE, TableRole.SESSIONS, TableRole.TICKERS, TableRole.PRICES, TableRole.DELTAS, TableRole.IMPORTS, TableRole.ZSCORE_SERIES, TableRole.ZSCORE_SESSIONS)
+		replacement = (TableRole.SCHEMA, TableRole.DATA_STATES, TableRole.PENDING_UPDATES, TableRole.REPAIR_METADATA)
+		verification = (TableRole.VERIFICATIONS, TableRole.VERIFICATION_SAMPLES) if include_verification else ()
+		roles = legacy + (replacement if include_simplified else ()) + verification
 		return {role.value: self.table(role) for role in roles}
 
 	def templates(self) -> dict[str, str]:
@@ -111,7 +122,7 @@ class TableNames:
 	def resolve_zscore_tables(self, windows: Iterable[int]) -> dict[int, ResolvedZScoreTables]:
 		values = _validate_windows(windows)
 		resolved: dict[int, ResolvedZScoreTables] = {}
-		used = {name.casefold() for name in self.tables(include_verification=True).values()}
+		used = {name.casefold() for name in self.tables(include_verification=True, include_simplified=True).values()}
 		for window in values:
 			price = validate_identifier(self.price_template.replace("{window}", str(window)), "price z-score table name")
 			price_delta = validate_identifier(self.price_delta_template.replace("{window}", str(window)), "price_delta z-score table name")
@@ -136,23 +147,40 @@ def _load_payload(text: str) -> TableNames:
 			raise ValueError("Table-names JSON fields are incomplete or unknown")
 		if type(top["schema_version"]) is not int or top["schema_version"] != 1:
 			raise ValueError("Unsupported table-names schema version")
-		tables = _mapping(top["tables"], "tables")
+		tables = dict(_mapping(top["tables"], "tables"))
 		required_roles = {role.value for role in _TABLE_ROLES if role not in (TableRole.VERIFICATIONS, TableRole.VERIFICATION_SAMPLES)}
 		allowed_roles = required_roles | {TableRole.VERIFICATIONS.value, TableRole.VERIFICATION_SAMPLES.value}
-		if not required_roles.issubset(tables) or set(tables) - allowed_roles:
+		legacy_roles = {TableRole.SOURCE.value, TableRole.SESSIONS.value, TableRole.TICKERS.value, TableRole.PRICES.value, TableRole.DELTAS.value, TableRole.IMPORTS.value, TableRole.ZSCORE_SERIES.value, TableRole.ZSCORE_SESSIONS.value}
+		if not legacy_roles.issubset(tables) or set(tables) - allowed_roles:
 			raise ValueError("Table-names table roles are incomplete or unknown")
 		templates = _mapping(top["zscore_templates"], "zscore_templates")
 		if set(templates) != set(_TEMPLATE_NAMES):
 			raise ValueError("Z-score templates are incomplete or unknown")
-		validated_tables = tuple(validate_identifier(tables[role.value], f"{role.value} table name") for role in _TABLE_ROLES if role not in (TableRole.VERIFICATIONS, TableRole.VERIFICATION_SAMPLES))
+		defaults = {
+			TableRole.SCHEMA.value: "stockguidance_schema_version",
+			TableRole.DATA_STATES.value: "stockguidance_data_states",
+			TableRole.PENDING_UPDATES.value: "stockguidance_pending_updates",
+			TableRole.REPAIR_METADATA.value: "stockguidance_repair_metadata",
+		}
+		for role, default in defaults.items():
+			if role not in tables:
+				tables[role] = default
+		validated_tables = {
+			role.value: validate_identifier(tables[role.value], f"{role.value} table name")
+			for role in _TABLE_ROLES if role not in (TableRole.VERIFICATIONS, TableRole.VERIFICATION_SAMPLES)
+		}
 		verification_table = validate_identifier(tables.get(TableRole.VERIFICATIONS.value, "stockguidance_data_verifications"), "data_verifications table name")
 		sample_table = validate_identifier(tables.get(TableRole.VERIFICATION_SAMPLES.value, "stockguidance_data_verification_samples"), "data_verification_samples table name")
 		return TableNames(
-			source=validated_tables[0], sessions=validated_tables[1], tickers=validated_tables[2], prices=validated_tables[3],
-			deltas=validated_tables[4], imports=validated_tables[5], zscore_series=validated_tables[6], zscore_sessions=validated_tables[7],
+			source=validated_tables[TableRole.SOURCE.value], sessions=validated_tables[TableRole.SESSIONS.value],
+			tickers=validated_tables[TableRole.TICKERS.value], prices=validated_tables[TableRole.PRICES.value],
+			deltas=validated_tables[TableRole.DELTAS.value], imports=validated_tables[TableRole.IMPORTS.value],
+			zscore_series=validated_tables[TableRole.ZSCORE_SERIES.value], zscore_sessions=validated_tables[TableRole.ZSCORE_SESSIONS.value],
 			price_template=_validate_template(templates["price"], "price"),
 			price_delta_template=_validate_template(templates["price_delta"], "price_delta"),
 			data_verifications=verification_table, data_verification_samples=sample_table,
+			schema=validated_tables[TableRole.SCHEMA.value], data_states=validated_tables[TableRole.DATA_STATES.value],
+			pending_updates=validated_tables[TableRole.PENDING_UPDATES.value], repair_metadata=validated_tables[TableRole.REPAIR_METADATA.value],
 		)
 	except (TypeError, ValueError, json.JSONDecodeError):
 		raise ValueError("Invalid table-names JSON") from None

@@ -2,11 +2,15 @@
   "schema_version": 1,
   "tables": {
     "source": "stockguidance_source",
+    "schema": "stockguidance_schema_version",
     "sessions": "transaction_dates",
     "tickers": "ticker_symbol",
     "prices": "raw_stock_data",
     "deltas": "daily_delta_stock_data",
     "imports": "stockguidance_imports",
+    "data_states": "stockguidance_data_states",
+    "pending_updates": "stockguidance_pending_updates",
+    "repair_metadata": "stockguidance_repair_metadata",
     "zscore_series": "stockguidance_zscore_series",
     "zscore_sessions": "stockguidance_zscore_sessions"
   },

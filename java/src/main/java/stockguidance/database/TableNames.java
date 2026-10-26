@@ -26,11 +26,15 @@ public final class TableNames {
 
     public enum Role {
         SOURCE("source"),
+        SCHEMA("schema"),
         SESSIONS("sessions"),
         TICKERS("tickers"),
         PRICES("prices"),
         DELTAS("deltas"),
         IMPORTS("imports"),
+        DATA_STATES("data_states"),
+        PENDING_UPDATES("pending_updates"),
+        REPAIR_METADATA("repair_metadata"),
         ZSCORE_SERIES("zscore_series"),
         ZSCORE_SESSIONS("zscore_sessions");
 
@@ -95,13 +99,26 @@ public final class TableNames {
         }
         JsonObject tableValues = object(root, "tables");
         Set<String> tableFields = new HashSet<>();
-        for (Role role : Role.values()) {
+        for (Role role : List.of(Role.SOURCE, Role.SESSIONS, Role.TICKERS, Role.PRICES, Role.DELTAS, Role.IMPORTS, Role.ZSCORE_SERIES, Role.ZSCORE_SESSIONS)) {
             tableFields.add(role.key());
         }
-        requireFields(tableValues, tableFields);
+        Set<String> allowedFields = new HashSet<>(tableFields);
+        for (Role role : List.of(Role.SCHEMA, Role.DATA_STATES, Role.PENDING_UPDATES, Role.REPAIR_METADATA)) {
+            allowedFields.add(role.key());
+        }
+        if (!tableValues.keySet().containsAll(tableFields) || !allowedFields.containsAll(tableValues.keySet())) {
+            throw new ContractException("Incomplete or unsupported table-names fields");
+        }
         EnumMap<Role, String> tables = new EnumMap<>(Role.class);
         for (Role role : Role.values()) {
-            tables.put(role, validateIdentifier(text(tableValues, role.key()), role.key() + " table name"));
+            String defaultName = switch (role) {
+                case SCHEMA -> "stockguidance_schema_version";
+                case DATA_STATES -> "stockguidance_data_states";
+                case PENDING_UPDATES -> "stockguidance_pending_updates";
+                case REPAIR_METADATA -> "stockguidance_repair_metadata";
+                default -> null;
+            };
+            tables.put(role, validateIdentifier(tableValues.containsKey(role.key()) ? text(tableValues, role.key()) : defaultName, role.key() + " table name"));
         }
         JsonObject templateValues = object(root, "zscore_templates");
         requireFields(templateValues, Set.of("price", "price_delta"));
@@ -156,8 +173,18 @@ public final class TableNames {
     }
 
     public Map<String, String> tables() {
+        return tables(false);
+    }
+
+    public Map<String, String> replacementTables() {
+        return tables(true);
+    }
+
+    public Map<String, String> tables(boolean includeReplacement) {
         Map<String, String> result = new LinkedHashMap<>();
-        for (Role role : Role.values()) {
+        List<Role> roles = new ArrayList<>(List.of(Role.SOURCE, Role.SESSIONS, Role.TICKERS, Role.PRICES, Role.DELTAS, Role.IMPORTS, Role.ZSCORE_SERIES, Role.ZSCORE_SESSIONS));
+        if (includeReplacement) roles.addAll(List.of(Role.SCHEMA, Role.DATA_STATES, Role.PENDING_UPDATES, Role.REPAIR_METADATA));
+        for (Role role : roles) {
             result.put(role.key(), table(role));
         }
         return Map.copyOf(result);

@@ -12,6 +12,16 @@ from stockguidance.database.table_names import TableNames, TableRole, load_table
 from stockguidance.database.verification import VerificationStatus, VerificationType, register_verification, verification_allows
 from stockguidance.database.repositories.archive_catalog import ARCHIVE_DDL
 
+# Stage 3 exposes an explicit target-schema initializer without changing the
+# legacy initializer below.  Production entrypoints continue to use the old
+# implementation until the coordinated cutover stage.
+from stockguidance.database.simplified_schema import (  # noqa: E402
+	SchemaVersionError,
+	assert_simplified_schema,
+	initialize_simplified_schema,
+	simplified_schema_statements,
+)
+
 
 _UPDATE_TABLE_ROLES = (TableRole.DATA_CONFIGURATION, TableRole.SESSIONS, TableRole.TICKERS, TableRole.PRICES, TableRole.DELTAS, TableRole.IMPORTS, TableRole.VERIFICATIONS, TableRole.VERIFICATION_SAMPLES)
 
