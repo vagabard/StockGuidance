@@ -461,3 +461,83 @@ and handle deferred future-dependent outcomes without retry loops. It must
 compose the Stage 6 runner with the later calculation units and only remove a
 pending operation after all persisted scope units validate. Runtime maintenance
 cutover remains Stage 8; this stage intentionally does not modify those paths.
+
+## Stage 7 — numerical rebuilds
+
+Status: complete for the Stage 7 numerical rebuild implementation and
+acceptance gates. No supported maintenance entrypoint was cut over, no
+production database was selected or modified, and no commit was created.
+
+### Changed files and interfaces
+
+* `src/stockguidance/database/numerical_rebuild.py` adds
+  `SimplifiedNumericalRebuildRunner` (also exported as `NumericalRebuildRunner`).
+  It composes `RawRebuildRunner`, validates the simplified schema, orders raw /
+  repair, delta, and z-score units, and returns the existing `RebuildResult`
+  contract without deferred calculation units.
+* The Python writer uses `legacy_rows` for all sixteen delta columns and
+  `calculate_zscores` for price and price-delta windows. Delta units atomically
+  publish states, quality/provenance, and `delta_complete`; z-score units merge
+  unaffected rows and atomically publish rows plus completion metadata. Resume
+  checks completion evidence and preserves completed units.
+* `java/src/main/java/stockguidance/database/SimplifiedNumericalKernel.java`
+  and `SimplifiedNumericalWriter.java` provide the matching Java kernel/writer
+  surface. The kernel delegates the existing legacy formula implementation;
+  the JDBC writer uses the `TableNames` registry, parameterized values, and
+  per-unit transactions.
+* `tests/database/test_database_simplification_stage7.py`,
+  `java/src/test/java/stockguidance/database/SimplifiedNumericalKernelTest.java`,
+  and `tools/database_simplification_stage7.py` cover offline edge cases,
+  Java formula parity, and a disposable MySQL fresh/resume/latest-date run.
+* `src/stockguidance/database/repositories/mysql_zscores.py` accepts both the
+  existing textual status-count encoding and the valid JSON-object encoding
+  written to the target JSON column. The Stage 7 target writer emits the JSON
+  object form.
+* `docs/database_simplification_contract.md` records the Stage 7 runner and
+  atomic-publication boundary. No Stage 8 runtime wiring was added.
+
+### Decisions
+
+Raw and repair work is delegated first, then each delta session commits before
+its dependent z-score unit is considered. A latest current close may therefore
+remain numeric while future-dependent delta labels are NULL and the row is
+marked `not_yet_available`; it is completed rather than retried indefinitely.
+Missing, invalid, warm-up, zero-variance, and unavailable inputs remain
+explicit statuses with NULL numeric outputs. Interpolated evidence carries
+repair revision, endpoint timing, gap length, and quality flags through the
+delta and z-score windows. Price-delta reads are limited to completed delta
+sessions and checked against raw close ratios. Target-schema completion uses
+`delta_complete` or z-score metadata with a matching physical row count.
+
+### Verification
+
+* **Passed:** `.venv\Scripts\python.exe -m pytest
+  tests\database\test_database_simplification_stage7.py tests\database
+  tests\zscores -q` — 138 tests, with 12 existing warnings.
+* **Passed:** `.venv\Scripts\python.exe -m mypy src\stockguidance\database` —
+  no issues in 37 source files.
+* **Passed:** `mvn -q -f java\pom.xml test` — the Java suite passed, including
+  the new legacy-kernel/latest-target test; Maven emitted existing JVM warnings
+  and the expected credential-safe connection-failure trace.
+* **Passed:** `.venv\Scripts\python.exe tools\database_simplification_stage7.py
+  --dbinfo-file replacement-dbinfo.id
+  --schema stockguidance_disposable_stage7_20261026` — fresh, resumed, and
+  latest-date numerical checks passed on disposable MySQL; cleanup dropped the
+  explicitly prefixed disposable schema.
+* **Passed:** Python compilation of the Stage 7 disposable runner and
+  `git diff --check`, plus an explicit trailing-whitespace scan of all new
+  source/test files.
+* **Passed:** no provider calls or production database/configuration writes
+  were used.
+
+### Limitations and next-stage prerequisites
+
+The Java JDBC writer was compiled and exercised through the Maven regression
+suite but was not independently driven against MySQL; the disposable MySQL
+transaction gate covers the Python target writer. The full repository suite
+and production-capacity/performance checks remain outside this stage. Existing
+maintenance, validation, training, and prediction entrypoints still use their
+historical workflow. Stage 8 must wire the shared coordinator and both numerical
+writers into the supported maintenance paths, retain the reader/completion
+guards, and remove old workflow assumptions. No Stage 8 implementation was
+started here.

@@ -812,3 +812,42 @@ missing rows, and commit their effective values/state and endpoint metadata
 atomically. A completed raw unit is skipped on resume by its completion and
 payload revision; a completed repair revision is skipped by its persisted
 metadata. Delta and z-score units remain deferred to Stage 7.
+
+### Stage 7 numerical rebuild boundary
+
+`stockguidance.database.numerical_rebuild.SimplifiedNumericalRebuildRunner`
+composes the Stage 6 `RawRebuildRunner` and is the target-schema Python
+`RebuildRunner` implementation. It rejects an uncleared operation, processes
+all raw and repair units first, then processes delta sessions, and only then
+processes z-score session units. A committed `delta_complete` flag or a
+validated `zscore_sessions` row plus matching output-row count is completion
+evidence on resume; completed units are preserved rather than deleted again.
+
+Delta values use the existing `legacy_rows` formula kernel and retain the full
+sixteen-column order. A delta transaction replaces only the planned current
+ticker rows, writes the readable `calculation_status`, quality flags, gap
+length, structured provenance JSON, and `delta_complete` together. A current
+close can remain available while future-dependent label columns are NULL; the
+row is complete with `not_yet_available` rather than being retried forever.
+Missing, invalid, and insufficient-history inputs remain NULL where the
+existing formula has no value. Ranking quality includes the actual eligible
+following-session population.
+
+Z-score values use the existing `calculate_zscores` kernel with the exact
+price or price-delta session window. Price-delta inputs are read only after
+their delta session completion and are checked against the raw close ratio.
+Affected ticker rows are merged with unaffected rows in the target session;
+one z-score transaction writes those rows and the existing completion
+metadata. The six existing z-score status codes, float32 ready precision,
+NULL non-ready values, dependency/availability digests, content fingerprint,
+quality flags, gap length, and provenance remain authoritative. Raw source
+availability and repair timing are carried into observations so strict
+cutoffs and future-leakage quality policy continue to apply.
+
+The matching Java surface is
+`stockguidance.database.SimplifiedNumericalKernel` plus
+`SimplifiedNumericalWriter`. It consumes `SimplifiedContracts.PendingUpdate`
+work units, parameterizes values, validates registry identifiers through the
+Java `TableNames` registry, and commits each delta/z-score unit atomically.
+It is not wired into a supported maintenance entrypoint; that coordinated
+cutover remains Stage 8.

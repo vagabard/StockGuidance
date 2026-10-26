@@ -593,7 +593,19 @@ class MySQLZScoreRepository(ZScoreRepository):
 		if len(row) != 10:
 			raise ZScoreSchemaError("Malformed z-score completion metadata")
 		try:
-			counts = tuple((ZScoreStatus(int(item.split(":", 1)[0])), int(item.split(":", 1)[1])) for item in str(row[8]).split(",") if item)
+			counts_value = row[8]
+			if isinstance(counts_value, dict):
+				counts = tuple((ZScoreStatus(int(key)), int(value)) for key, value in counts_value.items())
+			else:
+				serialized = str(counts_value)
+				try:
+					decoded = json.loads(serialized)
+				except json.JSONDecodeError:
+					decoded = None
+				if isinstance(decoded, dict):
+					counts = tuple((ZScoreStatus(int(key)), int(value)) for key, value in decoded.items())
+				else:
+					counts = tuple((ZScoreStatus(int(item.split(":", 1)[0])), int(item.split(":", 1)[1])) for item in serialized.split(",") if item)
 			if row[4] not in (0, 1, False, True):
 				raise ValueError("Invalid z-score availability flag")
 			return ZScoreSessionMetadata(str(row[0]), normalize_date_id(row[1]), str(row[2]), str(row[3]), bool(row[4]), datetime.fromisoformat(str(row[5])), int(str(row[6])), int(str(row[7])), counts, str(row[9]))
