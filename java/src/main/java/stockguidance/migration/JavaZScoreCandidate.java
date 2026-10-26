@@ -53,6 +53,7 @@ public final class JavaZScoreCandidate {
     private final java.util.Set<LocalDate> verifiedSources;
     private final boolean productionTarget;
     private final String expectedProductionSchema;
+    private final JsonObject qualityPolicy;
     private final Map<String, Double> phaseSeconds = new LinkedHashMap<>();
 
     public JavaZScoreCandidate(JavaWriterManifest manifest) {
@@ -74,6 +75,11 @@ public final class JavaZScoreCandidate {
         this.verifiedSources = verifiedSources;
         this.productionTarget = productionTarget;
         this.expectedProductionSchema = expectedProductionSchema;
+        JsonObject root = manifest.root();
+        this.qualityPolicy = JsonSupport.object();
+        for (String key : List.of("quality_history", "quality_cutoff", "retrospective_quality")) {
+            if (root.containsKey(key)) this.qualityPolicy.put(key, root.get(key));
+        }
     }
 
     Map<String, Double> phaseSeconds() {
@@ -154,7 +160,7 @@ public final class JavaZScoreCandidate {
                     if (row != null) values.put(date, new Cell(row.closeRatioToPrior()));
                 } else {
                     JavaDbCopy.RawRow row = input.raw().get(identifier);
-                    if (row != null) values.put(date, RowQuality.cell(row.close(), row.quality(), manifest.root()));
+                    if (row != null) values.put(date, RowQuality.cell(row.close(), row.quality(), qualityPolicy));
                 }
             });
             result.put(identifier, values);
@@ -513,7 +519,7 @@ public final class JavaZScoreCandidate {
                     LocalDate date = dates.stream().filter(item -> item.getValue() == dateId).findFirst().orElseThrow().getKey();
                     Map<LocalDate, Cell> ticker = result.computeIfAbsent(tickerId, ignored -> new HashMap<>());
                     BigDecimal value = rows.getBigDecimal(3);
-                    if (ticker.put(date, RowQuality.cell(value == null ? null : value.doubleValue(), quality.get(new RowQuality.Key(dateId, tickerId)), manifest.root())) != null) throw new IllegalArgumentException("Duplicate z-score input row");
+                    if (ticker.put(date, RowQuality.cell(value == null ? null : value.doubleValue(), quality.get(new RowQuality.Key(dateId, tickerId)), qualityPolicy)) != null) throw new IllegalArgumentException("Duplicate z-score input row");
                 }
             }
         }
