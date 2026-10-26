@@ -1,5 +1,11 @@
 # Canonical daily market-data storage
 
+> Historical legacy storage workflow. The archive catalog, source-file
+> fingerprints, verification records and reimport tables described here are
+> retired from the versioned target schema. Keep this document for source-file
+> preservation evidence only; use the simplified runtime for database updates
+> and never run its database-writing commands against a target schema.
+
 Daily downloads belong in `data/market_summary/YYYY/YYYY-MM-DD.ndjson`.
 `market_summary` retains its existing underscore spelling. The records use
 `T,o,h,l,c,v,vw,n,t`; decimal strings and JSON numbers are accepted without a

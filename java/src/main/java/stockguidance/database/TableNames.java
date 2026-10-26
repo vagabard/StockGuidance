@@ -176,8 +176,14 @@ public final class TableNames {
         return tables(false);
     }
 
-    public Map<String, String> replacementTables() {
-        return tables(true);
+    public Map<String, String> targetTables() {
+        Map<String, String> result = new LinkedHashMap<>();
+        for (Role role : List.of(Role.SOURCE, Role.SESSIONS, Role.TICKERS, Role.PRICES, Role.DELTAS,
+                Role.SCHEMA, Role.DATA_STATES, Role.PENDING_UPDATES, Role.REPAIR_METADATA,
+                Role.ZSCORE_SERIES, Role.ZSCORE_SESSIONS)) {
+            result.put(role.key(), table(role));
+        }
+        return Map.copyOf(result);
     }
 
     public Map<String, String> tables(boolean includeReplacement) {
@@ -207,7 +213,7 @@ public final class TableNames {
             values.add(window);
         }
         Set<String> used = new HashSet<>();
-        for (String name : tables.values()) {
+        for (String name : targetTables().values()) {
             used.add(fold(name));
         }
         Map<Integer, ResolvedZScoreTables> result = new LinkedHashMap<>();

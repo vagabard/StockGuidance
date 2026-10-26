@@ -17,7 +17,7 @@ from typing import ContextManager, Protocol, cast
 
 from stockguidance.config.source import SourceConfig
 from stockguidance.database.dependency_planner import DatabaseSnapshot, DependencyPlannerProtocol, UpdateRequest
-from stockguidance.database.repositories.mysql_sessions import Cursor
+from stockguidance.database.protocols import Cursor
 from stockguidance.database.repositories.simplified import PendingUpdateRepository, PendingUpdateRepositoryProtocol
 from stockguidance.database.simplified_contract import (
 	CacheInvalidation,

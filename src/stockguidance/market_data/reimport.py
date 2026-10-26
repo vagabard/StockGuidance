@@ -8,6 +8,7 @@ from typing import Any
 from stockguidance.calendar.exchange import ExchangeCalendar
 from stockguidance.config.source import SourceConfig, SourceIdentity
 from stockguidance.database.repositories.archive_catalog import ARCHIVE_DDL
+from stockguidance.database.simplified_schema import reject_target_schema
 from stockguidance.database.table_names import TableNames, TableRole, quote_identifier
 from stockguidance.market_data.archive import archive_path, decode_archive
 from stockguidance.market_data.identity import data_configuration_key, encode_json
@@ -93,8 +94,9 @@ def _delete_period(cursor: Any, names: TableNames, first: date, last: date) -> d
 	counts["stockguidance_daily_source_files"] = cursor.rowcount
 	cursor.execute("DELETE FROM stockguidance_quality_scans", ())
 	counts["stockguidance_quality_scans"] = cursor.rowcount
-	cursor.execute("DELETE FROM stockguidance_zscore_series", ())
-	counts["stockguidance_zscore_series"] = cursor.rowcount
+	series = names.table(TableRole.ZSCORE_SERIES)
+	cursor.execute(f"DELETE FROM {quote_identifier(series)}", ())
+	counts[series] = cursor.rowcount
 	cursor.execute("DELETE FROM stockguidance_data_verification_samples", ())
 	counts["stockguidance_data_verification_samples"] = cursor.rowcount
 	cursor.execute("DELETE FROM stockguidance_data_verifications", ())
@@ -120,6 +122,7 @@ def apply_reimport(source: SourceConfig, connect: Any, names: TableNames, operat
 	try:
 		cursor = connection.cursor()
 		try:
+			reject_target_schema(cursor, names, "Legacy market-data reimport")
 			cursor.execute("START TRANSACTION", ())
 			cursor.execute(ARCHIVE_DDL, ())
 			cursor.execute(f"SELECT raw_price_split_adjusted FROM {quote_identifier(names.table(TableRole.SOURCE))} WHERE id=1", ())

@@ -1,5 +1,12 @@
 # Daily maintenance
 
+> Historical legacy workflow: this document describes the former archive,
+> source-file, partial-import, Java migration and separate quality tables. It is
+> retained for regression references only. Current maintenance uses the
+> versioned simplified schema; do not run the legacy stages against a target
+> database. See [the operations guide](operations_guide.md) and [the
+> simplification handoff](database_simplification_results.md).
+
 Daily archives now use `data/market_summary/YYYY/YYYY-MM-DD.ndjson`. Completed
 database dates are reused until an explicit bounded `--refresh-source` request.
 An adjusted database requires migration before running new maintenance writes.

@@ -1,23 +1,32 @@
 # Operating StockGuidance
 
-This guide describes the current Python commands and the shared automatic
-history discovery contract. Stages 1-8 of the schema and z-score implementation
-brief are complete; this guide documents their operator rollout.
+This guide describes the current Python commands and the shared target-schema
+readiness contract. Stages 1-10 of the database simplification are complete
+for the disposable replacement workflow; this guide documents the maintained
+operator boundary.
 Validation and updating use the shared resolver. The broader maintenance prompts
-are in [luna_maintenance_prompts.md](luna_maintenance_prompts.md). Start with
+are in [the historical archive](archive/luna_maintenance_prompts.md). Start with
 the Python workflow. The historical Java prototypes remain unfinished and
 separate from the current Java foundation; measured Java paths are not treated
 as semantically equivalent to Python. See
 [java_performance.md](java_performance.md) for the reproducible offline study.
 
 For adoption of the retained Massive NDJSON archive, use the staged
-[legacy migration prompts](legacy_migration_prompts.md). They begin with a
+[legacy migration prompts](archive/legacy_migration_prompts.md). They begin with a
 bounded Java-thread/Python-process comparison and include numeric-precision
 and case-sensitive ticker prerequisites before population. Schema initialization
 alone does not make legacy rows verified, preserve fractional volume in a BIGINT
 column, or distinguish ticker keys under a case-insensitive unique index.
-The [initial migration results](legacy_migration_results.md) record the measured
-reader comparison, passing source sample and stock-table discrepancies.
+The [initial migration results](archive/legacy_migration_results.md) record
+historical reader comparison and source-sample evidence. They are not a target
+schema migration runbook.
+
+The current database path is the versioned `stockguidance_simplified` schema.
+It owns source identity, session completion, raw state, repair metadata, pending
+scope, derived provenance and z-score completion. Retired archive/source-file,
+partial-import, verification, migration and separate quality tables must not be
+created beside it. The historical schema instructions below remain only as
+fixture/reference material.
 
 
 ## Java and performance status
@@ -64,11 +73,12 @@ For an existing database, use **validate -> update/repair -> validate -> train
 the second checks the resulting data. Save both reports. A failed validation
 does not automatically mean that an update can repair every finding.
 
-For a new empty database, first establish source/history policy and explicitly
-initialize the updater schema, then **update -> validate -> train -> simulate**.
-Read-only validation never creates tables. An incompatible existing schema needs
-inspection and a separate migration decision; `--initialize-schema` does not
-convert it.
+For a new empty target database, first establish source/history policy and call
+the explicit `initialize_simplified_schema` setup API on a disposable or
+operator-approved target, then **update -> validate -> train -> simulate**.
+Read-only validation and ordinary updates never create tables. An incompatible
+or mixed schema is rejected and requires an explicit migration decision;
+`--initialize-schema` is retired on the target path.
 
 For routine operation after a clean baseline, use **update -> validate -> use an
 existing model**, or **update -> validate -> retrain -> use the new model**.
@@ -79,12 +89,13 @@ Before either an initial update or a repair, back up the database and retained
 source files using your normal backup procedure. Keep one writer per selected
 database/data root; run audits against a consistent snapshot or while it is idle.
 
-## Schema and z-score rollout order
+## Historical legacy schema rollout order
 
-Use this order for a new database or for adding the independent z-score
-materializations to an existing compatible database. These examples are an
-operator runbook; do not run them against a real database until the selected
-names and generated DDL have been reviewed.
+The following section preserves the former archive/receipt/quality workflow for
+regression fixtures and historical evidence. It creates retired operational
+tables and cannot be used against the versioned target schema. Current target
+setup uses `initialize_simplified_schema`, and `preview_schema` now previews
+only the simplified target DDL.
 
 1. Select the authoritative registry. Keep the packaged
    `src/stockguidance/database/table_names.json` unchanged to use the standard

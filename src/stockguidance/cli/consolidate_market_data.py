@@ -4,12 +4,13 @@ from datetime import date, datetime, timedelta, timezone
 import json
 import sys
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 from stockguidance.calendar.exchange import ExchangeCalendar
-from stockguidance.config.source import SourceConfig, SourceIdentity
+from stockguidance.config.source import SourceConfig
 from stockguidance.database.configuration import load_database_configuration
 from stockguidance.database.connections import MySQLConnectionFactory
+from stockguidance.database.simplified_schema import reject_target_schema
 from stockguidance.database.table_names import load_table_names, quote_identifier, TableRole
 from stockguidance.database.repositories.archive_catalog import ArchiveCatalog
 from stockguidance.market_data.archive import archive_content, decode_archive
@@ -26,6 +27,18 @@ from stockguidance.market_data.cleanup import ArchiveCleanup
 from stockguidance.market_data.reimport import apply_reimport, plan as reimport_plan
 
 
+def _reject_target_database(source: SourceConfig, connect: MySQLConnectionFactory, operation: str) -> None:
+	connection = connect(source.database_config)
+	try:
+		cursor = connection.cursor()
+		try:
+			reject_target_schema(cursor, load_table_names(), operation)
+		finally:
+			cursor.close()
+	finally:
+		connection.close()
+
+
 def configured_source(arguments: argparse.Namespace) -> SourceConfig:
 	configuration = load_database_configuration(arguments.dbinfo_file)
 	if configuration.data_configuration_file is None:
@@ -38,7 +51,9 @@ def configured_source(arguments: argparse.Namespace) -> SourceConfig:
 
 def export_catalog(arguments: argparse.Namespace) -> dict[str, object]:
 	source = configured_source(arguments)
-	entries = ArchiveCatalog(source, MySQLConnectionFactory()).inventory()
+	connect = MySQLConnectionFactory()
+	_reject_target_database(source, connect, "Legacy archive catalog export")
+	entries = ArchiveCatalog(source, connect).inventory()
 	path = arguments.export_catalog.resolve()
 	if path.is_relative_to(source.data_root):
 		raise ValueError("Catalog exports belong outside the market-data archive")
@@ -48,17 +63,19 @@ def export_catalog(arguments: argparse.Namespace) -> dict[str, object]:
 
 def retire_legacy(arguments: argparse.Namespace) -> dict[str, object]:
 	source = configured_source(arguments)
-	store = CanonicalArchiveStore(source.data_root, ArchiveCatalog(source, MySQLConnectionFactory()))
+	connect = MySQLConnectionFactory()
+	_reject_target_database(source, connect, "Legacy archive retirement")
+	store = CanonicalArchiveStore(source.data_root, ArchiveCatalog(source, connect))
 	backup = source.data_root / "archive-backup" / "retired" / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
 	paths = set()
-	with market_update_lock(source, MySQLConnectionFactory()):
+	with market_update_lock(source, connect):
 		for day, copies in candidates(source.data_root).items():
 			legacy = [item for item in copies if item["location"] != "market_summary"]
 			if not legacy:
 				continue
 			session_date = date.fromisoformat(day)
 			calendar = ExchangeCalendar(source.calendar_id, session_date.replace(month=1, day=1), session_date.replace(month=12, day=31))
-			if store.load(cast(SourceIdentity, source.identity), calendar.session(session_date)) is None:
+			if store.load(source.identity, calendar.session(session_date)) is None:
 				raise ValueError(f"Cannot retire legacy data before verified canonical coverage exists for {day}")
 			for item in legacy:
 				path = Path(item.get("manifest", item["path"])).resolve().parent
@@ -113,10 +130,11 @@ def migrate(arguments: argparse.Namespace) -> dict[str, object]:
 	if not arguments.apply:
 		return {"validated_dates": len(prepared), "applied": False}
 	connect = MySQLConnectionFactory()
+	_reject_target_database(source, connect, "Legacy archive migration")
 	store = CanonicalArchiveStore(source.data_root, ArchiveCatalog(source, connect))
 	def retain_decision(decision: dict[str, Any], download: DownloadedSession) -> None:
 		if decision.get("supersedes"):
-			metadata = store.load_metadata(cast(SourceIdentity, source.identity), download.session)
+			metadata = store.load_metadata(source.identity, download.session)
 			if metadata is None:
 				raise ValueError("Replacement metadata was not published")
 			approved = {item["sha256"]: item for item in [*metadata.get("supersedes", []), *decision["supersedes"]]}
@@ -125,15 +143,15 @@ def migrate(arguments: argparse.Namespace) -> dict[str, object]:
 	with market_update_lock(source, connect):
 		for path, decision in prepared:
 			download = validated_download(path, decision)
-			existing = store.load_metadata(cast(SourceIdentity, source.identity), download.session)
+			existing = store.load_metadata(source.identity, download.session)
 			if existing is not None and not existing.get("pending") and existing["content_id"] == sha256(archive_content(download)).hexdigest():
-				loaded = store.load(cast(SourceIdentity, source.identity), download.session)
+				loaded = store.load(source.identity, download.session)
 				if loaded is not None:
 					retain_decision(decision, download)
 					continue
 			if existing is not None and datetime.fromisoformat(existing["available_at"]) > download.available_at:
 				raise ValueError(f"A later evidenced canonical source already exists for {download.session.session_date}")
-			store.save_download(cast(SourceIdentity, source.identity), download, evidence=decision["evidence"])
+			store.save_download(source.identity, download, evidence=decision["evidence"])
 			retain_decision(decision, download)
 	return {"validated_dates": len(prepared), "applied": True, "retired_files": 0}
 
@@ -141,6 +159,7 @@ def migrate(arguments: argparse.Namespace) -> dict[str, object]:
 def cleanup(arguments: argparse.Namespace) -> dict[str, Any]:
 	source = configured_source(arguments)
 	connect = MySQLConnectionFactory()
+	_reject_target_database(source, connect, "Legacy archive cleanup")
 	store = CanonicalArchiveStore(source.data_root, ArchiveCatalog(source, connect))
 	with market_update_lock(source, connect) if arguments.apply else nullcontext():
 		operation = ArchiveCleanup(source, store, arguments.output, apply=arguments.apply, progress=lambda message: print(message, file=sys.stderr, flush=True))
@@ -168,6 +187,7 @@ def reimport(arguments: argparse.Namespace) -> dict[str, Any]:
 	try:
 		cursor = connection.cursor()
 		try:
+			reject_target_schema(cursor, names, "Legacy market-data reimport")
 			cursor.execute(f"SELECT MAX(session_date) FROM {quote_identifier(names.table(TableRole.IMPORTS))}", ())
 			rows = cursor.fetchall()
 			row = rows[0] if rows else None

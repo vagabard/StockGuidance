@@ -23,7 +23,7 @@ from stockguidance.calendar.protocols import SessionCalendar
 from stockguidance.calendar.sessions import TradingSession
 from stockguidance.config.source import PriceAdjustment, SourceConfig
 from stockguidance.database.operation_recovery import RebuildResult
-from stockguidance.database.repositories.mysql_sessions import Cursor
+from stockguidance.database.protocols import Cursor
 from stockguidance.database.simplified_contract import (
 	DATA_STATE_IDS,
 	DataState,

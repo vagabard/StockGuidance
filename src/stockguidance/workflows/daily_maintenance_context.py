@@ -12,6 +12,7 @@ from stockguidance.calendar.sessions import TradingSession
 from stockguidance.config.paths import resolve_cli_path
 from stockguidance.config.source import DEFAULT_CALENDAR_ID, DataConfiguration, PriceAdjustment, SourceConfig
 from stockguidance.database.configuration import load_database_configuration
+from stockguidance.database.simplified_schema import reject_target_schema
 from stockguidance.database.table_names import TableNames, quote_identifier
 from stockguidance.database.update_schema import assert_source as default_assert_source
 from stockguidance.database.update_schema import assert_transactional_tables as default_assert_transactional_tables
@@ -116,6 +117,7 @@ def open_maintenance(
 	cursor = connection.cursor()
 	locked = False
 	try:
+		reject_target_schema(cursor, names, "Legacy daily maintenance")
 		cursor.execute("SELECT GET_LOCK('stockguidance_daily_maintenance', 0)", ())
 		locked = cursor.fetchall() == [(1,)]
 		if not locked:

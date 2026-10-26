@@ -130,7 +130,7 @@ def test_identifier_quoting_and_custom_ddl_use_validated_names(tmp_path):
 
 
 def test_preview_prints_names_and_ddl_without_database_access(capsys, monkeypatch):
-	monkeypatch.setattr(preview_schema, "update_schema_statements", lambda registry: ("fixture ddl",))
+	monkeypatch.setattr(preview_schema, "simplified_schema_statements", lambda registry, windows: ("fixture ddl",))
 	assert preview_schema.main([]) == 0
 	payload = json.loads(capsys.readouterr().out)
 	assert payload["tables"]["source"] == "stockguidance_source"

@@ -9,7 +9,7 @@ import re
 from typing import Protocol, Sequence
 
 from stockguidance.config.source import SourceConfig
-from stockguidance.database.repositories.mysql_sessions import Cursor
+from stockguidance.database.protocols import Cursor
 from stockguidance.database.simplified_contract import DATA_STATE_IDS, DataState, SCHEMA_VERSION
 from stockguidance.database.table_names import TableNames, TableRole, load_table_names, quote_identifier
 from stockguidance.database.write_connections import WriteConnection, WriteConnectionFactory
@@ -17,8 +17,19 @@ from stockguidance.market_data.identity import data_configuration_key, source_ke
 from stockguidance.market_data.legacy_derived import DERIVED_COLUMNS
 
 
-REGISTRY_VERSION = 1
+REGISTRY_VERSION = 2
 SCHEMA_NAME = "stockguidance_simplified"
+_RETIRED_FIXED_TABLES = (
+	"stockguidance_archive_files",
+	"stockguidance_daily_source_files",
+	"stockguidance_daily_import_in_progress",
+	"stockguidance_row_quality",
+	"stockguidance_quality_revisions",
+	"stockguidance_output_quality",
+	"stockguidance_quality_scans",
+	"stockguidance_migration_receipts",
+	"stockguidance_migration_completion",
+)
 _STATE_DESCRIPTIONS = {
 	DataState.GOOD: "Valid direct source observation.",
 	DataState.BAD: "Source observation failed validation and has no usable effective value.",
@@ -36,8 +47,49 @@ class _ConnectionWithOptionalSqlite(Protocol):
 
 
 def registry_digest(table_names: TableNames) -> str:
-	payload = json.dumps({"tables": table_names.tables(include_verification=True, include_simplified=True), "zscore_templates": table_names.templates()}, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+	payload = json.dumps({"tables": table_names.target_tables(), "zscore_templates": table_names.templates()}, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 	return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def retired_table_names(table_names: TableNames) -> tuple[str, ...]:
+	"""Return operational tables that are not allowed beside the target schema."""
+	names = (*_RETIRED_FIXED_TABLES, table_names.imports, table_names.data_verifications, table_names.data_verification_samples)
+	return tuple(dict.fromkeys(names))
+
+
+def _missing_table(error: Exception) -> bool:
+	message = str(error).casefold()
+	return "no such table" in message or "doesn't exist" in message or "does not exist" in message
+
+
+def _table_names(cursor: Cursor, names: Sequence[str]) -> set[str]:
+	if not names:
+		return set()
+	placeholders = ",".join("%s" for _ in names)
+	try:
+		cursor.execute(f"SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ({placeholders})", tuple(names))
+		rows = cursor.fetchall()
+	except Exception:
+		try:
+			cursor.execute(f"SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME IN ({placeholders})", tuple(names))
+			rows = cursor.fetchall()
+		except Exception:
+			return set()
+	return {str(row[0]) for row in rows if len(row) >= 1}
+
+
+def reject_target_schema(cursor: Cursor, table_names: TableNames, operation: str) -> None:
+	"""Stop a historical writer before it can create or use legacy tables."""
+	marker = quote_identifier(table_names.table(TableRole.SCHEMA))
+	try:
+		cursor.execute(f"SELECT id FROM {marker} LIMIT 1", ())
+		if not cursor.fetchall():
+			return
+	except Exception as error:
+		if _missing_table(error):
+			return
+		raise
+	raise SchemaVersionError(f"{operation} is retired for the versioned simplified schema")
 
 
 def _validate_windows(windows: Iterable[int]) -> tuple[int, ...]:
@@ -133,15 +185,11 @@ def require_simplified_schema(cursor: Cursor, table_names: TableNames) -> None:
 		raise SchemaVersionError("Database schema or table registry version is incompatible")
 	target_roles = (TableRole.SCHEMA, TableRole.SOURCE, TableRole.SESSIONS, TableRole.TICKERS, TableRole.PRICES, TableRole.DELTAS, TableRole.DATA_STATES, TableRole.PENDING_UPDATES, TableRole.REPAIR_METADATA, TableRole.ZSCORE_SERIES, TableRole.ZSCORE_SESSIONS)
 	required = tuple(table_names.table(role) for role in target_roles)
-	placeholders = ",".join("%s" for _ in required)
-	try:
-		cursor.execute(f"SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME IN ({placeholders})", required)
-		rows = cursor.fetchall()
-	except Exception:
-		cursor.execute(f"SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ({placeholders})", required)
-		rows = cursor.fetchall()
-	if {str(row[0]) for row in rows if len(row) >= 1} != set(required):
+	if _table_names(cursor, required) != set(required):
 		raise SchemaVersionError("Simplified schema is incomplete; no automatic migration is performed")
+	retired = _table_names(cursor, retired_table_names(table_names))
+	if retired:
+		raise SchemaVersionError("Simplified schema is mixed with retired operational tables: " + ", ".join(sorted(retired)))
 
 
 def initialize_simplified_schema(source: SourceConfig, connect: WriteConnectionFactory, windows: Iterable[int] = (20, 60), table_names: TableNames | None = None) -> None:
@@ -172,6 +220,9 @@ def initialize_simplified_schema(source: SourceConfig, connect: WriteConnectionF
 					raise SchemaVersionError("Simplified schema is incomplete; no automatic migration is performed")
 				connection.rollback()
 				return
+			retired = _table_names(cursor, retired_table_names(names))
+			if retired:
+				raise SchemaVersionError("Existing database contains retired operational tables; initialize the simplified schema on a clean target: " + ", ".join(sorted(retired)))
 			statements = _mysql_statements(names, selected_windows)
 			for statement in statements:
 				cursor.execute(_sqlite_statement(statement) if sqlite_compatible else statement, ())

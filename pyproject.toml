@@ -22,15 +22,9 @@ inspect_features = "stockguidance.cli.inspect_features:main"
 inspect_reports = "stockguidance.cli.reports:main"
 compare_signals = "stockguidance.cli.compare_signals:main"
 compare_database_downloads = "stockguidance.cli.compare_database_downloads:main"
-archive_study = "stockguidance.cli.archive_study:main"
-verify_archive_sample = "stockguidance.cli.verify_archive_sample:main"
-compare_archive_sample = "stockguidance.cli.compare_archive_sample:main"
 preview_schema = "stockguidance.cli.preview_schema:main"
 update_zscores = "stockguidance.cli.update_zscores:main"
 maintain_daily = "stockguidance.cli.maintain_daily:main"
-consolidate_market_data = "stockguidance.cli.consolidate_market_data:main"
-legacy_migration = "stockguidance.cli.legacy_migration:main"
-legacy_migration_benchmark = "stockguidance.cli.legacy_migration_benchmark:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8.3", "mypy>=1.15"]

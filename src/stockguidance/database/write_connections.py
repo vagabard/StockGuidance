@@ -2,7 +2,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Protocol
 
-from stockguidance.database.repositories.mysql_sessions import Cursor
+from stockguidance.database.protocols import Cursor
 
 
 class WriteCursor(Cursor, Protocol):

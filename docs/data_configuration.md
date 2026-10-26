@@ -1,5 +1,9 @@
 # Data configuration
 
+> The source-verification workflow described below is historical legacy
+> behavior. The versioned target schema stores one immutable source singleton
+> and rejects incompatible imports; it does not create verification tables.
+
 The active data configuration is a separate JSON document referenced by
 `data_configuration_file` in `dbinfo.id`. The example configuration is
 `examples/data_configuration.json`.

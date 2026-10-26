@@ -664,18 +664,18 @@ part of the supported replacement runtime.
 
 | Current consumer | Current behavior | Replacement destination |
 | --- | --- | --- |
-| `database/update_schema.py` | Creates base tables plus archive, source-file, partial-import, verification, and quality tables. | Explicit versioned target schema and registry in Stage 3; no ordinary-reader DDL. |
+| `database/update_schema.py` | Historical fixture initializer for base/archive/source-file/partial-import/verification/quality tables. | Explicit versioned target schema and registry; legacy initializers reject target databases. |
 | `database/repositories/mysql_sessions.py`, `mysql_market_data.py`, `mysql_market_read.py` | Reads/writes sessions, raw rows, deltas, imports, partial markers, and quality. | Session/raw/delta repositories behind the pending coordinator, source states, repair metadata, and readiness guard. |
 | `market_data/archive.py`, `canonical_store.py`, `manifests.py` | Validates canonical NDJSON and stores local manifests. | Direct exact canonical-file lookup plus operation-owned prepared payloads; no permanent archive catalog. |
 | `market_data/quality.py`, `mysql_quality.py`, `repositories/quality.py` | Classifies invalid rows, interpolates, stores JSON quality/current/audit/output tables. | `data_states`, structured repair metadata, raw/delta quality/provenance, and atomic calculation units. |
 | `market_data/update_planning.py`, `coverage_planning.py`, `workflows/update_market_data.py` | Plans downloads and uses a fixed local dependency radius in places. | Pure dependency planner and pending scope; actual session windows and source payload preparation. |
-| `workflows/daily_maintenance.py` and `daily_maintenance_*` | Uses archive catalog, source-file flags, partial-import markers, and Java migration completion. | One Python/Java coordinator, one advisory lock, pending scope, and shared interchange. |
+| `workflows/daily_maintenance.py` and `daily_maintenance_*` | Historical fallback uses archive catalog, source-file flags, partial-import markers, and Java migration completion. | Target dispatch uses one Python coordinator, one advisory lock, pending scope, and shared interchange; legacy context rejects target schemas. |
 | `workflows/update_zscores.py`, `database/repositories/mysql_zscores.py` | Reads quality and partial/source-file markers; persists z-score completion. | New operation scope and state/provenance inputs; retain z-score series/session completion contract. |
 | `training/jobs.py`, feature/dataset builders | Read database-derived values and local opening evidence for training/evaluation. | Read-only repositories plus readiness guard; orchestration expands exact lookback/label dependencies and invalidates stale caches. |
 | `workflows/recommend.py`, `recommendation_runtime.py` | Builds current prediction/recommendation workflow from database closes and opening files. | Same feature path and readiness guard; no low-level repository writes. |
 | `workflows/simulation_runtime.py`, simulation modules | Historical score and close/open reads. | Same read snapshot and revision guard; preserve simulation policies. |
 | `workflows/validate_database.py`, validation repositories | Independent read-only checks, with legacy quality/partial markers. | State/completion-aware diagnostics; never initialize, repair, or clear. |
-| Java `JavaDailyMaintenanceMain`, `JavaWriterCandidate`, `JavaZScore*`, `OperationalDatabase`, `RowQuality` | Migration/benchmark writer logic uses old tables and manifests. | Later shared operation protocol and target registry for the supported Java handoff. |
+| Java `JavaDailyMaintenanceMain`, `JavaWriterCandidate`, `JavaZScore*`, `OperationalDatabase`, `RowQuality` | Historical migration/benchmark writer logic uses old tables and manifests. | Retained only for disposable evidence; target registry exposes no retired operational roles. |
 | Java `validation/*` | Read-only validation/comparison. | Target registry and readiness/state semantics; keep old-table readers fixture-only. |
 | `performance/*`, `legacy_migration/*`, archived docs/tests | Disposable studies, migration evidence, or historical references. | No live destination; retain as historical/benchmark fixtures and label them. |
 
@@ -700,9 +700,41 @@ local evidence and are not part of the daily raw/delta replacement tables.
 | File fingerprint/mtime-triggered refresh | Retired behavior. Normal updates inspect database completion first. |
 | Permanent row dependency graph or parallel job framework | Explicitly retired design; durable pending scope is the only operation plan. |
 
-No retirement in this table is executed by Stage 1, and no production table is
-dropped. Historical commands that mention these names must be classified and
-isolated in the cleanup stage.
+Stages 1–9 defined and exercised the replacement without dropping production
+tables. Stage 10 classifies historical commands and isolates them from target
+initialization/runtime; no production table is dropped.
+
+### Stage 10 cleanup boundary
+
+The target registry has a target-only view containing `source`, `schema`,
+`sessions`, `tickers`, `prices`, `deltas`, `data_states`, `pending_updates`,
+`repair_metadata`, `zscore_series`, and `zscore_sessions`. The historical
+`tables()` serialization remains available only for migration manifests and
+fixture identity. The target registry digest is version `2`, so a database
+created with the former mixed registry is incompatible until explicitly
+reinitialized or migrated by a later operator stage.
+
+The target initializer refuses a database containing any retired operational
+table, and target readers reject a mixed schema before reading data. The old
+initializer, source verification, z-score inspection, and daily-maintenance
+context reject a versioned target marker rather than creating or querying old
+tables. The maintained `preview_schema` command emits only target DDL.
+
+Remaining retired-name references are classified as follows:
+
+* `database/update_schema.py`, the old repositories, `market_data/reimport.py`,
+  and the old daily-maintenance modules are legacy compatibility code used by
+  existing regression fixtures; target dispatch and schema guards isolate them.
+* `legacy_migration`, `performance`, Java `migration`, and Java `validation`
+  references are disposable migration/benchmark inputs or read-only historical
+  comparisons. They are not target runtime dependencies; their old artifacts
+  remain for regression evidence.
+* `market_data/archive.py`, canonical NDJSON readers, and repair quality
+  models remain because source payload validation and exceptional repair
+  metadata are still necessary; they do not recreate retired database tables.
+* References in `docs/archive/` and the historical sections explicitly marked
+  in the maintained storage/maintenance guides are historical documentation,
+  not operator instructions for a target schema.
 
 ## 10. Acceptance invariants for later implementation
 
@@ -752,7 +784,8 @@ Stage 3 implementation boundary: the selected registry adds `schema`,
 legacy `tables()` serialization remains unchanged for artifact/manifest
 fingerprints; replacement consumers request the explicit replacement role
 set. `initialize_simplified_schema` creates a fresh target schema with
-`stockguidance_schema_version` metadata at target schema version `1`, the
+`stockguidance_schema_version` metadata at target schema version `1` and
+registry version `2`, the
 raw-column `raw_stock_data.state_id` layout, UTC `DATETIME(6)` timestamps,
 singleton checks, fixed state rows, session completion fields, repair
 metadata, pending scopes, and retained z-score fingerprints. It refuses
@@ -764,10 +797,12 @@ independent repositories are in
 `stockguidance.database.repositories.simplified`. Java uses the immutable
 `stockguidance.database.SimplifiedContracts` records and strict scope codec;
 both sides use the same operation/unit/state names and Decimal-string JSON
-convention. No temporary adapter or dual-write path was introduced. Existing
-production entrypoints continue to use the old initializer and repositories
-until the coordinated cutover stage. Stage 4 then implements and tests the
-dependency closure described above.
+convention. No temporary adapter or dual-write path was introduced. At the
+Stage 3 boundary, existing production entrypoints still used the legacy
+initializer and repositories; Stage 10 now prevents those legacy writers and
+inspectors from operating against the versioned target schema. The historical
+registry serialization remains available only for legacy manifests and
+fixtures.
 
 ### Stage 6 raw rebuild boundary
 

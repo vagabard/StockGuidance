@@ -232,7 +232,7 @@ class DataStateRepository(_Repository):
 
 
 class SessionCompletionRepository(_Repository):
-	"""Persist raw and delta completion independently on transaction_dates."""
+	"""Persist raw and delta completion independently on target sessions."""
 
 	def load(self, date_id: int) -> SessionCompletion:
 		date_id = _db_id(date_id, "date_id")

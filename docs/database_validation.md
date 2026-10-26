@@ -1,12 +1,14 @@
 # Read-only database validation
 
-For the recommended update/validation/training/simulation order, see the
-[operations guide](operations_guide.md). Shared Stage 1 source-scoped discovery
+For the recommended target-schema update/validation/training/simulation order,
+see the [operations guide](operations_guide.md). Shared Stage 1 source-scoped discovery
 and the Stage 2 read-only validator are implemented in
 `market_data/discovery.py` and `cli/validation_setup.py`. The opt-in Java
 validator is documented in [java_performance.md](java_performance.md); Python
-remains the default. Stage 10 documentation and acceptance checks are recorded
-in [Luna implementation prompts](luna_maintenance_prompts.md).
+remains the default. Stage 10 cleanup evidence is recorded in
+[the simplification handoff](database_simplification_results.md). The older
+archive/receipt/quality validation details below are historical and apply only
+to explicitly disposable legacy fixtures.
 
 Run validation independently of downloading, importing, training, or recommending:
 

@@ -27,6 +27,12 @@ class TableRole(StrEnum):
 
 
 _TABLE_ROLES = tuple(TableRole)
+_TARGET_ROLES = (
+	TableRole.SOURCE, TableRole.SESSIONS, TableRole.TICKERS, TableRole.PRICES,
+	TableRole.DELTAS, TableRole.SCHEMA, TableRole.DATA_STATES,
+	TableRole.PENDING_UPDATES, TableRole.REPAIR_METADATA,
+	TableRole.ZSCORE_SERIES, TableRole.ZSCORE_SESSIONS,
+)
 _TEMPLATE_NAMES = ("price", "price_delta")
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _FORMAT_EXPRESSION = re.compile(r"\{[^{}]*\}")
@@ -110,11 +116,20 @@ class TableNames:
 		return cast(str, getattr(self, field_name))
 
 	def tables(self, *, include_verification: bool = False, include_simplified: bool = False) -> dict[str, str]:
+		"""Return the historical registry shape used by old manifests.
+
+		The legacy shape is intentionally retained for migration fixtures and
+		artifact identity. Target-schema code must use :meth:`target_tables`.
+		"""
 		legacy = (TableRole.SOURCE, TableRole.SESSIONS, TableRole.TICKERS, TableRole.PRICES, TableRole.DELTAS, TableRole.IMPORTS, TableRole.ZSCORE_SERIES, TableRole.ZSCORE_SESSIONS)
 		replacement = (TableRole.SCHEMA, TableRole.DATA_STATES, TableRole.PENDING_UPDATES, TableRole.REPAIR_METADATA)
 		verification = (TableRole.VERIFICATIONS, TableRole.VERIFICATION_SAMPLES) if include_verification else ()
 		roles = legacy + (replacement if include_simplified else ()) + verification
 		return {role.value: self.table(role) for role in roles}
+
+	def target_tables(self) -> dict[str, str]:
+		"""Return only tables created and consumed by the versioned target schema."""
+		return {role.value: self.table(role) for role in _TARGET_ROLES}
 
 	def templates(self) -> dict[str, str]:
 		return {"price": self.price_template, "price_delta": self.price_delta_template}
@@ -122,7 +137,7 @@ class TableNames:
 	def resolve_zscore_tables(self, windows: Iterable[int]) -> dict[int, ResolvedZScoreTables]:
 		values = _validate_windows(windows)
 		resolved: dict[int, ResolvedZScoreTables] = {}
-		used = {name.casefold() for name in self.tables(include_verification=True, include_simplified=True).values()}
+		used = {name.casefold() for name in self.target_tables().values()}
 		for window in values:
 			price = validate_identifier(self.price_template.replace("{window}", str(window)), "price z-score table name")
 			price_delta = validate_identifier(self.price_delta_template.replace("{window}", str(window)), "price_delta z-score table name")

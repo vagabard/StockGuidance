@@ -704,3 +704,76 @@ continues to have the previously documented legacy z-score documentation
 failure outside this stage's changed files; the affected Stage 9 directories
 passed. Stage 10 may now remove retired operational storage only after its
 own scope is explicitly requested; no Stage 10 cleanup was included here.
+
+## Stage 10 handoff — 2026-10-26
+
+Stage 10 is complete. This stage performed source cleanup and isolation only;
+it did not drop tables, migrate data, modify a production database, or
+implement any later stage.
+
+### Implemented boundary
+
+* The target registry now exposes `target_tables()` for active readers and
+  writers. The historical `tables()` serialization remains available for
+  legacy manifests and regression fixtures. The target registry digest uses
+  only target roles, and the target registry version is `2`.
+* Fresh `initialize_simplified_schema` creation emits only the selected target
+  schema. It rejects retired operational tables beside a target schema, and
+  the target reader/writer guard rejects mixed target databases.
+* Legacy schema creation, verification, z-score initialization and assertions,
+  and legacy daily-maintenance entry are explicitly rejected when the target
+  schema marker is present. Legacy archive consolidation and reimport also
+  fail before reading or writing retired tables against the target schema.
+* `preview_schema` is target-only. Obsolete archive, sample-verification,
+  comparison, consolidation, and legacy-migration console scripts were
+  removed from packaging. Historical Python/Java migration and benchmark
+  modules and fixtures remain importable only as disposable evidence and
+  regression support; they are labeled as historical and are not current
+  operator instructions.
+* Maintained README, operations, frontend, storage, maintenance,
+  configuration, and validation documentation now points at the target
+  setup/readiness path or labels the old schema and commands as historical.
+  `docs/archive/README.md` records that archived documents preserve evidence,
+  not supported procedures.
+
+### Retired-name classification
+
+Remaining references were searched across source, Java, tests, tools, and
+documentation. They are classified as follows:
+
+* **Migration/performance input:** `src/stockguidance/legacy_migration`,
+  `src/stockguidance/performance`, Java `migration`/`validation`, and their
+  tests and archived benchmark reports. These are disposable historical
+  inputs, not target runtime dependencies.
+* **Legacy fixtures:** old schema initializers, registry serialization,
+  archive/consolidation models, and regression fixtures retained to verify
+  historical behavior. Target guards prevent them from operating on the
+  versioned schema.
+* **Historical documentation:** `docs/archive/**` and the explicitly marked
+  historical sections of storage, maintenance, and validation documentation.
+* **Necessary repair metadata:** the target `repair_metadata` table retains
+  structured repair evidence; no retired quality table was recreated under a
+  new name.
+* **Unintended live dependency:** none found in the target schema/runtime,
+  target workflows, maintained target CLI path, or active target registry.
+
+### Acceptance checks
+
+* Passed Stage 10 and affected Stage 3/8/9 tests: `49 passed`.
+* Passed affected Python suites:
+  `.venv\Scripts\python.exe -m pytest tests\workflows tests\training
+  tests\recommendations tests\database tests\cli -q` — `387 passed,
+  1 skipped`; 76 existing pandas deprecation warnings.
+* Passed Java Maven tests: `mvn -q -f java\pom.xml test`.
+* Passed mypy over the changed database, target CLI, legacy isolation, and
+  maintenance surfaces: `Success: no issues found in 43 source files`.
+* Passed `git diff --check`.
+* Fresh SQLite-compatible target initialization and mixed-schema rejection
+  tests confirm that no retired operational table is created in the target
+  schema. No disposable MySQL Stage 10 run was performed, and no live
+  provider or production database was accessed.
+
+The separately exercised historical migration/archive fixture suite remains
+outside this acceptance boundary and still contains pre-existing audit/archive
+read failures in untouched legacy fixture code. Those fixtures were retained
+as required and were not repaired as part of Stage 10.

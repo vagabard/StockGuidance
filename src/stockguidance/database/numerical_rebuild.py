@@ -21,7 +21,7 @@ from stockguidance.calendar.sessions import TradingSession
 from stockguidance.config.source import SourceConfig
 from stockguidance.database.operation_recovery import RebuildResult
 from stockguidance.database.raw_rebuild import RawRebuildRunner
-from stockguidance.database.repositories.mysql_sessions import Cursor
+from stockguidance.database.protocols import Cursor
 from stockguidance.database.simplified_contract import (
 	CalculationStatus,
 	DataState,

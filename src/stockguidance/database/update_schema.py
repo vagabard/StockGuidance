@@ -1,3 +1,10 @@
+"""Historical schema DDL retained only for disposable legacy fixtures.
+
+The maintained preview and target runtime use ``simplified_schema``. This
+module remains importable because migration regression fixtures exercise the
+old schema explicitly; its initializers reject a versioned target database.
+"""
+
 from collections.abc import Iterable
 from datetime import datetime, timezone
 
@@ -19,6 +26,7 @@ from stockguidance.database.simplified_schema import (  # noqa: E402
 	SchemaVersionError,
 	assert_simplified_schema,
 	initialize_simplified_schema,
+	reject_target_schema,
 	simplified_schema_statements,
 )
 
@@ -92,6 +100,7 @@ def _zscore_table_names(table_names: TableNames, windows: Iterable[int]) -> tupl
 
 
 def assert_zscore_tables(cursor: Cursor, table_names: TableNames, windows: Iterable[int]) -> None:
+	reject_target_schema(cursor, table_names, "Legacy z-score inspection")
 	selected_windows = _validate_windows(windows)
 	physical_names = _zscore_table_names(table_names, selected_windows)
 	placeholders = ",".join("%s" for _ in physical_names)
@@ -133,6 +142,7 @@ def assert_zscore_tables(cursor: Cursor, table_names: TableNames, windows: Itera
 
 def assert_transactional_tables(cursor: Cursor, table_names: TableNames | None = None) -> None:
 	selected_names = table_names or load_table_names()
+	reject_target_schema(cursor, selected_names, "Legacy table inspection")
 	physical_names = tuple(selected_names.table(role) for role in _UPDATE_TABLE_ROLES)
 	placeholders = ",".join("%s" for _ in physical_names)
 	cursor.execute(f"SELECT TABLE_NAME, ENGINE FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME IN ({placeholders})", physical_names)
@@ -143,6 +153,7 @@ def assert_transactional_tables(cursor: Cursor, table_names: TableNames | None =
 
 def assert_data_configuration(cursor: Cursor, source: SourceConfig, table_names: TableNames | None = None, *, write: bool = False) -> None:
 	selected_names = table_names or load_table_names()
+	reject_target_schema(cursor, selected_names, "Legacy source verification")
 	cursor.execute(
 		f"SELECT configuration_key, source_key, source_family, endpoint, market, universe, interval_code, raw_price_split_adjusted, raw_price_dividend_adjusted, raw_price_vendor_defined_adjustment FROM {quote_identifier(selected_names.table(TableRole.DATA_CONFIGURATION))} WHERE id = 1",
 		(),
@@ -177,6 +188,7 @@ def register_configuration_verification(source: SourceConfig, connect: WriteConn
 	try:
 		cursor = connection.cursor()
 		try:
+			reject_target_schema(cursor, selected_names, "Source verification")
 			cursor.execute(
 				f"SELECT configuration_key, source_family, endpoint FROM {quote_identifier(selected_names.table(TableRole.DATA_CONFIGURATION))} WHERE id = 1",
 				(),
@@ -212,7 +224,7 @@ def register_configuration_verification(source: SourceConfig, connect: WriteConn
 
 
 def initialize_update_schema(source: SourceConfig, connect: WriteConnectionFactory, table_names: TableNames | None = None) -> None:
-	"""Explicit updater setup only; DDL is separate from ingestion transactions."""
+	"""Initialize the historical schema for disposable legacy fixtures only."""
 	selected_names = table_names or load_table_names()
 	connection = connect(source.database_config)
 	try:
@@ -220,6 +232,7 @@ def initialize_update_schema(source: SourceConfig, connect: WriteConnectionFacto
 		statements = update_schema_statements(selected_names, case_sensitive_tickers=not sqlite_compatible)
 		cursor = connection.cursor()
 		try:
+			reject_target_schema(cursor, selected_names, "Legacy updater schema initialization")
 			for statement in statements:
 				cursor.execute(statement, ())
 			if not sqlite_compatible:
@@ -246,7 +259,7 @@ def initialize_update_schema(source: SourceConfig, connect: WriteConnectionFacto
 
 
 def initialize_zscore_schema(source: SourceConfig, connect: WriteConnectionFactory, windows: Iterable[int], table_names: TableNames | None = None) -> None:
-	"""Explicitly create optional z-score metadata and materialization tables."""
+	"""Initialize historical z-score tables for disposable legacy fixtures only."""
 	selected_names = table_names or load_table_names()
 	selected_windows = _validate_windows(windows)
 	statements = zscore_schema_statements(selected_names, selected_windows)
@@ -254,6 +267,7 @@ def initialize_zscore_schema(source: SourceConfig, connect: WriteConnectionFacto
 	try:
 		cursor = connection.cursor()
 		try:
+			reject_target_schema(cursor, selected_names, "Legacy z-score schema initialization")
 			cursor.execute("START TRANSACTION", ())
 			assert_transactional_tables(cursor, selected_names)
 			assert_source(cursor, source, selected_names, write=True)

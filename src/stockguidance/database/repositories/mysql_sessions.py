@@ -1,4 +1,3 @@
-from collections.abc import Sequence
 from datetime import date
 from pathlib import Path
 from typing import Protocol
@@ -6,15 +5,13 @@ from typing import Protocol
 from stockguidance.config.source import PriceAdjustment, SourceConfig
 from stockguidance.market_data.history import EvidenceQuality, InventoryIssue, LocalCoverageInventory, LocalObservation
 from stockguidance.database.dates import normalize_date_id, normalize_session_date
+from stockguidance.database.protocols import Cursor
 from stockguidance.database.repositories.sessions import SessionQuery, StoredSession
 from stockguidance.database.table_names import TableNames, TableRole, load_table_names, quote_identifier
 from stockguidance.validation.coverage import CoverageState
 
 
-class Cursor(Protocol):
-	def execute(self, operation: str, parameters: tuple[object, ...]) -> object: ...
-	def fetchall(self) -> Sequence[Sequence[object]]: ...
-	def close(self) -> None: ...
+__all__ = ("Cursor", "Connection", "ConnectionFactory", "MySQLSessionRepository")
 
 
 class Connection(Protocol):

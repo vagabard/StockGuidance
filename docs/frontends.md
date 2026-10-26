@@ -7,6 +7,15 @@ The retirement history is recorded in [the retirement manifest](stage9_retiremen
 Original sources remain in Git history and the verified local recovery archive.
 User data/models are unchanged.
 
+Current database workflows use the versioned `stockguidance_simplified` schema.
+Its source singleton, session completion, raw states, repair metadata, pending
+scope, derived quality/provenance and z-score completion are the only
+operational database metadata. The archive catalog, source-file fingerprints,
+partial-import markers, verification tables, migration receipts and separate
+quality tables are retired. Historical migration and benchmark modules remain
+as disposable-fixture references under `docs/archive/` and are not installed as
+supported console entry points.
+
 Use PyCharm's configured Python and package manager. All supported model inputs
 are `previous_close` or the distinct Stage 10 `entry_open` specification; every
 target is raw `close(T+1) / close(T) - 1`. Decisions
@@ -57,10 +66,10 @@ Source-bound history metadata persists in `data/history`, keyed by the complete
 non-secret source/request identity, only when an explicit new boundary is
 provided. Later updates can omit the boundary flags. Unknown or stale provider
 capability blocks network refreshes while preserving local archives and exposing
-the unresolved scope. Only an explicit `--initialize-schema` creates missing
-compatible updater tables; it never converts existing tables. Full-coverage
-reconciliation detects leading and interior gaps, interrupted imports and due
-corrections.
+the unresolved scope. A target database must be initialized explicitly before
+updates; ordinary readers and updates never create or migrate tables.
+Completion and recovery are database-owned, and touching a canonical file does
+not trigger replacement.
 
 ## Read-only validation and explicit repair
 
@@ -77,18 +86,17 @@ require review and cannot be executed automatically by the updater.
 
 ## Configure and populate rolling z-scores
 
-The schema/z-score rollout is explicit and ordered: select the mandatory
-registry or an external `table_names_file`, preview the names and DDL, initialize
-compatible updater tables and ingest data, preview the requested windows,
-initialize/populate the optional z-score tables, then validate with the same
-`--zscore-windows` selection. The complete operator sequence, including the
-required evidence arguments, is in [the operations guide](operations_guide.md).
+The target-schema rollout is explicit and ordered: select the registry, preview
+the target names and DDL, initialize the versioned schema through the explicit
+setup API, run the shared update workflow, then validate state and completion.
+Ordinary readers, training and validation never initialize or migrate tables.
+The complete operator sequence is in [the operations guide](operations_guide.md).
 
 For two windows, the supported frontends are:
 
 ```powershell
 & $stockguidancePython -m stockguidance.cli.preview_schema --windows 20,60
-& $stockguidancePython -m stockguidance.cli.update_zscores --data-root data --dbinfo-file dbinfo.id --adjustment adjusted --windows 20,60 --start-date '<first-session>' --end-date '<last-session>' --publication-delay-minutes '<documented delay>' --publication-evidence '<publication provenance>' --initialize-schema
+& $stockguidancePython -m stockguidance.cli.update_zscores --data-root data --dbinfo-file dbinfo.id --adjustment adjusted --windows 20,60 --start-date '<first-session>' --end-date '<last-session>' --publication-delay-minutes '<documented delay>' --publication-evidence '<publication provenance>'
 & $stockguidancePython -m stockguidance.cli.validate_database --data-root data --dbinfo-file dbinfo.id --adjustment adjusted --start-date '<first-session>' --end-date '<last-session>' --publication-delay-minutes '<documented delay>' --publication-evidence '<publication provenance>' --zscore-windows 20,60 --format json > output/validation-zscores.json
 ```
 
@@ -96,12 +104,13 @@ Use `--table-names-file '<absolute-selected-registry>'` with
 `preview_schema` when an external registry is selected. A relative
 `table_names_file` in `dbinfo.id` is resolved relative to that file; omitting it
 uses the packaged resource. Missing or invalid selected files fail without a
-fallback. The updater requires an already compatible eight-table schema and does
-not call providers. Re-run it explicitly after a dependency correction; stale
-materializations remain rejected until rebuilt. Java's packaged registry is a
-build-time copy of the canonical Python JSON, while Python-launched Java gets
-the effective registry explicitly. Use one external registry for separately
-installed distributions whose packaged files may differ.
+fallback. The target updater requires an already compatible versioned schema;
+`--initialize-schema` is retired on this path. Re-run the shared update
+workflow explicitly after a dependency correction; stale materializations
+remain rejected until rebuilt. Java's packaged registry is a build-time copy of
+the canonical Python JSON, while Python-launched Java gets the effective
+registry explicitly. Use one external registry for separately installed
+distributions whose packaged files may differ.
 
 ## Train and rebuild
 
