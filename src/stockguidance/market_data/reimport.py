@@ -84,8 +84,6 @@ def _delete_period(cursor: Any, names: TableNames, first: date, last: date) -> d
 		counts[table] = cursor.rowcount
 	for role in (TableRole.DELTAS, TableRole.PRICES):
 		delete_ids(names.table(role), "date_id", raw_ids)
-	delete_ids("features_and_next_day_label", "date_id", raw_ids)
-	delete_ids("close_ratio_checker", "date_id", raw_ids)
 	for table in ("stockguidance_output_quality", "stockguidance_quality_revisions", "stockguidance_row_quality", names.table(TableRole.ZSCORE_SESSIONS), *[table for window in names.resolve_zscore_tables((20, 60)).values() for table in (window.price, window.price_delta)]):
 		delete_ids(table, "date_id", raw_ids)
 	for table, column in ((names.table(TableRole.IMPORTS), "session_date"), ("stockguidance_daily_import_in_progress", "session_date"), ("stockguidance_migration_completion", "session_date"), ("stockguidance_migration_receipts", "session_date")):
