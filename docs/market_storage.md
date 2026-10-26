@@ -332,10 +332,25 @@ first preview the controlled in-place reset:
 
 The latest imported database session determines the end date. The preview lists
 the canonical files, missing sessions, rows to remove from raw/derived tables,
-and the warmup range for rebuilding rolling calculations. Apply is blocked while
-any requested session lacks a validated `market_summary` archive. Do not use
-the adjusted `daily-maintenance` or `market_data` copies to fill those gaps.
+and the affected write range. Prior sessions are read-only inputs for the first
+daily delta and rolling z-score calculations. Apply is blocked while any
+requested session lacks a validated `market_summary` archive. Do not use the
+adjusted `daily-maintenance` or `market_data` copies to fill those gaps.
 The JSON result is also written to `output/storage-consolidation/reimport-report.json`.
+
+If canonical files are missing while the database still asserts an adjusted
+source, download them without opening or modifying the database:
+
+```powershell
+\.venv\Scripts\python.exe -m stockguidance.cli.update_market_data `
+  --data-root data --dbinfo-file replacement-dbinfo.id `
+  --adjustment unadjusted --start-date 2026-05-08 --end-date 2026-10-23 `
+  --refresh-source --download-only --verbose
+```
+
+This mode writes only `data/market_summary`; it does not write database tables
+or source receipts. Rerun the reimport preview afterward and require
+`missing_count` to be zero before applying.
 
 After obtaining or freshly downloading the missing canonical sessions, confirm
 the database backup and apply:
@@ -347,10 +362,24 @@ the database backup and apply:
 ```
 
 The operation deletes only the selected raw date range and its dependent
-receipts/materializations, preserves older raw rows, imports each canonical
-archive atomically, records adoption receipts in the archive catalog, and then
-switches the source configuration to unadjusted. It also invalidates rolling
-derived rows with the required warmup period. Re-run the normal bounded derived
-data and z-score rebuild/validation workflows afterward; the migration report
-must pass before legacy-file cleanup is applied. Review the same
+receipts/materializations, preserves older raw, delta, feature, and z-score
+rows, imports each canonical archive atomically, records adoption receipts in
+the archive catalog, and then switches the source configuration to unadjusted.
+Re-run the normal bounded daily-delta, derived-data, and z-score
+rebuild/validation workflows afterward; the migration report must pass before
+legacy-file cleanup is applied. Review the same
 `output/storage-consolidation/reimport-report.json` after applying.
+
+After the rebuild and validation workflows complete, the final source audit can
+be run without `--apply`:
+
+```powershell
+\.venv\Scripts\python.exe -m stockguidance.cli.admin_database `
+  --dbinfo-file replacement-dbinfo.id --data-root data `
+  --output output/storage-consolidation
+```
+
+The audit compares database raw rows to every canonical archive in the database
+session range. It refuses to relabel a mixed or mismatching database. If the
+report is clean and a backup is verified, `--apply` with
+`--backup-confirmation` updates the global source label to unadjusted.

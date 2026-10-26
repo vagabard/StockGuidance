@@ -26,7 +26,6 @@ class ReimportFile:
 class ReimportPlan:
 	start: date
 	end: date
-	derived_start: date
 	files: tuple[ReimportFile, ...]
 	missing_dates: tuple[date, ...]
 	canonical_dates: tuple[date, ...]
@@ -46,7 +45,7 @@ def _sha256(path: Path) -> str:
 	return digest.hexdigest()
 
 
-def plan(data_root: Path, start: date, end: date, calendar: ExchangeCalendar, *, warmup_sessions: int = 60) -> ReimportPlan:
+def plan(data_root: Path, start: date, end: date, calendar: ExchangeCalendar) -> ReimportPlan:
 	if start > end:
 		raise ValueError("Reimport start must not follow its end")
 	paths: list[ReimportFile] = []
@@ -65,9 +64,7 @@ def plan(data_root: Path, start: date, end: date, calendar: ExchangeCalendar, *,
 	requested = tuple(session.session_date for session in calendar.sessions(start, end))
 	available = tuple(item.day for item in paths)
 	missing = tuple(session_date for session_date in requested if session_date not in set(available))
-	warmup = calendar.sessions(start, end)
-	derived_start = calendar.shift(warmup[0], -warmup_sessions).session_date
-	return ReimportPlan(start, end, derived_start, tuple(paths), missing, requested)
+	return ReimportPlan(start, end, tuple(paths), missing, requested)
 
 
 def _date_ids(cursor: Any, names: TableNames, first: date, last: date) -> tuple[int, ...]:
@@ -75,8 +72,7 @@ def _date_ids(cursor: Any, names: TableNames, first: date, last: date) -> tuple[
 	return tuple(int(row[0]) for row in cursor.fetchall())
 
 
-def _delete_period(cursor: Any, names: TableNames, first: date, derived_first: date, last: date) -> dict[str, int]:
-	derived_ids = _date_ids(cursor, names, derived_first, last)
+def _delete_period(cursor: Any, names: TableNames, first: date, last: date) -> dict[str, int]:
 	raw_ids = _date_ids(cursor, names, first, last)
 	counts: dict[str, int] = {}
 	def delete_ids(table: str, column: str, ids: tuple[int, ...]) -> None:
@@ -88,10 +84,10 @@ def _delete_period(cursor: Any, names: TableNames, first: date, derived_first: d
 		counts[table] = cursor.rowcount
 	for role in (TableRole.DELTAS, TableRole.PRICES):
 		delete_ids(names.table(role), "date_id", raw_ids)
-	delete_ids("features_and_next_day_label", "date_id", derived_ids)
-	delete_ids("close_ratio_checker", "date_id", derived_ids)
-	for table in ("stockguidance_output_quality", "stockguidance_quality_revisions", "stockguidance_row_quality", "stockguidance_zscore_sessions", "zscores_price_20", "zscores_price_60", "zscores_price_delta_20", "zscores_price_delta_60"):
-		delete_ids(table, "date_id", derived_ids)
+	delete_ids("features_and_next_day_label", "date_id", raw_ids)
+	delete_ids("close_ratio_checker", "date_id", raw_ids)
+	for table in ("stockguidance_output_quality", "stockguidance_quality_revisions", "stockguidance_row_quality", names.table(TableRole.ZSCORE_SESSIONS), *[table for window in names.resolve_zscore_tables((20, 60)).values() for table in (window.price, window.price_delta)]):
+		delete_ids(table, "date_id", raw_ids)
 	for table, column in ((names.table(TableRole.IMPORTS), "session_date"), ("stockguidance_daily_import_in_progress", "session_date"), ("stockguidance_migration_completion", "session_date"), ("stockguidance_migration_receipts", "session_date")):
 		cursor.execute(f"DELETE FROM {quote_identifier(table)} WHERE {quote_identifier(column)} BETWEEN %s AND %s", (first, last))
 		counts[table] = cursor.rowcount
@@ -132,7 +128,7 @@ def apply_reimport(source: SourceConfig, connect: Any, names: TableNames, operat
 			row = cursor.fetchone()
 			if row is None or not bool(row[0]):
 				raise ValueError("Reimport expects the current database source to be the adjusted configuration")
-			counts = _delete_period(cursor, names, plan_value.start, plan_value.derived_start, plan_value.end)
+			counts = _delete_period(cursor, names, plan_value.start, plan_value.end)
 			connection.commit()
 		finally:
 			cursor.close()
@@ -199,6 +195,6 @@ def apply_reimport(source: SourceConfig, connect: Any, names: TableNames, operat
 			connection.commit()
 		finally:
 			cursor.close()
-		return {"operation": operation, "applied": True, "imported_dates": imported, "deleted_rows": counts, "start": plan_value.start.isoformat(), "end": plan_value.end.isoformat(), "derived_start": plan_value.derived_start.isoformat(), "backup_confirmation": migration_backup}
+		return {"operation": operation, "applied": True, "imported_dates": imported, "deleted_rows": counts, "start": plan_value.start.isoformat(), "end": plan_value.end.isoformat(), "backup_confirmation": migration_backup}
 	finally:
 		connection.close()

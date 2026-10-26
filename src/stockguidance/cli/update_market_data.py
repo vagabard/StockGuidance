@@ -1,6 +1,7 @@
 import argparse
 from collections.abc import Callable, Sequence
 from dataclasses import asdict
+from datetime import date
 import json
 import sys
 
@@ -23,12 +24,30 @@ def parser() -> argparse.ArgumentParser:
 	arguments.add_argument("--verbose", action="store_true", help="Write updater phases, timings, and detailed failures to stderr")
 	arguments.add_argument("--scan-quality", action="store_true", help="Resume the initial database quality scan and interpolate bounded bad-data gaps")
 	arguments.add_argument("--force-verify", action="store_true", help="Explicitly verify historical records and source responses")
+	arguments.add_argument("--download-only", action="store_true", help="Download canonical unadjusted archives without reading or writing the database")
 	return arguments
 
 
 def main(argv: Sequence[str] | None = None, *, run: Callable[[argparse.Namespace], UpdateResult] = assemble_and_update) -> int:
 	arguments = parser().parse_args(argv)
 	try:
+		if arguments.download_only:
+			if arguments.start_date is None or arguments.end_date is None:
+				raise ValueError("--download-only requires explicit --start-date and --end-date")
+			from pathlib import Path
+			from stockguidance.cli.paths import resolve_cli_path
+			from stockguidance.config.source import SourceConfig
+			from stockguidance.database.configuration import load_database_configuration
+			from stockguidance.market_data.download_only import download_canonical
+			database_path = resolve_cli_path(arguments.dbinfo_file, "dbinfo.id")
+			configuration = load_database_configuration(database_path)
+			if configuration.data_configuration_file is None:
+				raise ValueError("--download-only requires an explicit data_configuration_file")
+			data_configuration = configuration.load_data_configuration()
+			source = SourceConfig(data_configuration.to_source_identity(), Path(arguments.data_root).resolve(), database_path, "download-only", _configuration=data_configuration)
+			report = download_canonical(source, date.fromisoformat(arguments.start_date), date.fromisoformat(arguments.end_date), refresh=arguments.refresh_source, max_retries=arguments.max_retries)
+			print(json.dumps(report, sort_keys=True))
+			return 0
 		result = run(arguments)
 	except StageExecutionError as error:
 		if getattr(arguments, "verbose", False):

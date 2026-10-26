@@ -17,13 +17,13 @@ def test_reimport_plan_uses_market_summary_and_reports_missing_dates(tmp_path, h
 	result = plan(data_root, date(2024, 7, 30), date(2024, 8, 2), calendar)
 	assert [item.day.isoformat() for item in result.files] == ["2024-07-30"]
 	assert [item.isoformat() for item in result.missing_dates] == ["2024-07-31", "2024-08-01", "2024-08-02"]
-	assert result.derived_start < result.start
+	assert result.start == date(2024, 7, 30)
 
 
 def test_reimport_apply_requires_complete_canonical_coverage(tmp_path, harness):
 	from stockguidance.market_data.reimport import ReimportPlan
 	from datetime import date
-	plan_value = ReimportPlan(date(2024, 7, 30), date(2024, 7, 31), date(2024, 5, 1), (), (date(2024, 7, 31),), (date(2024, 7, 30), date(2024, 7, 31)))
+	plan_value = ReimportPlan(date(2024, 7, 30), date(2024, 7, 31), (), (date(2024, 7, 31),), (date(2024, 7, 30), date(2024, 7, 31)))
 	try:
 		apply_reimport(harness.source, lambda _: None, None, "reimport", "backup completed", plan_value)
 	except ValueError as error:

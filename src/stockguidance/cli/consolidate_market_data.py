@@ -1,6 +1,6 @@
 import argparse
 from contextlib import nullcontext
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 import json
 import sys
 from pathlib import Path
@@ -178,9 +178,9 @@ def reimport(arguments: argparse.Namespace) -> dict[str, Any]:
 	if row is None or row[0] is None:
 		raise ValueError("Cannot determine the database's latest imported session")
 	end = date.fromisoformat(str(row[0]))
-	calendar = ExchangeCalendar(source.calendar_id, arguments.reimport_from, end)
+	calendar = ExchangeCalendar(source.calendar_id, arguments.reimport_from - timedelta(days=366), end)
 	plan_value = reimport_plan(source.data_root, arguments.reimport_from, end, calendar)
-	report: dict[str, Any] = {"operation": "reimport", "applied": False, "start": plan_value.start.isoformat(), "end": plan_value.end.isoformat(), "derived_start": plan_value.derived_start.isoformat(), "canonical_dates": len(plan_value.files), "requested_dates": len(plan_value.canonical_dates), "missing_dates": [item.isoformat() for item in plan_value.missing_dates], "missing_count": len(plan_value.missing_dates), "files": [{"date": item.day.isoformat(), "path": str(item.path), "sha256": item.content_id, "rows": item.row_count} for item in plan_value.files], "warning": "Apply is blocked until every database session in the reimport range has a validated market_summary archive."}
+	report: dict[str, Any] = {"operation": "reimport", "applied": False, "start": plan_value.start.isoformat(), "end": plan_value.end.isoformat(), "canonical_dates": len(plan_value.files), "requested_dates": len(plan_value.canonical_dates), "missing_dates": [item.isoformat() for item in plan_value.missing_dates], "missing_count": len(plan_value.missing_dates), "files": [{"date": item.day.isoformat(), "path": str(item.path), "sha256": item.content_id, "rows": item.row_count} for item in plan_value.files], "warning": "Apply is blocked until every database session in the reimport range has a validated market_summary archive. Prior sessions are read-only dependency inputs."}
 	if arguments.apply:
 		with market_update_lock(source, connect):
 			report = apply_reimport(source, connect, names, "reimport", arguments.backup_confirmation or "", plan_value)
