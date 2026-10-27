@@ -1,0 +1,10 @@
+{
+  "host": "localhost",
+  "database": "stock_data",
+  "user": "Redbeard",
+  "password": "3YZs#z5GOJKdea",
+  "port": 3306,
+  "driver": "auto",
+  "schema": "stock_data",
+  "data_configuration_file": "C:/Projects/StockGuidance/replacement_data_configuration.json"
+}

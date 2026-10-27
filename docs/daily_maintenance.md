@@ -14,6 +14,74 @@ See [Market storage](market_storage.md) for schema setup, conflict rules,
 benchmark commands, recoverable retirement and cutover instructions. Older
 storage and scheduled-refresh descriptions below document the previous layout.
 
+## Stage 12 migration and recovery commands
+
+The current migration uses server-side SQL batches, with 10,000 rows by
+default, console progress, and atomic InnoDB data/checkpoint commits. See the
+[SQL migration runbook](database_simplification_stage12_flow.md) for the exact
+commands using `replacement-dbinfo.id` and `target-dbinfo.id`, including
+`status`, independent `validate`, and interruption recovery. Both databases must
+be on the same MySQL server. Keep source writers stopped between retries.
+The database checkpoint, not the filesystem journal or maximum target key,
+determines the next batch. The empty target from the failed old-engine apply
+can be adopted with its matching initialization journal.
+
+Stage 12 uses a separate target database and keeps the legacy database
+untouched until the explicit retirement phase. Create `target-dbinfo.id` with
+the same non-secret source configuration as the legacy database, but with a
+distinct database name. The migration command defaults to a read-only plan:
+
+```powershell
+$python = '.venv/Scripts/python.exe'
+& $python -m stockguidance.cli.migrate_database plan `
+  --legacy-dbinfo-file dbinfo.id --target-dbinfo-file target-dbinfo.id `
+  --data-root data --windows 20,60 `
+  --backup-manifest output/database-simplification/stage12/backup-manifest.json `
+  --export-dir output/database-simplification/stage12/export
+```
+
+The plan must show no unfinished legacy markers, matching singleton source
+semantics, a distinct empty target, and no blocked reasons. Apply is explicit
+and writes only the target plus the export/journal locations:
+
+```powershell
+& $python -m stockguidance.cli.migrate_database apply `
+  --legacy-dbinfo-file dbinfo.id --target-dbinfo-file target-dbinfo.id `
+  --data-root data --windows 20,60 `
+  --backup-manifest output/database-simplification/stage12/backup-manifest.json `
+  --export-dir output/database-simplification/stage12/export `
+  --batch-size 10000 `
+  --apply-confirmation 'APPLY <target-database-name>'
+```
+
+Review the journal's counts, key-set checks, raw/delta/z-score value checks,
+repair metadata, and deferred completion list. Run `cutover` only after
+independent target validation; it records the exact target schema and registry
+digest but does not overwrite credentials or the active configuration file.
+Point the active configuration at the verified target atomically, then run
+normal target readiness and validation. If a phase stops, rerun the same
+command with the same journal, databases and backup manifest; do not edit the
+journal or scope.
+
+Retirement is separate and destructive DDL. It requires the cutover journal,
+verified export and exact confirmation. Ordinary transactions cannot roll back
+these DDL statements. Before retirement, restore the legacy configuration to
+roll back. After retirement, restore the verified backup into a new legacy
+database and repoint the configuration.
+
+```powershell
+& $python -m stockguidance.cli.migrate_database cutover `
+  --legacy-dbinfo-file dbinfo.id --target-dbinfo-file target-dbinfo.id `
+  --backup-manifest output/database-simplification/stage12/backup-manifest.json `
+  --export-dir output/database-simplification/stage12/export `
+  --cutover-confirmation 'CUTOVER <target-database-name>'
+& $python -m stockguidance.cli.migrate_database retire `
+  --legacy-dbinfo-file dbinfo.id --target-dbinfo-file target-dbinfo.id `
+  --backup-manifest output/database-simplification/stage12/backup-manifest.json `
+  --export-dir output/database-simplification/stage12/export `
+  --retire-confirmation 'RETIRE <legacy-database-name>'
+```
+
 Run from the repository root after installing the Python package with database
 dependencies and building Java 26:
 

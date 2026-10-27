@@ -899,3 +899,234 @@ Additional checks after cleanup:
 
 This cleanup prepares the repository for Stage 12; Stage 12 itself was not
 implemented, and no production database was modified.
+
+## Stage 12 handoff — 2026-10-26
+
+Status: complete for the explicit migration tool, runbook, and disposable
+rehearsal. No production database, production configuration, live provider, or
+credential-bearing output was used. The configured `stockforecasting` database
+was not selected, and no commit was created.
+
+### Changed files and interfaces
+
+* `src/stockguidance/database/simplified_migration.py` adds the operator
+  boundary. It plans read-only by default across distinct legacy/target
+  databases, rejects unfinished legacy import/download markers and source
+  configuration mismatches, validates the target registry/schema version,
+  exports retired metadata as checksummed JSONL, verifies an operator-supplied
+  backup plus independently restored copy, and writes a resumable phase
+  journal.
+* The migration copies singleton source configuration, stable session/ticker
+  IDs, Decimal raw values, source states, repair originals/effective values/
+  endpoints/timing, all 16 delta values plus derived quality/provenance,
+  z-score definitions/session completion/rows, and model/artifact files remain
+  untouched. Raw and delta completion is promoted only after valid legacy
+  receipts and independent raw/formula checks; unknown completion stays
+  incomplete for target readiness repair.
+* `src/stockguidance/cli/migrate_database.py` and the `migrate_database`
+  console entry point expose `plan`, `apply`, `cutover`, and `retire`. Apply
+  requires `APPLY <target-database>`, cutover requires
+  `CUTOVER <target-database>`, and retirement requires
+  `RETIRE <legacy-database>`. Cutover records an exact schema/registry marker
+  but deliberately does not overwrite the active dbinfo file or credentials.
+  Retirement is separate destructive DDL and records backup-restoration
+  rollback instructions; ordinary transactions are not presented as DDL
+  rollback.
+* `tools/database_simplification_stage12.py` is a reproducible rehearsal on
+  two explicitly disposable SQLite databases seeded through the historical
+  schema initializer. It includes complete receipts, raw/delta/z-score data,
+  one interpolated repair, quality metadata, and retired migration metadata,
+  then runs every migration phase and verifies target content, state,
+  completion, export evidence, and legacy retirement.
+* `tests/database/test_database_simplification_stage12.py` covers backup and
+  restored-copy checksum verification and exact apply confirmation.
+* `docs/daily_maintenance.md`, `docs/market_storage.md`,
+  `docs/database_validation.md`, and `docs/data_configuration.md` now contain
+  the final target-database workflow, exact phase commands, pause/restart
+  behavior, backup/export requirements, validation gates, and restoration
+  guidance.
+
+### Decisions and boundaries
+
+The migration is additive across separate databases: the target is initialized
+and populated while the legacy database remains available for rollback. The
+tool refuses identical database names, never downloads source data, and never
+uses file size or modification time as replacement evidence. The legacy source
+singleton must match the target semantic configuration exactly, including raw
+adjustment flags. Retired metadata is exported before apply and retirement
+requires the same journal, verified backup manifest, and verified export.
+
+The cutover marker identifies the target schema name, schema version, registry
+digest, target database and migration ID. The operator must atomically point
+the active dbinfo at that target; the tool intentionally does not rewrite an
+active configuration file. Retirement drops only the explicitly enumerated
+legacy core/metadata/z-score tables in the legacy database after cutover.
+
+### Acceptance checks
+
+* **Passed:** `.venv\Scripts\python.exe tools\database_simplification_stage12.py`
+  — plan/apply/cutover/retire completed with status `passed`; the report states
+  `database_write_scope: two disposable SQLite fixtures only`, preserved six
+  raw rows, six delta rows, twelve z-score rows, one repair row, all three raw
+  and delta completion records, and removed the disposable legacy tables.
+* **Passed:** `.venv\Scripts\python.exe -m pytest
+  tests\database\test_database_simplification_stage12.py -q` — 2 passed.
+* **Passed:** `.venv\Scripts\python.exe -m pytest tests\database -q` — 118
+  passed, with 4 existing pandas deprecation warnings.
+* **Passed:** `.venv\Scripts\python.exe -m pytest tests\cli -q` — 54 passed,
+  with 24 existing pandas deprecation warnings.
+* **Passed:** `.venv\Scripts\python.exe -m pytest tests -q --tb=short` — 919
+  passed, 2 skipped, with 149 existing warnings. The documentation guard now
+  passes with the migration module's historical table names kept behind the
+  explicit operator boundary.
+* **Passed:** `.venv\Scripts\python.exe -m mypy
+  src\stockguidance\database\simplified_migration.py
+  src\stockguidance\cli\migrate_database.py
+  tools\database_simplification_stage12.py
+  tests\database\test_database_simplification_stage12.py` — no issues in 4
+  files.
+* **Passed:** Python compilation for the new migration module, CLI, rehearsal
+  runner, and test.
+* **Passed:** `mvn -q -f java\pom.xml test` — Java regression suite passed;
+  existing JVM warnings and the expected credential-safe connection-failure
+  trace remain.
+* **Passed:** `git diff --check` plus explicit trailing-whitespace inspection
+  of all changed tracked and untracked files.
+
+### Limitations and production-only steps
+
+The rehearsal uses disposable SQLite adapters and therefore does not establish
+MySQL DDL, backup-tool, transaction, or production-capacity behavior. The
+operator must create a distinct target MySQL database, complete and restore a
+real backup into a separately disposable database, populate the backup
+manifest, run the read-only plan, and review the target validation and
+representative training/prediction results before cutover. No production MySQL
+rehearsal was attempted because the selected production database must remain
+unchanged in this stage. No subsequent implementation stage is required;
+separately authorized operator execution is the remaining action.
+
+### Stage 12 operator follow-up — flow review after MySQL failure (2026-10-27)
+
+Added `docs/database_simplification_stage12_flow.md` in response to the
+operator's failed apply traceback. It documents the current phase sequence,
+SQL templates and concrete table expansions, actual generated target DDL,
+metadata/completion transformation pseudocode, transaction/retry boundaries,
+and a separately labeled proposal for bounded server-side SQL copies.
+
+Code inspection establishes that the failed raw insert receives the entire
+raw table through one `executemany` call within one data-copy transaction.
+The rollback error is secondary to the lost connection. The specific MySQL
+server-side cause remains unconfirmed. Full-table `fetchall`, whole-table
+inserts, repeated Python scans, and full-memory validation are production-scale
+limitations; the earlier SQLite rehearsal is not sufficient evidence for this
+dataset. Production migration acceptance remains incomplete after this failure.
+
+The review also records that missing-state conversion, complete raw coverage
+proof, independent repair/state/quality verification, and automatic scheduling
+of deferred repairs are not established by the current apply validator. Its
+coarse journal is not a range-level copy checkpoint. These limitations must be
+addressed or independently verified before production cutover; the unchanged
+apply should not simply be retried as a scale fix.
+
+Verification for this documentation-only follow-up: inspected the migration,
+schema initializer, table registry, quality decoder, numerical kernel, CLI,
+and handoff; generated the DDL appendix with the configured project interpreter;
+checked appendix equality against the initializer, balanced code fences,
+trailing whitespace, and `git diff --check`. No database connection, database
+write, migration retry, code change, commit, or later stage was performed.
+
+## Stage 12 SQL batch engine replacement — 2026-10-27
+
+Status: implemented and rehearsed on disposable MySQL schemas. This replaces
+the earlier whole-table Python transfer after the operator's connection failure.
+Production apply, cutover, and retirement were not executed. No commit was
+created; existing user-owned dbinfo files were preserved.
+
+### Interfaces and decisions
+
+- Existing `stockguidance.cli.migrate_database` delegates apply, validation,
+  status, and cutover to `database/migration_sql.py`. Added `--batch-size`
+  (default 10000), read-only `status`, and checkpointed `validate`. Default
+  operation remains read-only `plan`. Progress/heartbeats go to stderr; final
+  JSON goes to stdout. Errors return 2 with resume instructions.
+- Numerical data moves through explicit-column, fully qualified
+  `INSERT ... SELECT` statements. Composite key ranges use actual terminal
+  keys and preserve gaps. No whole numerical table is downloaded into Python.
+  Backup hashing and metadata export stream with bounded memory. Plan counts
+  are labeled MySQL metadata estimates rather than expensive full-table counts.
+- Source/target server UUIDs, registry, source semantics, InnoDB engines,
+  primary-key order, and column availability are checked. The executing
+  connection owns the existing maintenance writer lock and verifies ownership
+  before commits. Source writers must remain stopped between attempts too.
+- Engine-v2 database checkpoints commit atomically with each batch. Failed
+  uncommitted batches roll back; uncertain commits are resolved on restart.
+  The initialized-but-empty old-engine target can be adopted, while populated
+  uncheckpointed targets are rejected. Owned initial DDL can resume through a
+  matching initialization journal; ordinary transactions cannot undo DDL.
+- Ticker/date IDs remain unchanged and AUTO_INCREMENT stays active. A
+  date-leading target delta index avoids full-table completion scans. Small
+  exceptional metadata is decoded with existing classes; raw states/time are
+  attached through an indexed repair join. Original/effective values, endpoints,
+  timing, quality, fingerprints, and numerical content are preserved. Absent
+  observations are not densified or silently classified as missing.
+- Validation compares bounded ranges in both directions, including NULLs,
+  states, repair metadata, structural JSON, quality, and numerical values. It
+  independently checks the delta formulas in SQL, verifies completion fields
+  and z-score status distributions, and reports deferred sessions. Calendar/
+  receipt staging is removed after validation; run/step checkpoints remain.
+  Cutover revalidates under the lock and durably records confirmation; later
+  apply is rejected.
+- Updated the SQL flow/runbook and the Stage 12 sections in all four required
+  operator documents. The former SQLite rehearsal entrypoint now delegates to
+  the MySQL rehearsal tool. No saved model/artifact file was changed.
+
+### Checks and evidence
+
+- `.venv/Scripts/python.exe -m pytest tests -q --tb=short` — **935 passed,
+  2 skipped**, 149 existing warnings, 156.28 seconds.
+- `.venv/Scripts/python.exe -m pytest tests/database tests/cli -q` — **172
+  passed**, 28 existing warnings (before adding the sixteen focused SQL tests).
+- Final focused checks: `.venv/Scripts/python.exe -m pytest
+  tests/database/test_migration_sql.py
+  tests/database/test_database_simplification_stage12.py -q` — **18 passed**.
+  Covers sparse composite key traversal in both orders, NULL/tolerance behavior,
+  structural metadata, streaming backup checksums, and CLI arguments.
+- Mypy checked the owner, SQL engine, CLI, focused SQL tests, and both rehearsal
+  entrypoints — **no issues in 6 source files**. Final whitespace/documentation
+  checks passed. Java was unchanged; no new Java build was required.
+- Final MySQL rehearsal command: `.venv/Scripts/python.exe
+  tools/database_simplification_stage12.py --dbinfo-file replacement-dbinfo.id
+  --prefix stockguidance_disposable_s12sql_20261027k --output-dir
+  output/database-simplification/stage12-sql-rehearsal-k` — **passed** on MySQL
+  9.5.0. Only explicitly prefixed synthetic databases were written, and they
+  are retained for inspection. Report:
+  `output/database-simplification/stage12-sql-rehearsal-k/report.json`.
+- The rehearsal preserves **25,219 sparse raw rows**, 25,005 ticker IDs,
+  interpolation metadata, and independently kernel-generated delta fixtures
+  including **105 tied ranking outcomes**. It verifies actual future auto-ID
+  allocation for dates/tickers, repeated apply, status, corruption detection
+  and recovery, validation resume, cutover, and apply rejection after cutover.
+- MySQL interruption scenarios passed: concurrent invocation rejected; failure
+  after initial DDL; abrupt process exit after raw INSERT; writer-lock loss;
+  connection loss after insert, before commit, and after commit; invalid raw
+  rejection before batch commit; and interruption after a validation commit.
+  Uncommitted raw batches left zero rows; the
+  committed batch retained exactly 10,000 rows with its checkpoint.
+- Recorded EXPLAIN selects a covering PRIMARY index range scan for the composite
+  cutoff. Resumed copy/validation took **1.526 seconds**, with **430,324 bytes**
+  peak Python tracemalloc allocation in the small warm synthetic fixture. These
+  are not production capacity estimates or MySQL/native-driver memory measures.
+- Read-only checks against the actual configurations: `status` returned engine
+  2, `phase: not_started`, and no steps. All four legacy series definitions and
+  all 230 exceptional quality records decoded with matching fingerprints.
+  No production numerical table was fetched for these checks.
+
+### Remaining operator gates
+
+The implementation is runnable. Real restore usability, target disk capacity,
+source quiescence, production runtime, complete target validation, and
+representative existing training/prediction acceptance remain operator gates.
+The rehearsal manifest is explicitly synthetic, not evidence of a production
+restore. Source values must remain unchanged across pauses and target values
+through migration cutover acceptance. Deferred repairs run through maintained
+target readiness after cutover; unknown completion is never silently promoted.

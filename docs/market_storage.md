@@ -17,6 +17,62 @@ unadjusted: earlier adjusted downloads can use different historical split bases.
 An adjusted database must be migrated before enabling canonical update commands.
 Read-only legacy validation remains available during this transition.
 
+## Stage 12 database migration
+
+The [SQL migration runbook](database_simplification_stage12_flow.md) is the
+current operator procedure. Copying and numerical comparisons stay inside
+MySQL in primary-key batches (default 10,000). Small exceptional metadata is
+decoded in Python. Progress is printed after each committed batch. Target
+InnoDB checkpoints commit atomically with the copied rows and permit the same
+command to resume after errors, including an uncertain commit. Source/target
+must be on the same server; no legacy table is changed by apply or validate.
+
+Use `stockguidance.cli.migrate_database` for the database migration. It is
+read-only by default and requires separate legacy and target database
+configurations. The target source singleton must exactly match the legacy
+semantic configuration; a source-family, market, universe, interval or raw
+adjustment mismatch stops the plan. The target database must be distinct and
+empty before apply. The migration does not download market data or use file
+timestamps as replacement evidence.
+
+Before apply, complete a database backup and restore it into a disposable
+database. Store both locations and their checksums in the required backup
+manifest. The migration exports retired metadata to JSONL plus a checksummed
+manifest. The export is evidence for retirement, not a replacement for the
+database backup.
+
+```powershell
+$python = '.venv/Scripts/python.exe'
+& $python -m stockguidance.cli.migrate_database plan `
+  --legacy-dbinfo-file dbinfo.id --target-dbinfo-file target-dbinfo.id `
+  --backup-manifest output/database-simplification/stage12/backup-manifest.json `
+  --export-dir output/database-simplification/stage12/export
+& $python -m stockguidance.cli.migrate_database apply `
+  --legacy-dbinfo-file dbinfo.id --target-dbinfo-file target-dbinfo.id `
+  --backup-manifest output/database-simplification/stage12/backup-manifest.json `
+  --export-dir output/database-simplification/stage12/export `
+  --apply-confirmation 'APPLY <target-database-name>'
+```
+
+Apply preserves integer ticker/date keys, Decimal raw values, delta values,
+z-score definitions/rows/fingerprints, interpolation originals/endpoints and
+timing, and derived quality/provenance. It marks raw or delta completion only
+when the legacy receipt is valid and the values pass an independent check;
+otherwise the target remains incomplete and the target readiness workflow must
+repair it. Database checkpoints make retries resume against the same target
+and scope; the JSON journal is an operator summary. Ticker/date identifiers are
+preserved and AUTO_INCREMENT remains enabled for future inserts. The raw state
+is stored in `raw_stock_data.state_id`. Temporary calendar/receipt staging is
+removed after successful validation; operator run/step checkpoints remain.
+
+Run `cutover` only after reviewing the journal and independent target
+validation. The command records the exact target schema and registry digest;
+the operator then switches the active dbinfo file atomically. Run `retire` as a
+separate, confirmed phase only after cutover. It drops the selected legacy
+tables from the legacy database, and its journal records that ordinary
+transactions cannot undo the DDL. Restore the verified backup into a new
+legacy database for post-retirement rollback.
+
 ## Normal operations
 
 Both `update_market_data` and `maintain_daily` check committed database receipts

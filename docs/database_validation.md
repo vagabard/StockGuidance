@@ -18,6 +18,54 @@ Run validation independently of downloading, importing, training, or recommendin
 
 The `validate_database` console entry point is declared in `pyproject.toml` and becomes available after refreshing the editable installation. Use PyCharm's configured interpreter. Python has been repaired; historical base-installation workarounds in `REFACTORING_PROMPTS.md` are no longer current setup guidance. See the operations guide for the verified interpreter and checkout invocation.
 
+## Stage 12 migration gates
+
+Migration `plan` and `status` are read-only. The separate migration `validate`
+command compares bounded source/target SQL ranges and writes only operator
+checkpoints/support metadata in the target; it does not repair market values.
+Interrupted validation resumes from its database checkpoint. See the
+[SQL migration runbook](database_simplification_stage12_flow.md) for exact
+commands and comparisons. Ordinary `validate_database` remains read-only.
+Plan the migration first and retain its JSON output and journal under one
+operator-owned directory:
+
+```powershell
+$python = '.venv/Scripts/python.exe'
+& $python -m stockguidance.cli.migrate_database plan `
+  --legacy-dbinfo-file dbinfo.id --target-dbinfo-file target-dbinfo.id `
+  --backup-manifest output/database-simplification/stage12/backup-manifest.json `
+  --export-dir output/database-simplification/stage12/export
+```
+
+The plan must show no unfinished legacy import/download markers, exactly one
+compatible source singleton and a distinct
+target database. Apply performs the additive copy and independently compares
+raw, delta, z-score, state, repair, completion, and representative key/value
+sets. Review its journal before the explicit cutover phase. Unknown legacy
+completion is reported as deferred, not as a successful observation.
+
+Plan inventory counts are labeled estimates from MySQL metadata. Exact
+source/target key and value checks are performed in bounded validation ranges,
+including extra destination keys, state/repair/quality fields, independent
+delta formula checks, completion fields, and z-score status distributions.
+No full raw/delta/z-score table is materialized in Python. Representative
+training/prediction acceptance remains a separate operator check before cutover.
+
+After cutover, validate the target with the normal read-only command and the
+same z-score windows used by migration:
+
+```powershell
+& $python -m stockguidance.cli.validate_database `
+  --dbinfo-file target-dbinfo.id --zscore-windows 20,60 --format json `
+  > output/database-simplification/stage12/target-validation.json
+```
+
+This check does not initialize or repair the target. Coverage findings and
+unfinished-operation findings must be resolved through target maintenance;
+they are not reasons to re-run destructive retirement. Keep the backup,
+metadata-export manifest, target validation, migration journal, and cutover
+marker together for audit and recovery.
+
 The command resolves default `data` and `dbinfo.id` paths from the checkout when
 launched from the IDE or another working directory. Explicit paths remain
 unchanged. With no history override, the earliest observed database or local

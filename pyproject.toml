@@ -25,6 +25,7 @@ compare_database_downloads = "stockguidance.cli.compare_database_downloads:main"
 preview_schema = "stockguidance.cli.preview_schema:main"
 update_zscores = "stockguidance.cli.update_zscores:main"
 maintain_daily = "stockguidance.cli.maintain_daily:main"
+migrate_database = "stockguidance.cli.migrate_database:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8.3", "mypy>=1.15"]
