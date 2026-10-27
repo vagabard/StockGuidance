@@ -143,7 +143,7 @@ def _make_bar(session_index: int, ticker_index: int) -> DailyBar:
 	high = _decimal(max(opening, closing) + Decimal("0.2500"))
 	low = _decimal(min(opening, closing) - Decimal("0.2500"))
 	vwap = _decimal((opening + closing) / Decimal("2"))
-	return DailyBar(f"T{ticker_index + 1:06d}", opening, high, low, closing, 100_000 + session_index * 10 + ticker_index, vwap, 500 + ticker_index)
+	return DailyBar(f"T{ticker_index + 1:06d}", opening, high, low, closing, Decimal(100_000 + session_index * 10 + ticker_index), vwap, 500 + ticker_index)
 
 
 def _make_response_payloads(bars: tuple[tuple[DailyBar, ...], ...]) -> tuple[bytes, ...]:

@@ -1,5 +1,9 @@
 # Stage 9c: independent steps and compact comparison
 
+> Historical benchmark record. The Stage 9c Python/SQL/Java trial runners were
+> retired after the database simplification handoff; the preserved results
+> below are evidence only and the commands in this document are not supported.
+
 Stage 9c compares Python, Java and SQL calculation **plus durable persistence**.
 It is the last measurement stage before Stage 10 makes a backend choice.
 The compact profile is a revised, explicitly narrower comparison on the original

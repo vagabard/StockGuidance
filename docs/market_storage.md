@@ -146,6 +146,11 @@ unknown. Classification affects consumers, not retained raw provider records.
 
 ## Benchmarks
 
+The archive-reader and legacy migration benchmark commands in this section
+are historical and are no longer shipped. Retained results remain useful as
+evidence; current performance work uses the offline Stage 6 benchmark and the
+database-simplification stage runners.
+
 The exact operational reader comparison reuses the existing archive study:
 
 ```powershell

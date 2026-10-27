@@ -61,6 +61,10 @@ From the checkout root, provision and validate a fresh disposable MySQL target
 with Python/Java shared precision, case, transaction and recovery fixtures plus
 the fixed 25 real raw/derived sessions:
 
+The Python orchestration command below is historical and has been retired. The
+direct Java entry point above and the Maven tests remain the maintained Java
+checks.
+
 ```powershell
 $env:PYTHONPATH = (Join-Path (Get-Location) 'src')
 # Set $pythonExe using PyCharm get_python_environment.

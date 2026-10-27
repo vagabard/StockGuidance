@@ -851,18 +851,15 @@ Additional checks:
 ### Required full-suite gates and limitations
 
 The full Python command
-`.venv\Scripts\python.exe -m pytest tests -q --tb=short` produced **1,057
-passed, 3 skipped, and 9 failed**. The nine failures are outside this Stage 11
-change: three legacy archive-cleanup tests stop at the pre-existing Stage 10
-target-schema rejection/connection seam, and six retained historical
-archive-audit/reading fixtures have the legacy `UnboundLocalError` failures
-already recorded in the Stage 10 handoff. No Stage 11-targeted test failed.
+`.venv\Scripts\python.exe -m pytest tests -q --tb=short` now passes **917
+tests with 2 skips**. The retired archive-cleanup test and historical legacy
+migration test tree were removed; the target-schema safety guard remains in
+the maintained cleanup implementation.
 
-The configured full `.venv\Scripts\python.exe -m mypy` command remains
-**incomplete** with 237 existing errors in 21 historical performance/CLI
-files, including unavailable optional `streamlit`/`psutil` stubs. The focused
-Stage 11 surfaces above pass; dependencies were not installed and the full
-mypy errors were not reclassified as Stage 11 regressions.
+The configured full `.venv\Scripts\python.exe -m mypy --show-error-codes`
+command now passes with no issues in 284 source files. The optional Streamlit
+viewer is handled by a narrow missing-import override; no broad error
+suppression was added.
 
 The Stage 11 MySQL evidence is disposable and synthetic, so it does not prove
 production capacity or authorize migration. SQLite tests do not replace the
@@ -873,3 +870,32 @@ workflow was changed to broaden those behaviors in this stage.
 
 Stage 12 remains the separate operator migration preparation/rehearsal stage.
 No production migration is ready to apply based on this handoff alone.
+
+## Pre-Stage 12 typing and benchmark cleanup
+
+The retired legacy-migration benchmark stack was removed before Stage 12 work:
+
+* obsolete archive-study and legacy-migration CLI launchers;
+* retired Stage 9–11 candidate/trial modules and their helper scripts;
+* obsolete SQL/Java candidate trial implementations;
+* their dedicated legacy-migration and candidate benchmark tests.
+
+Historical documents and recorded Java migration evidence remain, but the
+affected guides now identify their commands as historical and unsupported.
+The maintained offline Stage 6 benchmark was retained and type-cleaned for
+`DailyBar` decimal volume inputs. Its fixed fixture run completed with two warm
+repeats and no database contact.
+
+Additional checks after cleanup:
+
+* **Passed:** `.venv\Scripts\python.exe -m mypy --show-error-codes` — no issues
+  in 284 source files.
+* **Passed:** `.venv\Scripts\python.exe -m pytest tests -q --tb=short` — 917
+  passed, 2 skipped.
+* **Passed:** `.venv\Scripts\python.exe tools\stage6_benchmark.py --fixture
+  benchmarks\fixtures\stage6.json --output output\stage6-mypy-cleanup-check.json
+  --warm-repeats 2` — offline fixture completed; no disposable or production
+  database was contacted.
+
+This cleanup prepares the repository for Stage 12; Stage 12 itself was not
+implemented, and no production database was modified.

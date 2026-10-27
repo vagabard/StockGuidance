@@ -51,3 +51,7 @@ pythonpath = ["src"]
 python_version = "3.13"
 files = ["src/stockguidance"]
 strict = true
+
+[[tool.mypy.overrides]]
+module = ["streamlit"]
+ignore_missing_imports = true

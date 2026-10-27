@@ -1,5 +1,9 @@
 # Resuming Stage 14 with a shared Java copy
 
+> Historical migration-runbook reference. The Stage 14 Python runners and
+> helper scripts were retired after the simplification handoff. Keep this file
+> for recorded evidence only; do not use its commands for a new migration.
+
 Run `tools/resume_stage14.py` directly in the project's configured Python
 interpreter. It takes no parameters and resolves the checkout from its own
 location, including when launched from the IDE. The Java classes must have been

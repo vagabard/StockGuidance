@@ -1,5 +1,10 @@
 # Java Benchmarking
 
+> Historical migration-trial reference. The Python archive/migration CLI
+> commands shown below are retired and are no longer shipped. The maintained
+> checks are the Java Maven suite, the offline Stage 6 benchmark, and the
+> current database-simplification acceptance runners.
+
 This guide covers the supported Java checks and benchmarks for the current
 archive migration implementation. `ArchiveCandidateReader` uses Apache Fory
 JSON for archive decoding; the archive path has no alternate parser.

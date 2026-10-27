@@ -1,5 +1,9 @@
 # Stage 15 independent Python validation
 
+> Historical migration-runbook reference. The Stage 15 Python launcher was
+> retired after the simplification handoff. The recorded validation remains
+> evidence only; its commands are not supported for a new migration.
+
 The validator uses its own Python semantic reference. The selected Java
 production writer remains the Stage 14 writer; Stage 15 opens one read-only
 repeatable-read database transaction and validates the retained snapshot.

@@ -19,7 +19,7 @@ def parse_stage(value: str) -> str:
 
 
 def maintenance_range(as_of: date) -> tuple[date, date]:
-	from stockguidance.workflows.daily_maintenance import maintenance_range as workflow_range
+	from stockguidance.workflows.daily_maintenance_context import maintenance_range as workflow_range
 	return workflow_range(as_of)
 
 
