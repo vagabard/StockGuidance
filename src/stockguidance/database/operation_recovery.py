@@ -494,7 +494,10 @@ class PendingOperationCoordinator:
 		payload_validator: Callable[[PendingScope], None] = validate_prepared_payloads,
 		clock: Callable[[], datetime] | None = None,
 		lock_factory: Callable[[], ContextManager[object]] | None = None,
+		lock_timeout_seconds: int = 60,
 	) -> None:
+		if type(lock_timeout_seconds) is not int or lock_timeout_seconds < 0:
+			raise ValueError("lock_timeout_seconds must be a non-negative integer")
 		self.source = source
 		self.connect = connect
 		self.planner = planner
@@ -503,7 +506,7 @@ class PendingOperationCoordinator:
 		self.rebuild_runner = rebuild_runner
 		self.payload_validator = payload_validator
 		self.clock = clock or (lambda: datetime.now(timezone.utc))
-		self.lock_factory = lock_factory or (lambda: MaintenanceWriterLock(source, connect))
+		self.lock_factory = lock_factory or (lambda: MaintenanceWriterLock(source, connect, timeout_seconds=lock_timeout_seconds))
 
 	def accept(self, request: UpdateRequest, snapshot: DatabaseSnapshot | Callable[[], DatabaseSnapshot]) -> PendingUpdate:
 		"""Recover the active operation, then register and clear one new scope.

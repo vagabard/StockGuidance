@@ -10,9 +10,12 @@ class MaintenanceWriterLock:
 
 	NAME = "stockguidance_daily_maintenance"
 
-	def __init__(self, source: SourceConfig, connect: WriteConnectionFactory) -> None:
+	def __init__(self, source: SourceConfig, connect: WriteConnectionFactory, *, timeout_seconds: int = 0) -> None:
+		if type(timeout_seconds) is not int or timeout_seconds < 0:
+			raise ValueError("timeout_seconds must be a non-negative integer")
 		self.source = source
 		self.connect = connect
+		self.timeout_seconds = timeout_seconds
 		self.connection: WriteConnection | None = None
 		self.cursor: WriteCursor | None = None
 		self._connection_id: int | None = None
@@ -21,7 +24,7 @@ class MaintenanceWriterLock:
 		self.connection = self.connect(self.source.database_config)
 		self.cursor = self.connection.cursor()
 		try:
-			self.cursor.execute(f"SELECT GET_LOCK('{self.NAME}', 0)", ())
+			self.cursor.execute("SELECT GET_LOCK(%s, %s)", (self.NAME, self.timeout_seconds))
 			rows = self.cursor.fetchall()
 			if rows != [(1,)]:
 				raise RuntimeError("Another market-data updater is running on this database server")

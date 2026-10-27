@@ -777,3 +777,99 @@ The separately exercised historical migration/archive fixture suite remains
 outside this acceptance boundary and still contains pre-existing audit/archive
 read failures in untouched legacy fixture code. Those fixtures were retained
 as required and were not repaired as part of Stage 10.
+
+## Stage 11 handoff — 2026-10-26
+
+Status: complete for the Stage 11 recovery and regression implementation. The
+acceptance runner used only the explicitly prefixed disposable MySQL schema
+`stockguidance_disposable_stage11_20261026`; it did not select or modify
+`stockforecasting`, download market data, print credentials, or create a
+commit. Stage 12 was not implemented.
+
+### Changed files and interfaces
+
+* `tools/database_simplification_stage11.py` adds a reproducible disposable
+  MySQL acceptance runner. It seeds a synthetic target schema, starts worker
+  subprocesses, kills them after already-committed clear/delta/z-score
+  transactions, restarts against the same immutable pending scope, and
+  verifies reader guards, advisory-lock waiting, queued recovery, unrelated
+  rows, numerical values, quality, completion metadata, future-dependent
+  labels, and pending-row cleanup. It always drops its prefixed schema in the
+  parent cleanup path.
+* `tests/database/test_database_simplification_stage11.py` adds focused
+  coverage for reporting already durable calculation units after restart and
+  parameterized writer-lock wait timeouts.
+* `src/stockguidance/database/numerical_rebuild.py` now reports a delta or
+  z-score work unit as committed when its persisted completion evidence is
+  found during resume. This lets the coordinator verify the entire immutable
+  scope after a process restart; it does not recalculate or clear a completed
+  unit.
+* `src/stockguidance/database/operation_recovery.py` gives the simplified
+  coordinator a 60-second default advisory-lock wait, with validation and an
+  explicit `lock_timeout_seconds` override.
+* `src/stockguidance/workflows/market_lock.py` accepts a non-negative timeout
+  and binds the lock name and timeout as SQL parameters. The legacy/default
+  direct lock behavior remains immediate (`timeout_seconds=0`); the target
+  coordinator opts into waiting so a concurrent request is planned only after
+  active recovery completes.
+
+### Acceptance evidence
+
+The disposable MySQL runner passed all of these process boundaries:
+
+* kill after the first clear chunk commit: `affected_rows_cleared` remained
+  false, the committed chunk was durable, the next chunk was untouched, the
+  scope was unchanged, and restart cleared only its persisted scope;
+* kill after delta commit: an overlapping reader was distinguished as
+  unfinished, an unrelated read remained available, a second writer waited on
+  the advisory lock, and its coordinator resumed the active operation before
+  accepting its next empty request;
+* kill after z-score commit: both calculation units and completion evidence
+  survived, and restart preserved their values, states, and quality without a
+  second write.
+
+The runner also verified the final delta value `1.25` with explicit
+`not_yet_available` future labels, ready price z-score `1.0`, zero quality flags,
+raw/delta/z-score completion, pending cleanup, and preservation of unrelated
+raw data. It emitted a machine-readable completion record and dropped the
+disposable schema during cleanup:
+
+`.venv\Scripts\python.exe tools\database_simplification_stage11.py --dbinfo-file replacement-dbinfo.id --schema stockguidance_disposable_stage11_20261026`
+
+Additional checks:
+
+* **Passed:** `.venv\Scripts\python.exe -m pytest tests\database\test_database_simplification_stage11.py -q` — 2 tests.
+* **Passed:** focused recovery/numerical/cutover regression selection — 37
+  tests, including the Stage 11 tests.
+* **Passed:** `.venv\Scripts\python.exe -m mypy src\stockguidance\database\numerical_rebuild.py src\stockguidance\database\operation_recovery.py src\stockguidance\workflows\market_lock.py tools\database_simplification_stage11.py` — no issues in 4 files.
+* **Passed:** `mvn -q -f java\pom.xml test` — 30 tests. Existing JVM warnings
+  and the expected credential-safe connection-failure trace remain.
+* **Passed:** Python compilation of the changed implementation and runner.
+* **Passed:** `git diff --check` for tracked changes; final explicit whitespace
+  inspection covers new files below.
+
+### Required full-suite gates and limitations
+
+The full Python command
+`.venv\Scripts\python.exe -m pytest tests -q --tb=short` produced **1,057
+passed, 3 skipped, and 9 failed**. The nine failures are outside this Stage 11
+change: three legacy archive-cleanup tests stop at the pre-existing Stage 10
+target-schema rejection/connection seam, and six retained historical
+archive-audit/reading fixtures have the legacy `UnboundLocalError` failures
+already recorded in the Stage 10 handoff. No Stage 11-targeted test failed.
+
+The configured full `.venv\Scripts\python.exe -m mypy` command remains
+**incomplete** with 237 existing errors in 21 historical performance/CLI
+files, including unavailable optional `streamlit`/`psutil` stubs. The focused
+Stage 11 surfaces above pass; dependencies were not installed and the full
+mypy errors were not reclassified as Stage 11 regressions.
+
+The Stage 11 MySQL evidence is disposable and synthetic, so it does not prove
+production capacity or authorize migration. SQLite tests do not replace the
+MySQL process/concurrency evidence. Empty, missing, invalid, interpolated,
+holiday-window, source-mismatch, and final-label behavior remain covered by
+the completed Stage 3–10 focused suites; no production schema or runtime
+workflow was changed to broaden those behaviors in this stage.
+
+Stage 12 remains the separate operator migration preparation/rehearsal stage.
+No production migration is ready to apply based on this handoff alone.

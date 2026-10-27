@@ -348,21 +348,35 @@ class SimplifiedNumericalRebuildRunner:
 		for unit in operation.scope.rebuild:
 			kind = UnitKind(unit.unit_kind)
 			if kind is UnitKind.DELTA_SESSION:
-				if self._rebuild_delta(unit, operation, connection):
+				if self._delta_complete_for_resume(unit, connection):
+					committed.append(unit)
+					if self._delta_is_non_ready(unit, operation, connection):
+						non_ready.append(unit)
+				elif self._rebuild_delta(unit, operation, connection):
 					committed.append(unit)
 					if self._delta_is_non_ready(unit, operation, connection):
 						non_ready.append(unit)
 		for unit in operation.scope.rebuild:
 			if UnitKind(unit.unit_kind) is UnitKind.ZSCORE_SESSION:
 				row = self._rebuild_zscore(unit, operation, connection)
-				if row is not None:
-					committed.append(unit)
-					if row.status is not ZScoreStatus.READY:
-						non_ready.append(unit)
+				# _zscore_row_for_unit returns None only when the persisted session
+				# completion and matching row count already prove this unit complete.
+				# Report that evidence on resume so the coordinator can verify the
+				# complete durable scope after a process restart.
+				committed.append(unit)
+				if row is not None and row.status is not ZScoreStatus.READY:
+					non_ready.append(unit)
 		return RebuildResult(_unique_units(committed), _unique_units(non_ready), (), ())
 
 	def _rebuild_delta(self, unit: WorkUnit, operation: PendingUpdate, connection: WriteConnection) -> bool:
 		return self._write_delta_unit(unit, operation, connection) is not None
+
+	def _delta_complete_for_resume(self, unit: WorkUnit, connection: WriteConnection) -> bool:
+		cursor = self._connection_cursor(connection)
+		try:
+			return self._delta_complete(cursor, unit)
+		finally:
+			cursor.close()
 
 	def _rebuild_zscore(self, unit: WorkUnit, operation: PendingUpdate, connection: WriteConnection) -> ZScoreRow | None:
 		return self._zscore_row_for_unit(unit, operation, connection)
