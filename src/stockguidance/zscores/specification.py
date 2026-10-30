@@ -14,6 +14,7 @@ DELTA_DEFINITION: Final = "close_ratio_to_prior_minus_one"
 class ZScoreFamily(StrEnum):
 	PRICE = "price"
 	PRICE_DELTA = "price_delta"
+	VOLUME = "volume"
 
 
 @dataclass(frozen=True)
@@ -47,6 +48,8 @@ class ZScoreSpecification:
 	def dependency_order(self) -> tuple[str, ...]:
 		if self.family is ZScoreFamily.PRICE:
 			return ("session", "ticker_id", "verified_close", "actual_receipt")
+		if self.family is ZScoreFamily.VOLUME:
+			return ("session", "ticker_id", "verified_volume", "actual_receipt")
 		return ("session", "ticker_id", "verified_close_ratio_to_prior", "prior_verified_close", "actual_receipt")
 
 	def required_value_count(self, window: int) -> int:

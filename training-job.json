@@ -8,7 +8,7 @@
     "interval": "1d"
   },
   "data_root": "data",
-  "database_config": "replacement-dbinfo.id",
+  "database_config": "dbinfo.id",
   "features": {
     "ticker_ids": [17, 3],
     "lookback_sessions": 1,

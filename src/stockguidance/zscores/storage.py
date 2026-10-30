@@ -50,8 +50,8 @@ class ZScoreSeriesDefinition:
 		require_text(self.missing_value_policy, "z-score missing-value policy")
 		if type(self.schema_version) is not int or self.schema_version != METADATA_SCHEMA_VERSION:
 			raise ValueError("Unsupported z-score metadata schema version")
-		if self.family is ZScoreFamily.PRICE and self.delta_definition != "not_applicable":
-			raise ValueError("Price z-scores must not declare a delta definition")
+		if self.family in (ZScoreFamily.PRICE, ZScoreFamily.VOLUME) and self.delta_definition != "not_applicable":
+			raise ValueError("Price and volume z-scores must not declare a delta definition")
 		if self.family is ZScoreFamily.PRICE_DELTA and self.delta_definition != "close_ratio_to_prior_minus_one":
 			raise ValueError("Delta z-scores require the stored close-ratio definition")
 

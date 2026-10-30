@@ -145,6 +145,8 @@ class MySQLZScoreRepository(ZScoreRepository):
 	def load_inputs(self, query: ZScoreInputQuery) -> LoadedZScoreInputs:
 		if query.scope.boundary.source != self.source.identity:
 			raise ValueError("Z-score input and database source identities differ")
+		if query.family is ZScoreFamily.VOLUME:
+			raise ZScoreSchemaError("Volume z-score inputs must use the standalone preparation workflow")
 		with self._transaction() as cursor:
 			return self._load_inputs(cursor, query, lock=False)
 
@@ -415,6 +417,8 @@ class MySQLZScoreRepository(ZScoreRepository):
 		return tuple(dependencies)
 
 	def publish(self, definition: ZScoreSeriesDefinition, result: ZScoreResult, dependencies: tuple[ZScoreDependencySnapshot, ...], computed_at: datetime) -> None:
+		if definition.family is ZScoreFamily.VOLUME:
+			raise ZScoreSchemaError("Volume z-score publication must use the standalone preparation workflow")
 		if not isinstance(computed_at, datetime):
 			raise ValueError("Z-score publication requires a computation timestamp")
 		if result.specification.family is not definition.family or definition.window not in result.specification.windows:
@@ -523,6 +527,8 @@ class MySQLZScoreRepository(ZScoreRepository):
 		if not requests:
 			return ()
 		definitions = tuple(definition for definition, _ in requests)
+		if any(definition.family is ZScoreFamily.VOLUME for definition in definitions):
+			raise ZScoreSchemaError("Volume z-score reads must use the standalone preparation workflow")
 		if len({(definition.series_key, dependency.date_id) for definition, dependency in requests}) != len(requests):
 			raise ValueError("Duplicate z-score validation request")
 		windows = tuple(sorted({definition.window for definition in definitions}))

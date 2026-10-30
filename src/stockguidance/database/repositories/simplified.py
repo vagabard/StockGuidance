@@ -415,6 +415,10 @@ def _assert_clear_scope_is_empty(cursor: Cursor, scope: PendingScope, table_name
 		series = quote_identifier(table_names.table(TableRole.ZSCORE_SERIES))
 		cursor.execute(f"SELECT family FROM {series} WHERE series_key = %s", (unit.series_key,))
 		series_rows = cursor.fetchall()
+		if not series_rows:
+			# A first materialization has no series metadata yet; the bounded
+			# output delete is already complete and remains safely rerunnable.
+			continue
 		if len(series_rows) != 1:
 			raise ValueError("Cannot verify a z-score clear without its series definition")
 		family = series_rows[0][0].decode("ascii") if isinstance(series_rows[0][0], bytes) else str(series_rows[0][0])
@@ -423,6 +427,8 @@ def _assert_clear_scope_is_empty(cursor: Cursor, scope: PendingScope, table_name
 			table = resolved.price
 		elif family == "price_delta":
 			table = resolved.price_delta
+		elif family == "volume":
+			table = resolved.volume
 		else:
 			raise ValueError("Unknown z-score series family")
 		cursor.execute(f"SELECT 1 FROM {quote_identifier(table)} WHERE date_id = %s AND ticker_id = %s LIMIT 1", (unit.date_id, unit.ticker_id))

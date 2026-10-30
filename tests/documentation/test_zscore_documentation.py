@@ -60,13 +60,14 @@ def test_future_feature_and_encoding_boundary_is_documented() -> None:
 
 def test_canonical_registry_is_packaged_and_shared_with_java() -> None:
 	registry = json.loads(_text("src/stockguidance/database/table_names.json"))
-	assert set(registry) == {"schema_version", "tables", "zscore_templates"}
+	assert set(registry) == {"schema_version", "tables", "zscore_templates", "preparation_templates"}
 	assert set(registry["tables"]) == {
 		"source", "sessions", "tickers", "prices", "deltas", "imports",
 		"zscore_series", "zscore_sessions", "schema", "data_states",
 		"pending_updates", "repair_metadata",
 	}
 	assert set(registry["zscore_templates"]) == {"price", "price_delta"}
+	assert set(registry["preparation_templates"]) == {"volume"}
 
 	project = tomllib.loads(_text("pyproject.toml"))
 	assert "database/table_names.json" in project["tool"]["setuptools"]["package-data"]["stockguidance"]
@@ -90,6 +91,7 @@ def test_supported_production_sources_have_no_physical_name_fallbacks() -> None:
 		"stockguidance_zscore_sessions",
 		"zscores_price_",
 		"zscores_price_delta_",
+		"zscores_volume_",
 	)
 	production_files = tuple(
 		path for path in (ROOT / "src/stockguidance").rglob("*.py") if "performance" not in path.parts

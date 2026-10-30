@@ -1,0 +1,43 @@
+{
+  "source": {
+    "provider": "fixture",
+    "endpoint": "fixture-history",
+    "market": "us-stocks",
+    "universe": "fixture",
+    "adjustment": "adjusted",
+    "interval": "1d"
+  },
+  "calendar": {
+    "name": "XNYS",
+    "start": "2024-07-01",
+    "end": "2024-07-16"
+  },
+  "clock_now": "2024-07-16T23:00:00+00:00",
+  "coverage": {
+    "snapshot_id": "stage2-fixture-snapshot",
+    "revision": "stage2-fixture-revision",
+    "verified_sessions": [
+      "2024-07-01",
+      "2024-07-02",
+      "2024-07-03",
+      "2024-07-05",
+      "2024-07-08",
+      "2024-07-09",
+      "2024-07-10",
+      "2024-07-11",
+      "2024-07-12",
+      "2024-07-15"
+    ]
+  },
+  "date_range": {
+    "start": "2024-07-08",
+    "end": "2024-07-09"
+  },
+  "dependencies": {
+    "model_lookback_sessions": 1,
+    "training_end_gap_sessions": 0,
+    "target_baseline_sessions": 0,
+    "label_horizon_sessions": 1,
+    "simulation_horizon_sessions": 3
+  }
+}

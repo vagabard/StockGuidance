@@ -78,6 +78,7 @@ def _validate_template(value: object, name: str) -> str:
 class ResolvedZScoreTables:
 	price: str
 	price_delta: str
+	volume: str
 
 
 @dataclass(frozen=True)
@@ -92,6 +93,7 @@ class TableNames:
 	zscore_sessions: str
 	price_template: str
 	price_delta_template: str
+	volume_template: str = "zscores_" + "volume_{window}"
 	data_verifications: str = "stockguidance_data_verifications"
 	data_verification_samples: str = "stockguidance_data_verification_samples"
 	schema: str = "stockguidance_schema_version"
@@ -108,6 +110,7 @@ class TableNames:
 			raise ValueError("Table names must be unique case-insensitively")
 		_validate_template(self.price_template, "price")
 		_validate_template(self.price_delta_template, "price_delta")
+		_validate_template(self.volume_template, "volume")
 
 	def table(self, role: TableRole) -> str:
 		if not isinstance(role, TableRole):
@@ -134,6 +137,10 @@ class TableNames:
 	def templates(self) -> dict[str, str]:
 		return {"price": self.price_template, "price_delta": self.price_delta_template}
 
+	def preparation_templates(self) -> dict[str, str]:
+		"""Return additive preparation templates without changing legacy identity payloads."""
+		return {"volume": self.volume_template}
+
 	def resolve_zscore_tables(self, windows: Iterable[int]) -> dict[int, ResolvedZScoreTables]:
 		values = _validate_windows(windows)
 		resolved: dict[int, ResolvedZScoreTables] = {}
@@ -141,10 +148,11 @@ class TableNames:
 		for window in values:
 			price = validate_identifier(self.price_template.replace("{window}", str(window)), "price z-score table name")
 			price_delta = validate_identifier(self.price_delta_template.replace("{window}", str(window)), "price_delta z-score table name")
-			if price.casefold() in used or price_delta.casefold() in used or price.casefold() == price_delta.casefold():
+			volume = validate_identifier(self.volume_template.replace("{window}", str(window)), "volume z-score table name")
+			if len({price.casefold(), price_delta.casefold(), volume.casefold()}) != 3 or any(name.casefold() in used for name in (price, price_delta, volume)):
 				raise ValueError("Z-score table names collide with an existing table")
-			used.update((price.casefold(), price_delta.casefold()))
-			resolved[window] = ResolvedZScoreTables(price, price_delta)
+			used.update((price.casefold(), price_delta.casefold(), volume.casefold()))
+			resolved[window] = ResolvedZScoreTables(price, price_delta, volume)
 		return resolved
 
 
@@ -158,7 +166,7 @@ def _load_payload(text: str) -> TableNames:
 	try:
 		payload = json.loads(text, object_pairs_hook=_reject_duplicate_keys)
 		top = _mapping(payload, "Table-names JSON")
-		if set(top) != {"schema_version", "tables", "zscore_templates"}:
+		if set(top) not in ({"schema_version", "tables", "zscore_templates"}, {"schema_version", "tables", "zscore_templates", "preparation_templates"}):
 			raise ValueError("Table-names JSON fields are incomplete or unknown")
 		if type(top["schema_version"]) is not int or top["schema_version"] != 1:
 			raise ValueError("Unsupported table-names schema version")
@@ -171,6 +179,9 @@ def _load_payload(text: str) -> TableNames:
 		templates = _mapping(top["zscore_templates"], "zscore_templates")
 		if set(templates) != set(_TEMPLATE_NAMES):
 			raise ValueError("Z-score templates are incomplete or unknown")
+		preparation_templates = _mapping(top.get("preparation_templates", {"volume": "zscores_" + "volume_{window}"}), "preparation_templates")
+		if set(preparation_templates) != {"volume"}:
+			raise ValueError("Preparation templates are incomplete or unknown")
 		defaults = {
 			TableRole.SCHEMA.value: "stockguidance_schema_version",
 			TableRole.DATA_STATES.value: "stockguidance_data_states",
@@ -193,6 +204,7 @@ def _load_payload(text: str) -> TableNames:
 			zscore_series=validated_tables[TableRole.ZSCORE_SERIES.value], zscore_sessions=validated_tables[TableRole.ZSCORE_SESSIONS.value],
 			price_template=_validate_template(templates["price"], "price"),
 			price_delta_template=_validate_template(templates["price_delta"], "price_delta"),
+			volume_template=_validate_template(preparation_templates["volume"], "volume"),
 			data_verifications=verification_table, data_verification_samples=sample_table,
 			schema=validated_tables[TableRole.SCHEMA.value], data_states=validated_tables[TableRole.DATA_STATES.value],
 			pending_updates=validated_tables[TableRole.PENDING_UPDATES.value], repair_metadata=validated_tables[TableRole.REPAIR_METADATA.value],

@@ -29,6 +29,7 @@ RUN = "stage12_migration_run"
 STEPS = "stage12_migration_steps"
 SESSIONS = "stage12_migration_sessions"
 LOCK = "stockguidance_daily_maintenance"
+COMPLETION_CONNECTION_SESSIONS = 500
 RAW_COLUMNS = ("open", "high", "low", "close", "volume", "vwap", "transactions")
 
 
@@ -78,8 +79,10 @@ class SQLMigration:
 		self.batch_size = owner.batch_size
 		self.connection: Any = None
 		self.cursor: Any = None
+		self.lock_cursor: Any = None
 		self.started = time.monotonic()
 		self.activity = "preflight"
+		self.activity_started: float | None = None
 		self.server_uuid = ""
 		self.migration_time = datetime.now(timezone.utc).replace(tzinfo=None)
 		self.available: set[str] = set()
@@ -101,7 +104,12 @@ class SQLMigration:
 
 	def heartbeat(self) -> None:
 		while not self.stop.wait(10):
-			self.emit(f"{self.activity}: working; elapsed={time.monotonic() - self.started:.1f}s")
+			now = time.monotonic()
+			activity_started = self.activity_started
+			if activity_started is not None:
+				self.emit(f"{self.activity}: working; session_elapsed={now - activity_started:.1f}s")
+			else:
+				self.emit(f"{self.activity}: working; elapsed={now - self.started:.1f}s")
 
 	def execute(self, sql: str, parameters: tuple[object, ...] = ()) -> None:
 		self.cursor.execute(sql, parameters)
@@ -114,7 +122,12 @@ class SQLMigration:
 		return self.rows(sql, parameters)[0][0]
 
 	def assert_lock(self) -> None:
-		if self.scalar("SELECT IS_USED_LOCK(%s) = CONNECTION_ID()", (LOCK,)) != 1:
+		if self.lock_cursor is not None:
+			self.lock_cursor.execute("SELECT IS_USED_LOCK(%s) = CONNECTION_ID()", (LOCK,))
+			owned = self.lock_cursor.fetchall()[0][0]
+		else:
+			owned = self.scalar("SELECT IS_USED_LOCK(%s) = CONNECTION_ID()", (LOCK,))
+		if owned != 1:
 			raise MigrationError("Maintenance writer lock was lost; rerun to resume")
 
 	@contextmanager
@@ -150,6 +163,8 @@ class SQLMigration:
 		except BaseException:
 			# Never replace a connection/query failure with a rollback failure.
 			self.emit(f"{self.activity}: stopped; rerun the same command to reload the durable database checkpoint")
+			self.activity = f"{self.activity} rollback"
+			self.activity_started = None
 			with suppress(Exception):
 				self.connection.rollback()
 			raise
@@ -250,7 +265,7 @@ class SQLMigration:
 		require_simplified_schema(self.cursor, self.names)
 		physical = set(self.names.target_tables().values()) | {RUN, STEPS, SESSIONS}
 		for pair in self.names.resolve_zscore_tables(self.owner.windows).values():
-			physical.update((pair.price, pair.price_delta))
+			physical.update((pair.price, pair.price_delta, pair.volume))
 		engines = self.rows("SELECT TABLE_NAME,ENGINE FROM information_schema.TABLES WHERE TABLE_SCHEMA=%s", (self.owner.target_database,))
 		if any(table in physical and engine != "InnoDB" for table, engine in engines):
 			raise MigrationError("All migration destination/control tables must use InnoDB")
@@ -516,9 +531,62 @@ class SQLMigration:
 			"CASE WHEN outcome IS NOT NULL THEN (ranking<=100)*2-1 END", "CASE WHEN outcome IS NOT NULL THEN (outcome>=1)*2-1 END"]
 		return f"SELECT ticker_id,date_id,{','.join(values)} FROM ({ranked}) b", (date_id,)
 
+	def open_completion_connection(self) -> tuple[Any, Any]:
+		connection = self.owner.target_connect(self.owner.target.database_config)
+		cursor = None
+		try:
+			cursor = connection.cursor()
+			cursor.execute("SET SESSION time_zone = '+00:00'", ())
+			cursor.execute("SET SESSION div_precision_increment = 30", ())
+			cursor.execute("SET SESSION sql_mode = 'STRICT_ALL_TABLES,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION'", ())
+			cursor.execute("SELECT @@server_uuid", ())
+			if str(cursor.fetchall()[0][0]) != self.server_uuid:
+				raise MigrationError("Completion connection is on a different MySQL server")
+			return connection, cursor
+		except BaseException:
+			if cursor is not None:
+				with suppress(Exception):
+					cursor.close()
+			with suppress(Exception):
+				connection.close()
+			raise
+
+	def rotate_completion_connection(self) -> None:
+		# Rotation is called only after the current session and checkpoint commit.
+		self.cursor.close()
+		self.connection.close()
+		self.connection, self.cursor = self.open_completion_connection()
+		self.assert_lock()
+
 	def completion(self, *, verify: bool = False) -> None:
+		lock_connection, lock_cursor = self.connection, self.cursor
+		# End any previous read snapshot before temporarily lending the cursor to
+		# lock checks; committed migration changes remain intact.
+		lock_connection.rollback()
+		self.lock_cursor = lock_cursor
+		try:
+			self.connection, self.cursor = self.open_completion_connection()
+			self.assert_lock()
+			self._completion(verify=verify)
+		except BaseException:
+			if self.connection is not lock_connection:
+				with suppress(Exception):
+					self.connection.rollback()
+			raise
+		finally:
+			if self.connection is not lock_connection:
+				with suppress(Exception):
+					self.cursor.close()
+				with suppress(Exception):
+					self.connection.close()
+			self.connection, self.cursor = lock_connection, lock_cursor
+			self.lock_cursor = None
+
+	def _completion(self, *, verify: bool = False) -> None:
 		temp = quote_identifier("stage12_expected_delta")
-		self.execute(f"CREATE TEMPORARY TABLE IF NOT EXISTS {temp} (ticker_id INT UNSIGNED NOT NULL,date_id INT UNSIGNED NOT NULL," + ",".join(quote_identifier(f) + " DOUBLE NULL" for f in DERIVED_COLUMNS) + ", PRIMARY KEY(ticker_id,date_id)) ENGINE=InnoDB")
+		create_temp = f"CREATE TEMPORARY TABLE {temp} (ticker_id INT UNSIGNED NOT NULL,date_id INT UNSIGNED NOT NULL," + ",".join(quote_identifier(f) + " DOUBLE NULL" for f in DERIVED_COLUMNS) + ", PRIMARY KEY(ticker_id,date_id)) ENGINE=InnoDB"
+		session_started = time.monotonic()
+		committed_on_connection = 0
 		while True:
 			step = "validate:completion" if verify else "completion:sessions"
 			self.activity = step
@@ -533,13 +601,16 @@ class SQLMigration:
 				self.connection.commit()
 				return
 			date_id, revision, available, derived_receipt = rows[0]
+			self.activity = f"{step} session={date_id}"
+			self.activity_started = session_started
 			invalid = self.scalar(f"SELECT COUNT(*) FROM {self.target(self.table(TableRole.PRICES))} s WHERE s.date_id=%s AND s.state_id=1 AND {self.invalid_raw()}", (date_id,))
 			if invalid:
 				raise MigrationError(f"Unannotated invalid raw observations: date_id={date_id}, count={invalid}; completion blocked")
 			raw_ok = revision is not None and available is not None
 			delta_ok = False
 			if raw_ok and derived_receipt:
-				self.execute(f"DELETE FROM {temp}")
+				self.execute(f"DROP TEMPORARY TABLE IF EXISTS {temp}")
+				self.execute(create_temp)
 				sql, parameters = self.expected_delta_sql(date_id)
 				self.execute(f"INSERT INTO {temp} {sql}", parameters)
 				self.check_warnings()
@@ -559,8 +630,18 @@ class SQLMigration:
 			self.assert_lock()
 			self.hook("before_commit", step)
 			self.connection.commit()
+			committed_at = time.monotonic()
+			self.activity_started = None
 			self.hook("after_commit", step)
-			self.progress(step, count + 1, 1, [date_id])
+			self.activity = f"{step} rows={count + 1} last_key={_json([date_id])}"
+			self.emit(f"{self.activity} session_elapsed={committed_at - session_started:.1f}s committed")
+			session_started = committed_at
+			committed_on_connection += 1
+			if committed_on_connection == COMPLETION_CONNECTION_SESSIONS:
+				self.activity = f"{step} resetting completion connection"
+				self.rotate_completion_connection()
+				self.emit(f"{step}: completion connection reset after {committed_on_connection} committed sessions")
+				committed_on_connection = 0
 
 	def validate_copy(self, spec: Copy, *, restart: bool = False) -> None:
 		step = "validate:" + (spec.target_table or spec.table)
@@ -583,9 +664,9 @@ class SQLMigration:
 					break
 				high, size = end
 				where, params = bounded(spec.keys, low, high)
-				join = " AND ".join("t." + quote_identifier(k) + "=s." + quote_identifier(k) for k in spec.keys)
-				if spec.source_filter and not reverse:
+				if spec.source_filter:
 					where = f"({where}) AND ({spec.source_filter})"
+				join = " AND ".join("t." + quote_identifier(k) + "=s." + quote_identifier(k) for k in spec.keys)
 				if spec.decode and not reverse:
 					source_rows = self.rows(f"SELECT {columns(spec.read_fields, 's')} FROM {self.source(spec.table)} s WHERE {where} ORDER BY {columns(spec.keys, 's')}", params)
 					expected = [spec.decode(r) for r in source_rows]
@@ -597,8 +678,6 @@ class SQLMigration:
 						left, right = self.target(spec.target_table or spec.table), self.source(spec.table)
 						mismatch = "t." + quote_identifier(spec.keys[0]) + " IS NULL"
 						joins = ""
-						if spec.source_filter:
-							joins += " AND " + spec.source_filter.replace("s.", "t.")
 					else:
 						left, right = self.source(spec.table), self.target(spec.table)
 						mismatch = "t." + quote_identifier(spec.keys[0]) + " IS NULL OR " + " OR ".join(
@@ -639,7 +718,12 @@ class SQLMigration:
 		for key, family, window in definitions:
 			if int(window) in self.owner.windows:
 				pair = self.names.resolve_zscore_tables((int(window),))[int(window)]
-				physical[key] = pair.price if family == "price" else pair.price_delta
+			if family == "price":
+				physical[key] = pair.price
+			elif family == "price_delta":
+				physical[key] = pair.price_delta
+			elif family == "volume":
+				physical[key] = pair.volume
 		while True:
 			self.activity = step
 			self.assert_lock()
@@ -658,8 +742,9 @@ class SQLMigration:
 				if key not in physical:
 					raise MigrationError(f"Z-score completion has an unselected/unknown definition: {key}")
 				actual = {str(r[0]): int(r[1]) for r in self.rows(f"SELECT status,COUNT(*) FROM {self.target(physical[key])} WHERE date_id=%s GROUP BY status", (date_id,))}
-				if sum(actual.values()) != row_count or actual.get("0", 0) != ready_count or actual != status_counts(encoded):
-					raise MigrationError(f"Z-score completion counts mismatch for {physical[key]}, date_id={date_id}: {actual!r}")
+				expected = status_counts(encoded)
+				if sum(actual.values()) != row_count or actual.get("0", 0) != ready_count or actual != {k: v for k, v in expected.items() if v != 0}:
+					raise MigrationError(f"Z-score completion counts mismatch for {physical[key]}, date_id={date_id}: actual={actual!r}, expected={expected!r}, row_count={row_count!r}, ready_count={ready_count!r}")
 			self.save(step, high, count + size, False)
 			self.assert_lock()
 			self.connection.commit()

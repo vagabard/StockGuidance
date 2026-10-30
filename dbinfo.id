@@ -1,9 +1,9 @@
 {
   "host": "localhost",
-  "database": "stockforecasting",
+  "database": "stock_data",
   "user": "Redbeard",
   "password": "3YZs#z5GOJKdea",
   "port": 3306,
   "driver": "auto",
-  "schema": "stockforecasting"
+  "schema": "stock_data"
 }

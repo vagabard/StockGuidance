@@ -1,6 +1,6 @@
 # Database simplification replacement contract
 
-Status: Stage 5 contract update. This document specifies the replacement that
+Status: Stage 5 contract update with the Stage 3 preparation amendment. This document specifies the replacement that
 later stages must implement. It does not initialize, migrate, or alter a
 production database. The Stage 2 disposable-MySQL measurement gate passed and
 selected the raw-column layout below under the required decision rule. Stages
@@ -21,9 +21,10 @@ two providers.
 The redesign keeps the current close-to-close feature and target definitions,
 the 16 `legacy-open-to-close-v1` derived columns, the two z-score families,
 their configured windows, Decimal source precision, stable ticker IDs, and the
-existing strict and retrospective availability policies. It does not add
-general feature vectors, volume z-scores, or models. Saved models are never
-deleted or silently retrained.
+existing strict and retrospective availability policies. Stage 3 adds only the
+explicitly versioned volume z-score materialization family required by the
+accepted preparation contract; it does not add general feature vectors or
+models. Saved models are never deleted or silently retrained.
 
 The current packaged registry remains the authority for the existing physical
 names during the staged cutover. The target registry adds logical roles for
@@ -172,7 +173,7 @@ per-window names continue to come only from the selected registry template.
 | --- | --- |
 | `stockguidance_zscore_series` | `series_key CHAR(64)`, `schema_version INT`, `source_scope CHAR(64)`, `calendar_id VARCHAR(128)`, `family VARCHAR(32)`, `window INT`, `calculation_version VARCHAR(128)`, `delta_definition VARCHAR(128)`, `precision VARCHAR(32)`, `missing_value_policy VARCHAR(64)`, `created_at DATETIME(6)`, primary key `series_key`, and the existing definition uniqueness key. |
 | `stockguidance_zscore_sessions` | `series_key CHAR(64)`, `date_id INT UNSIGNED`, `dependency_digest CHAR(64)`, `availability_digest CHAR(64)`, `actual_input_available TINYINT(1)`, `completed_at DATETIME(6)`, `row_count INT`, `ready_count INT`, `status_counts JSON`, `content_digest CHAR(64)`, primary key `(series_key,date_id)`. |
-| each `zscores_price_{window}` / `zscores_price_delta_{window}` | `date_id INT UNSIGNED`, `ticker_id INT UNSIGNED`, `zscore FLOAT NULL`, `status TINYINT`, `quality_flags SMALLINT UNSIGNED`, `gap_length INT UNSIGNED`, `provenance JSON`, primary key `(date_id,ticker_id)`. |
+| each `zscores_price_{window}` / `zscores_price_delta_{window}` / `zscores_volume_{window}` | `date_id INT UNSIGNED`, `ticker_id INT UNSIGNED`, `zscore FLOAT NULL`, `status TINYINT`, `quality_flags SMALLINT UNSIGNED`, `gap_length INT UNSIGNED`, `provenance JSON`, primary key `(date_id,ticker_id)`. |
 
 The quality/provenance fields in the last row replace the current separate
 derived-output quality storage; the score/status and fingerprint semantics do
@@ -708,9 +709,11 @@ initialization/runtime; no production table is dropped.
 
 The target registry has a target-only view containing `source`, `schema`,
 `sessions`, `tickers`, `prices`, `deltas`, `data_states`, `pending_updates`,
-`repair_metadata`, `zscore_series`, and `zscore_sessions`. The historical
-`tables()` serialization remains available only for migration manifests and
-fixture identity. The target registry digest is version `2`, so a database
+`repair_metadata`, `zscore_series`, and `zscore_sessions`; each configured
+window also has price, price-delta, and additive volume z-score tables. The
+historical `tables()` serialization remains available only for migration
+manifests and fixture identity. The target registry digest is version `3`, so a
+database
 created with the former mixed registry is incompatible until explicitly
 reinitialized or migrated by a later operator stage.
 
@@ -780,16 +783,18 @@ insert/update costs, and the required 20 repetitions. Stage 3 must use the
 recorded raw-column selection.
 
 Stage 3 implementation boundary: the selected registry adds `schema`,
-`data_states`, `pending_updates`, and `repair_metadata` roles while the
-legacy `tables()` serialization remains unchanged for artifact/manifest
-fingerprints; replacement consumers request the explicit replacement role
-set. `initialize_simplified_schema` creates a fresh target schema with
+`data_states`, `pending_updates`, and `repair_metadata` roles plus the
+additive volume z-score preparation template while the legacy `tables()`
+serialization remains unchanged for artifact/manifest fingerprints;
+replacement consumers request the explicit replacement role set.
+`initialize_simplified_schema` creates a fresh target schema with
 `stockguidance_schema_version` metadata at target schema version `1` and
-registry version `2`, the
+registry version `3`, the
 raw-column `raw_stock_data.state_id` layout, UTC `DATETIME(6)` timestamps,
 singleton checks, fixed state rows, session completion fields, repair
-metadata, pending scopes, and retained z-score fingerprints. It refuses
-legacy or partial databases and never performs additive migration. New
+metadata, pending scopes, retained price/delta z-score fingerprints, and
+per-window volume z-score tables. It refuses legacy or partial databases and
+never performs additive migration. New
 repositories call the same version/registry guard before reading or writing.
 
 Python contracts are in `stockguidance.database.simplified_contract` and the

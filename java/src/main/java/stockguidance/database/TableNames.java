@@ -49,21 +49,24 @@ public final class TableNames {
         }
     }
 
-    public record ResolvedZScoreTables(String price, String priceDelta) {
+    public record ResolvedZScoreTables(String price, String priceDelta, String volume) {
         public ResolvedZScoreTables {
             validateIdentifier(price, "price z-score table name");
             validateIdentifier(priceDelta, "price_delta z-score table name");
+            validateIdentifier(volume, "volume z-score table name");
         }
     }
 
     private final EnumMap<Role, String> tables;
     private final String priceTemplate;
     private final String priceDeltaTemplate;
+    private final String volumeTemplate;
 
-    private TableNames(EnumMap<Role, String> tables, String priceTemplate, String priceDeltaTemplate) {
+    private TableNames(EnumMap<Role, String> tables, String priceTemplate, String priceDeltaTemplate, String volumeTemplate) {
         this.tables = new EnumMap<>(tables);
         this.priceTemplate = validateTemplate(priceTemplate, "price");
         this.priceDeltaTemplate = validateTemplate(priceDeltaTemplate, "price_delta");
+        this.volumeTemplate = validateTemplate(volumeTemplate, "volume");
         Set<String> names = new HashSet<>();
         for (String name : this.tables.values()) {
             if (!names.add(fold(name))) {
@@ -92,7 +95,11 @@ public final class TableNames {
 
     public static TableNames decode(JsonObject root) {
         requireObject(root, "Table-names JSON");
-        requireFields(root, Set.of("schema_version", "tables", "zscore_templates"));
+        Set<String> rootFields = new HashSet<>(root.keySet());
+        if (!rootFields.equals(Set.of("schema_version", "tables", "zscore_templates"))
+                && !rootFields.equals(Set.of("schema_version", "tables", "zscore_templates", "preparation_templates"))) {
+            throw new ContractException("Incomplete or unsupported table-names fields");
+        }
         Object version = root.get("schema_version");
         if (!JsonSupport.isIntegralNumber(version) || !JsonSupport.fitsInt(version) || JsonSupport.integerValue(version) != 1) {
             throw new ContractException("Unsupported table-names schema version");
@@ -122,7 +129,13 @@ public final class TableNames {
         }
         JsonObject templateValues = object(root, "zscore_templates");
         requireFields(templateValues, Set.of("price", "price_delta"));
-        return new TableNames(tables, text(templateValues, "price"), text(templateValues, "price_delta"));
+        String volume = "zscores_" + "volume_{window}";
+        if (root.containsKey("preparation_templates")) {
+            JsonObject preparationValues = object(root, "preparation_templates");
+            requireFields(preparationValues, Set.of("volume"));
+            volume = text(preparationValues, "volume");
+        }
+        return new TableNames(tables, text(templateValues, "price"), text(templateValues, "price_delta"), volume);
     }
 
     public String table(Role role) {
@@ -170,6 +183,10 @@ public final class TableNames {
 
     public String priceDeltaTemplate() {
         return priceDeltaTemplate;
+    }
+
+    public String volumeTemplate() {
+        return volumeTemplate;
     }
 
     public Map<String, String> tables() {
@@ -220,10 +237,11 @@ public final class TableNames {
         for (Integer window : values) {
             String price = validateIdentifier(priceTemplate.replace(WINDOW, window.toString()), "price z-score table name");
             String priceDelta = validateIdentifier(priceDeltaTemplate.replace(WINDOW, window.toString()), "price_delta z-score table name");
-            if (!used.add(fold(price)) || !used.add(fold(priceDelta))) {
+            String volume = validateIdentifier(volumeTemplate.replace(WINDOW, window.toString()), "volume z-score table name");
+            if (!used.add(fold(price)) || !used.add(fold(priceDelta)) || !used.add(fold(volume))) {
                 throw new IllegalArgumentException("Z-score table names collide with an existing table");
             }
-            result.put(window, new ResolvedZScoreTables(price, priceDelta));
+            result.put(window, new ResolvedZScoreTables(price, priceDelta, volume));
         }
         return Map.copyOf(result);
     }

@@ -2,6 +2,8 @@ data/
 __pycache__/
 cache/
 /output/
+/runs/
+/database-preparations/
 *.pyc
 *.egg-info/
 *.pt

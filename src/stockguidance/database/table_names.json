@@ -17,5 +17,8 @@
   "zscore_templates": {
     "price": "zscores_price_{window}",
     "price_delta": "zscores_price_delta_{window}"
+  },
+  "preparation_templates": {
+    "volume": "zscores_volume_{window}"
   }
 }

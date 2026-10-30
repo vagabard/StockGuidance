@@ -353,6 +353,11 @@ class DatabasePendingClearer:
 				(unit.series_key,),
 			)
 			rows = cursor.fetchall()
+			if not rows:
+				# Initial preparation may clear a bounded output scope before its
+				# series definition has ever been published.  The delete is already
+				# idempotently complete in that case.
+				continue
 			if len(rows) != 1:
 				raise ClearingError("Z-score series definition is missing")
 			family = rows[0][0].decode("ascii") if isinstance(rows[0][0], bytes) else str(rows[0][0])
@@ -361,6 +366,8 @@ class DatabasePendingClearer:
 				table = resolved.price
 			elif family == "price_delta":
 				table = resolved.price_delta
+			elif family == "volume":
+				table = resolved.volume
 			else:
 				raise ClearingError("Unknown z-score series family")
 			groups.setdefault(table, []).append((unit.date_id, unit.ticker_id))

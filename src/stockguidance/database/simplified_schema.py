@@ -17,7 +17,7 @@ from stockguidance.market_data.identity import data_configuration_key, source_ke
 from stockguidance.market_data.legacy_derived import DERIVED_COLUMNS
 
 
-REGISTRY_VERSION = 2
+REGISTRY_VERSION = 3
 SCHEMA_NAME = "stockguidance_simplified"
 _RETIRED_FIXED_TABLES = (
 	"stockguidance_archive_files",
@@ -47,7 +47,7 @@ class _ConnectionWithOptionalSqlite(Protocol):
 
 
 def registry_digest(table_names: TableNames) -> str:
-	payload = json.dumps({"tables": table_names.target_tables(), "zscore_templates": table_names.templates()}, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+	payload = json.dumps({"tables": table_names.target_tables(), "zscore_templates": table_names.templates(), "preparation_templates": table_names.preparation_templates()}, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 	return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -132,9 +132,9 @@ def _mysql_statements(table_names: TableNames, windows: tuple[int, ...]) -> tupl
 	]
 	for window in windows:
 		resolved = table_names.resolve_zscore_tables((window,))[window]
-		for table in (resolved.price, resolved.price_delta):
+		for table in (resolved.price, resolved.price_delta, resolved.volume):
 			physical = quote_identifier(table)
-			family = "price" if table == resolved.price else "price_delta"
+			family = "price" if table == resolved.price else "price_delta" if table == resolved.price_delta else "volume"
 			statements.append(f"CREATE TABLE IF NOT EXISTS {physical} (date_id INT UNSIGNED NOT NULL, ticker_id INT UNSIGNED NOT NULL, zscore FLOAT NULL, status TINYINT UNSIGNED NOT NULL, quality_flags SMALLINT UNSIGNED NOT NULL DEFAULT 0, gap_length INT UNSIGNED NOT NULL DEFAULT 0, provenance JSON NOT NULL, PRIMARY KEY (date_id, ticker_id), CONSTRAINT simplified_{family}_{window}_date_fk FOREIGN KEY (date_id) REFERENCES {sessions}(id), CONSTRAINT simplified_{family}_{window}_ticker_fk FOREIGN KEY (ticker_id) REFERENCES {tickers}(id)) ENGINE=InnoDB")
 	return tuple(statements)
 
@@ -202,7 +202,7 @@ def initialize_simplified_schema(source: SourceConfig, connect: WriteConnectionF
 	selected_windows = _validate_windows(windows)
 	resolved = names.resolve_zscore_tables(selected_windows)
 	target_roles = (TableRole.SCHEMA, TableRole.SOURCE, TableRole.SESSIONS, TableRole.TICKERS, TableRole.PRICES, TableRole.DELTAS, TableRole.DATA_STATES, TableRole.PENDING_UPDATES, TableRole.REPAIR_METADATA, TableRole.ZSCORE_SERIES, TableRole.ZSCORE_SESSIONS)
-	all_names = tuple(names.table(role) for role in target_roles) + tuple(table for pair in resolved.values() for table in (pair.price, pair.price_delta))
+	all_names = tuple(names.table(role) for role in target_roles) + tuple(table for pair in resolved.values() for table in (pair.price, pair.price_delta, pair.volume))
 	connection = connect(source.database_config)
 	sqlite_compatible = _is_sqlite(connection)
 	try:

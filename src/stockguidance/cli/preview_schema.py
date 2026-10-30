@@ -32,8 +32,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 		arguments = parser().parse_args(argv)
 		table_names = load_table_names(arguments.table_names_file)
 		windows = arguments.windows or (20, 60)
-		payload = {"schema": "stockguidance_simplified", "tables": table_names.target_tables(), "zscore_templates": table_names.templates(), "ddl": simplified_schema_statements(table_names, windows)}
-		payload["zscore_tables"] = {str(window): {"price": tables.price, "price_delta": tables.price_delta} for window, tables in table_names.resolve_zscore_tables(windows).items()}
+		payload = {"schema": "stockguidance_simplified", "tables": table_names.target_tables(), "zscore_templates": table_names.templates(), "preparation_templates": table_names.preparation_templates(), "ddl": simplified_schema_statements(table_names, windows)}
+		payload["zscore_tables"] = {str(window): {"price": tables.price, "price_delta": tables.price_delta, "volume": tables.volume} for window, tables in table_names.resolve_zscore_tables(windows).items()}
 		print(json.dumps(payload, sort_keys=True))
 		return 0
 	except ValueError:
