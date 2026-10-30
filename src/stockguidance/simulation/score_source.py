@@ -155,3 +155,113 @@ class ChronologicalModelScores:
 			self.artifact = artifact
 			self._training_runs.append((timing, training))
 		return self.signals.forecast(self.artifact, request, timing, training)
+
+
+@dataclass(frozen=True)
+class PreEvaluationTraining:
+	"""The one fitting period used by a train-then-simulate evaluation."""
+
+	decisions: tuple[DecisionTiming, ...]
+	configuration: TrainingConfig
+	artifact_directory: Path
+
+	def __post_init__(self) -> None:
+		if not isinstance(self.decisions, tuple) or not self.decisions:
+			raise ValueError("Pre-evaluation training requires historical decisions")
+		if any(not isinstance(item, DecisionTiming) for item in self.decisions) or any(right.entry_session.sequence <= left.entry_session.sequence for left, right in zip(self.decisions, self.decisions[1:])):
+			raise ValueError("Pre-evaluation training decisions must be chronological")
+		if not isinstance(self.configuration, TrainingConfig) or not isinstance(self.artifact_directory, Path):
+			raise ValueError("Pre-evaluation training requires typed settings and an output directory")
+
+
+class TrainThenSimulateScores:
+	"""Fit one artifact before evaluation and reuse it for every decision."""
+
+	policy = ScorePolicy(EvaluationPolicy.TRAIN_THEN_SIMULATE)
+
+	def __init__(self, plan: PreEvaluationTraining, signals: HistoricalSignals, *, trainer: HistoryTrainer | None = None) -> None:
+		self.plan, self.signals, self.trainer = plan, signals, trainer or train_from_history
+		self.artifact: LoadedModel | LoadedEnsemble | None = None
+		self._training: tuple[DecisionTiming, TrainingResult] | None = None
+
+	@property
+	def training_runs(self) -> tuple[tuple[DecisionTiming, TrainingResult], ...]:
+		return () if self._training is None else (self._training,)
+
+	def validate(self, request: SimulationRequest, first: DecisionTiming, calendar: SessionCalendar) -> None:
+		if self.artifact is not None or self._training is not None:
+			raise ValueError("Use a fresh train-then-simulate score source for each evaluation")
+		if self.signals.boundary.source != request.source or self.signals.calendar is not calendar:
+			raise ValueError("Historical signals must use the requested source and calendar")
+		if self.signals.availability_policy is not request.availability_policy or self.signals.data_snapshot != request.data_snapshot:
+			raise ValueError("Historical signal policy and snapshot differ from the simulation request")
+		for timing in self.plan.decisions:
+			if timing.entry_session.sequence >= first.entry_session.sequence or timing.decision_cutoff >= first.entry_session.opens_at:
+				raise ValueError("Pre-period training must finish before the first evaluation decision")
+			if timing.entry_session.session_date < self.signals.boundary.history_start or any(session != calendar.session(session.session_date) for session in (timing.previous_session, timing.entry_session, timing.exit_session)):
+				raise ValueError("Pre-period training crosses unsupported history or disagrees with the calendar")
+		mature_cutoff = max(self.signals.publication.expected_at(item.exit_session) or item.exit_session.closes_at for item in self.plan.decisions)
+		if mature_cutoff >= first.entry_session.opens_at:
+			raise ValueError("Pre-period training outcomes are not mature before the first evaluation decision")
+
+	def forecast(self, request: SimulationRequest, timing: DecisionTiming, buy_index: int) -> DecisionForecast:
+		training = None
+		if self.artifact is None:
+			path = self.plan.artifact_directory / "pre-evaluation.sgmodel"
+			training_request = HistoryTrainingRequest(
+				self.plan.decisions,
+				max(self.signals.publication.expected_at(item.exit_session) or item.exit_session.closes_at for item in self.plan.decisions),
+				request.features,
+				request.target,
+				self.plan.configuration,
+				path,
+				availability_policy=request.availability_policy,
+				data_snapshot=request.data_snapshot,
+			)
+			training = self.trainer(training_request, self.signals.boundary, self.signals.calendar, self.signals.publication, self.signals.closes)
+			artifact = load_recommendation_artifact(training.artifact, ArtifactKind.MODEL)
+			validate_model(artifact, request, timing, self.signals.calendar, fixed=True)
+			self.artifact = artifact
+			self._training = (timing, training)
+		return self.signals.forecast(self.artifact, request, timing, training)
+
+
+class MemoizedScoreSource:
+	"""Freeze one score source so paired portfolios consume identical scores."""
+
+	def __init__(self, source: ScoreSource) -> None:
+		self.source = source
+		self._cache: dict[object, DecisionForecast] = {}
+		self._validated = False
+
+	@property
+	def policy(self) -> ScorePolicy:
+		return self.source.policy
+
+	@property
+	def training_runs(self) -> tuple[tuple[DecisionTiming, TrainingResult], ...]:
+		return self.source.training_runs
+
+	def validate(self, request: SimulationRequest, first: DecisionTiming, calendar: SessionCalendar) -> None:
+		if not self._validated:
+			self.source.validate(request, first, calendar)
+			self._validated = True
+
+	def prime(self, request: SimulationRequest, calendar: SessionCalendar) -> None:
+		"""Capture every evaluation-session forecast before either portfolio runs."""
+		if self.source.policy.policy is EvaluationPolicy.CHRONOLOGICAL_RETRAIN:
+			raise ValueError("Paired schedules require a frozen model and score set; chronological retraining is schedule-dependent")
+		decisions = tuple(DecisionTiming(calendar.shift(session, -1), session, calendar.shift(session, 1), session.closes_at - request.decision_lead) for session in calendar.sessions(request.start, request.end))
+		if not decisions:
+			raise ValueError("Paired schedules require at least one evaluation session")
+		self.validate(request, decisions[0], calendar)
+		for index, timing in enumerate(decisions):
+			self._cache[timing.entry_session.session_date] = self.source.forecast(request, timing, index)
+
+	def forecast(self, request: SimulationRequest, timing: DecisionTiming, buy_index: int) -> DecisionForecast:
+		try:
+			return self._cache[timing.entry_session.session_date]
+		except KeyError:
+			forecast = self.source.forecast(request, timing, buy_index)
+			self._cache[timing.entry_session.session_date] = forecast
+			return forecast

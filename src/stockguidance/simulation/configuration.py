@@ -15,6 +15,7 @@ from stockguidance.targets.specification import TargetSpec
 
 class EvaluationPolicy(StrEnum):
 	FIXED = "fixed"
+	TRAIN_THEN_SIMULATE = "train_then_simulate"
 	CHRONOLOGICAL_RETRAIN = "chronological_retrain"
 
 
@@ -29,7 +30,7 @@ class SimulationRequest:
 	initial_capital: Decimal
 	decision_lead: timedelta = timedelta(minutes=30)
 	eligibility: EligibilityPolicy = EligibilityPolicy()
-	top_k: int = 5
+	top_k: int = 1
 	execution: ExecutionPolicy = ExecutionPolicy()
 	availability_policy: AvailabilityPolicy = AvailabilityPolicy.STRICT
 	data_snapshot: datetime | None = None
@@ -67,5 +68,8 @@ class ScorePolicy:
 		if self.policy is EvaluationPolicy.FIXED:
 			if self.retrain_every_buy_decisions is not None:
 				raise ValueError("Fixed evaluation cannot request retraining")
+		elif self.policy is EvaluationPolicy.TRAIN_THEN_SIMULATE:
+			if self.retrain_every_buy_decisions is not None:
+				raise ValueError("Train-then-simulate uses one pre-period fit")
 		else:
 			require_positive_int(self.retrain_every_buy_decisions, "retraining cadence")

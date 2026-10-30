@@ -21,5 +21,8 @@ class SimulationOptions:
 			if self.artifact is None or self.artifact_id is None or self.artifacts_directory is not None:
 				raise ValueError("Fixed evaluation requires one explicit artifact")
 			ArtifactReference(self.artifact, self.artifact_id)
-		elif self.artifact is not None or self.artifact_id is not None or self.artifacts_directory is None or self.artifact_kind is not ArtifactKind.MODEL:
-			raise ValueError("Chronological retraining requires an explicit output directory")
+		elif self.model_policy in (EvaluationPolicy.TRAIN_THEN_SIMULATE, EvaluationPolicy.CHRONOLOGICAL_RETRAIN):
+			if self.artifact is not None or self.artifact_id is not None or self.artifacts_directory is None or self.artifact_kind is not ArtifactKind.MODEL:
+				raise ValueError("Training-based evaluation requires an explicit model output directory")
+		else:
+			raise ValueError("Unsupported simulation model policy")

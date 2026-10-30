@@ -893,3 +893,70 @@ typed channel repository; validate-only reports missing/stale preparation
 instead of creating it. The next selected stage must consume these saved
 recommendation contracts without changing the v1 semantics.
 
+## Stage 10 — train-then-simulate and saved-score replay
+
+Status: complete for the requested Stage 10 historical evaluation, paired
+schedule, saved-score replay, pinned-settings rerun service, versioned
+simulation persistence, and focused acceptance coverage. No production
+database, live provider, schema migration, trade submission, credential
+exposure, or commit was performed.
+
+### Changed interfaces
+
+- `EvaluationPolicy.TRAIN_THEN_SIMULATE` and `TrainThenSimulateScores` fit one
+  pre-evaluation artifact, validate mature labels before evaluation, and reuse
+  the artifact for every evaluation decision. Existing fixed and chronological
+  policies remain explicit and compatible.
+- Simulation configuration accepts an optional `end_date` with a default
+  ten-exchange-session horizon, independent `initial_capital` and `top_k`, and
+  an optional configured `runs_root`. The simulation default is top-n 1 and
+  initial capital `1000.00`; recommendation defaults remain separate.
+- `simulate_paired` memoizes one forecast set and produces independent
+  alternate-session and staggered-half ledgers. `persist_paired_simulation`
+  records a comparison parent and child runs.
+- `persist_simulation_result` writes
+  `stockguidance-simulation-2` with all ordered scores, eligibility and
+  exclusions, execution quotes/issues, fills/trades, equity, benchmarks,
+  training provenance, and execution revisions in the run manifest/report.
+- `replay_saved_simulation` and `rerun_pinned_simulation` create REPLAY/RERUN
+  child runs. Saved replay is offline and exact for the original request;
+  changed top-n uses full-universe score coverage and changed schedules are
+  rejected unless every required decision is saved. Pinned rerun accepts typed
+  replacement sources and records data revision/re-resolution settings.
+
+### Accepted decisions and semantics
+
+- Original simulation reports remain schema v1 by default; Stage 10 persistence
+  opts into schema v2 and report inspection accepts both versions.
+- Saved execution evidence is required for every replay session and exact
+  ticker universe. Missing entry quotes remain unfilled, missing exits retain
+  positions for later retry, and final open positions are marked without a
+  forced sale, matching the existing engine contract.
+- A paired run rejects chronological retraining because a schedule-dependent
+  expanding model cannot be shared as one frozen forecast set. Stable ticker IDs
+  and explicit tensor axes remain unchanged; no descriptors, embeddings,
+  permutation-invariant models, or new transformer path were added.
+- Full exception type/message is retained in local failure manifests for
+  diagnosis. Run sanitization redacts credential-shaped text; public CLI error
+  output remains generic.
+
+### Verification commands and actual results
+
+1. `.venv\Scripts\python.exe -m pytest tests\simulation\test_stage10.py -q` —
+   passed, 4 tests, with 4 existing pandas timezone warnings.
+2. `.venv\Scripts\python.exe -m pytest tests\simulation\test_chronology.py::test_fixed_predictions_read_only_prior_sessions_at_each_decision tests\cli\test_simulation.py::test_simulation_cli_uses_verified_sql_with_nonconsecutive_ids_without_writes -q` — passed, 2 tests.
+3. `.venv\Scripts\python.exe -m mypy src\stockguidance` — passed with no issues in 308 source files.
+4. `.venv\Scripts\python.exe -m py_compile` over the changed Stage 10 Python modules — passed.
+5. `git diff --check` — passed; only Git's existing line-ending conversion
+   warnings were emitted.
+6. `.venv\Scripts\python.exe -m pytest tests\configuration tests\runs tests\recommendations -q` — passed, 163 tests, 8 existing pandas timezone warnings, 40.33s.
+
+### Remaining limitations and next-stage prerequisites
+
+Stage 10 provides typed replay/rerun services and persistence, but does not
+add a production-data replay CLI or visualization surface. Pinned reruns still
+require the caller to supply typed, explicitly resolved score and execution
+sources; no live-data source is inferred. Future work can add standalone
+viewer/CLI adapters and then proceed to the remaining visualization and
+cross-stage rehearsal requirements without changing the v1 contracts.
+

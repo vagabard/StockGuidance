@@ -32,7 +32,9 @@ def predict_ranking(artifact: LoadedModel | LoadedEnsemble, sample: Sample, elig
 		if universe.ticker_ids != sample.features.specification.ticker_ids:
 			raise ValueError("Artifact universe order differs from the inference sample")
 		symbols = universe.ticker_labels
-	scores = score_sample(artifact, sample, symbols)
+	# Preserve the v1 two-argument adapter for legacy artifacts; versioned
+	# artifacts use the symbol-aware path so their stable labels are retained.
+	scores = score_sample(artifact, sample) if symbols is None else score_sample(artifact, sample, symbols)
 	ranking = rank_scores(scores, eligibility, top_k)
 	members = (artifact,) if isinstance(artifact, LoadedModel) else artifact.members
 	weights = (1.0,) if isinstance(artifact, LoadedModel) else artifact.weights

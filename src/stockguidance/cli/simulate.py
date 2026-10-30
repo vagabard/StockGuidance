@@ -29,7 +29,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 		if arguments.artifact is None or arguments.artifact_id is None or len(arguments.artifact_id) != 64 or any(character not in "0123456789abcdef" for character in arguments.artifact_id) or arguments.artifacts_directory is not None:
 			parser.error("fixed requires --artifact and its SHA256 --artifact-id; omit --artifacts-directory")
 	elif arguments.artifact is not None or arguments.artifact_id is not None or arguments.artifact_kind != ArtifactKind.MODEL.value or arguments.artifacts_directory is None:
-		parser.error("chronological_retrain requires --artifacts-directory and no existing artifact")
+		parser.error("training-based evaluation requires --artifacts-directory and no existing artifact")
 	return arguments
 
 
@@ -37,7 +37,7 @@ def main(argv: list[str] | None = None) -> int:
 	arguments = parse_args(argv)
 	try:
 		configuration = load_configuration(arguments.config)
-		if (configuration.retraining is not None) != (arguments.model_policy == EvaluationPolicy.CHRONOLOGICAL_RETRAIN.value):
+		if (configuration.retraining is not None) != (arguments.model_policy in (EvaluationPolicy.TRAIN_THEN_SIMULATE.value, EvaluationPolicy.CHRONOLOGICAL_RETRAIN.value)):
 			raise ValueError("Model policy and training configuration differ")
 	except Exception as error:
 		message = "Invalid simulation configuration; entry_open requires its explicit opening feature" if "entry_open" in str(error) else "Invalid simulation configuration"

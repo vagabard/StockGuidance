@@ -4,6 +4,7 @@ from decimal import Decimal
 from stockguidance.portfolio.serialization import portfolio_payload, position_payload
 from stockguidance.portfolio.valuation import PortfolioValue
 from stockguidance.market_data.identity import content_id
+from stockguidance.recommendations.eligibility import TickerEligibility
 from stockguidance.reporting.orders import order_plan_payload
 from stockguidance.reporting.training import training_payload
 from stockguidance.simulation.events import SimulationEvent
@@ -18,12 +19,23 @@ def event_payload(event: SimulationEvent) -> dict[str, object]:
 	return {"kind": event.kind.value, "at": event.at.isoformat(), "session": event.session.session_date.isoformat(), "detail": event.detail, "allocation": event.allocation, "ticker_id": event.ticker_id, "amount": None if event.amount is None else str(event.amount), "quantity": None if event.quantity is None else str(event.quantity), "portfolio": None if event.portfolio is None else portfolio_payload(event.portfolio)}
 
 
-def simulation_payload(result: SimulationResult) -> dict[str, object]:
+def eligibility_payload(eligibility: TickerEligibility, *, detailed: bool) -> dict[str, object]:
+	result: dict[str, object] = {"ticker_id": eligibility.ticker_id, "state": eligibility.state.value, "detail": eligibility.detail}
+	observation = eligibility.observation
+	if detailed and observation is not None:
+		result.update({"transactions": observation.transactions, "observation_session": observation.timing.session.session_date.isoformat(), "observed_at": observation.timing.observed_at.isoformat(), "available_at": observation.timing.available_at.isoformat(), "revision": observation.revision})
+	return result
+
+
+def simulation_payload(result: SimulationResult, *, schema: str = "stockguidance-simulation-1") -> dict[str, object]:
+	if schema not in ("stockguidance-simulation-1", "stockguidance-simulation-2"):
+		raise ValueError("Unsupported simulation report schema")
 	request = result.request
 	final = None if not result.valuations else valuation_payload(result.valuations[-1])
 	evidence = [{"session": frame.session.session_date.isoformat(), "quotes": [{"ticker_id": item.ticker_id, "price": str(item.price), "revision": item.revision} for item in frame.quotes], "issues": [{"ticker_id": item.ticker_id, "state": item.state.value} for item in frame.issues]} for frame in result.execution_frames]
 	return {
-		"schema": "stockguidance-simulation-1", "successful": result.successful, "complete": result.complete,
+		"schema": schema, "successful": result.successful, "complete": result.complete,
+		"replay": {"saved_scores": True, "execution_quotes": True, "coverage": "full_model_universe"} if schema == "stockguidance-simulation-2" else None,
 		"model_policy": result.score_policy.policy.value, "retrain_every_buy_decisions": result.score_policy.retrain_every_buy_decisions,
 		"cadence_basis": "scheduled_buy_decisions_from_allocation_anchor_including_skips",
 		"evaluation": "fixed_pre_period_model" if result.score_policy.retrain_every_buy_decisions is None else "chronological_retraining",
@@ -38,7 +50,7 @@ def simulation_payload(result: SimulationResult) -> dict[str, object]:
 		"eligibility": asdict(request.eligibility), "top_k": request.top_k,
 		"initial_portfolio": portfolio_payload(result.initial), "final_portfolio": portfolio_payload(result.final), "final_valuation": final,
 		"plans": [order_plan_payload(item) for item in result.plans],
-		"decisions": [{"entry_session": item.sample.timing.entry_session.session_date.isoformat(), "decision_cutoff": item.sample.timing.decision_cutoff.isoformat(), "artifact_id": item.artifact_id, "members": [{"artifact_id": identity, "weight": weight} for identity, weight in zip(item.prediction.member_artifact_ids, item.prediction.member_weights)], "feature_identity": item.sample.feature_cache_key, "data_revision": item.prediction.data_revision, "scores": [asdict(score) for score in item.prediction.scores], "ranking": [asdict(score) for score in item.prediction.ranking], "eligibility": [{"ticker_id": eligibility.ticker_id, "state": eligibility.state.value, "detail": eligibility.detail} for eligibility in item.prediction.eligibility]} for item in result.forecasts],
+		"decisions": [{"entry_session": item.sample.timing.entry_session.session_date.isoformat(), "decision_cutoff": item.sample.timing.decision_cutoff.isoformat(), "artifact_id": item.artifact_id, "members": [{"artifact_id": identity, "weight": weight} for identity, weight in zip(item.prediction.member_artifact_ids, item.prediction.member_weights)], "feature_identity": item.sample.feature_cache_key, "data_revision": item.prediction.data_revision, "scores": [asdict(score) for score in item.prediction.scores], "ranking": [asdict(score) for score in item.prediction.ranking], "eligibility": [eligibility_payload(eligibility, detailed=schema == "stockguidance-simulation-2") for eligibility in item.prediction.eligibility]} for item in result.forecasts],
 		"training_runs": [{"decision_cutoff": timing.decision_cutoff.isoformat(), "entry_session": timing.entry_session.session_date.isoformat(), "result": training_payload(training)} for timing, training in result.training_runs],
 		"events": [event_payload(item) for item in result.events], "equity": [valuation_payload(item) for item in result.valuations],
 		"realized_trades": [{"allocation": item.allocation, **position_payload(item.position), "actual_exit_session": item.exit_session_date, "exit_price": str(item.exit_price), "net_proceeds": str(item.net_proceeds), "realized_pnl": str(item.realized_pnl), "net_return": str(item.net_return), "close_return": item.close_return, "actual_price_return": item.actual_price_return, "exited_on_time": item.exited_on_time} for item in result.trades],

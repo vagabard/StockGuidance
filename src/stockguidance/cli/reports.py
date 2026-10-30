@@ -26,7 +26,7 @@ def main(argv: list[str] | None = None) -> int:
 			if arguments.command == "compare":
 				payload = [summary.payload() for summary in compare_simulations(documents)]
 			else:
-				payload = [simulation_summary(document).payload() if document.kind is ReportKind.SIMULATION else {"report": str(document.path), "schema": document.kind.value, "successful": document.payload["successful"], "details": {key: document.payload[key] for key in ("training_mae", "training_metric_scope", "evaluation_kind", "evaluation_mae", "artifact", "artifact_id", "model_policy", "entry_session", "exit_session", "fills_recorded", "ranking") if key in document.payload}} for document in documents]
+				payload = [simulation_summary(document).payload() if document.kind in (ReportKind.SIMULATION, ReportKind.SIMULATION_V2) else {"report": str(document.path), "schema": document.kind.value, "successful": document.payload["successful"], "details": {key: document.payload[key] for key in ("training_mae", "training_metric_scope", "evaluation_kind", "evaluation_mae", "artifact", "artifact_id", "model_policy", "entry_session", "exit_session", "fills_recorded", "ranking") if key in document.payload}} for document in documents]
 		print(json.dumps({"successful": True, "results": payload}, sort_keys=True, allow_nan=False))
 		return 0
 	except Exception:

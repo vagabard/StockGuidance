@@ -15,6 +15,7 @@ class ReportKind(StrEnum):
 	TRAINING = "stockguidance-training-1"
 	RECOMMENDATION = "stockguidance-recommendation-1"
 	SIMULATION = "stockguidance-simulation-1"
+	SIMULATION_V2 = "stockguidance-simulation-2"
 
 
 @dataclass(frozen=True)
@@ -46,7 +47,7 @@ def load_report(path: Path) -> ReportDocument:
 		allocation = mapping(fields["allocation"])
 		AllocationPolicy(str(allocation["policy"]))
 		CashRestRule(str(allocation["cash_rest"]))
-		if kind is ReportKind.SIMULATION:
+		if kind in (ReportKind.SIMULATION, ReportKind.SIMULATION_V2):
 			EvaluationPolicy(str(fields["model_policy"]))
 		elif kind is ReportKind.RECOMMENDATION:
 			ModelRefreshPolicy(str(fields["model_policy"]))

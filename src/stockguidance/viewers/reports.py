@@ -14,7 +14,7 @@ def main() -> None:
 		return
 	try:
 		documents = tuple(load_report(Path(value.strip())) for value in paths.splitlines() if value.strip())
-		simulations = tuple(document for document in documents if document.kind is ReportKind.SIMULATION)
+		simulations = tuple(document for document in documents if document.kind in (ReportKind.SIMULATION, ReportKind.SIMULATION_V2))
 		if simulations:
 			st.dataframe([summary.payload() for summary in compare_simulations(simulations)])
 		for document in documents:

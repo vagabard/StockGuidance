@@ -26,7 +26,7 @@ class SimulationSummary:
 
 
 def simulation_summary(document: ReportDocument) -> SimulationSummary:
-	if document.kind is not ReportKind.SIMULATION:
+	if document.kind not in (ReportKind.SIMULATION, ReportKind.SIMULATION_V2):
 		raise ValueError("Simulation metrics require a current simulation report")
 	fields = document.payload
 	initial_state, final_state = mapping(fields["initial_portfolio"]), mapping(fields["final_portfolio"])

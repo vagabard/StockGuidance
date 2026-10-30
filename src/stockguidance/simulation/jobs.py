@@ -34,7 +34,7 @@ class SimulationConfiguration:
 	source: SourceConfig
 	features: FeatureSpec
 	start: date
-	end: date
+	end: date | None
 	allocation_policy: AllocationPolicy
 	anchor_date: date
 	initial_capital: Decimal
@@ -47,6 +47,8 @@ class SimulationConfiguration:
 	retraining: WalkForwardConfiguration | None
 	availability_policy: AvailabilityPolicy = AvailabilityPolicy.STRICT
 	data_snapshot: datetime | None = None
+	horizon_sessions: int = 10
+	runs_root: Path | None = None
 
 	def __post_init__(self) -> None:
 		require_money(self.initial_capital, "initial capital")
@@ -59,18 +61,22 @@ class SimulationConfiguration:
 			require_aware_datetime(self.data_snapshot, "data snapshot")
 		if self.availability_policy.retrospective and self.data_snapshot is None:
 			raise ValueError("Retrospective simulation requires an explicit data snapshot")
-		if self.start > self.end or self.anchor_date > self.start or self.initial_capital <= 0 or not timedelta(0) < self.decision_lead < timedelta(days=1):
+		if (self.end is not None and self.start > self.end) or self.anchor_date > self.start or self.initial_capital <= 0 or not timedelta(0) < self.decision_lead < timedelta(days=1):
 			raise ValueError("Invalid simulation bounds, capital, anchor or decision lead")
+		if type(self.horizon_sessions) is not int or self.horizon_sessions <= 0:
+			raise ValueError("Simulation horizon must be a positive exchange-session count")
 		if self.features.adjustment is not self.source.identity.adjustment or self.features.interval is not self.source.identity.interval:
 			raise ValueError("Simulation features and source differ")
-		if self.retraining is not None and (self.retraining.start > self.retraining.end or self.retraining.start >= self.start or self.retraining.end > self.end or not timedelta(0) < self.retraining.decision_lead < timedelta(days=1)):
+		if self.retraining is not None and (self.retraining.start > self.retraining.end or self.retraining.start >= self.start or self.end is not None and self.retraining.end > self.end or not timedelta(0) < self.retraining.decision_lead < timedelta(days=1)):
 			raise ValueError("Walk-forward history must begin before evaluation and end within its bounds")
+		if self.runs_root is not None and not isinstance(self.runs_root, Path):
+			raise ValueError("Simulation runs_root must be a path")
 
 
 def load_configuration(path: Path) -> SimulationConfiguration:
 	fields = mapping(json.loads(path.read_text(encoding="utf-8")))
-	required = ("source", "data_root", "database_config", "features", "start_date", "end_date", "allocation", "initial_capital", "decision_minutes_before_close", "publication", "execution_audit_cutoff", "eligibility", "top_k", "fee_per_fill", "retraining")
-	if set(fields) - {*required, "availability_policy", "data_snapshot"} or any(name not in fields for name in required):
+	required = ("source", "data_root", "database_config", "features", "start_date", "allocation", "decision_minutes_before_close", "publication", "execution_audit_cutoff", "eligibility", "retraining")
+	if set(fields) - {*required, "end_date", "horizon_sessions", "runs_root", "initial_capital", "top_k", "fee_per_fill", "availability_policy", "data_snapshot"} or any(name not in fields for name in required):
 		raise ValueError("Incomplete or unsupported simulation configuration fields")
 	identity = decode_source(exact_mapping(fields["source"], ("provider", "endpoint", "market", "universe", "adjustment", "interval")))
 	source = SourceConfig(identity, Path(text_field(fields, "data_root")), Path(text_field(fields, "database_config")))
@@ -97,4 +103,7 @@ def load_configuration(path: Path) -> SimulationConfiguration:
 	features = decode_features(fields["features"])
 	if not isinstance(features, FeatureSpec):
 		raise ValueError("Simulation configuration requires legacy explicit feature semantics")
-	return SimulationConfiguration(source, features, date.fromisoformat(text_field(fields, "start_date")), date.fromisoformat(text_field(fields, "end_date")), AllocationPolicy(text_field(allocation, "policy")), date.fromisoformat(text_field(allocation, "anchor_date")), decimal_text(fields["initial_capital"]), timedelta(minutes=number(fields["decision_minutes_before_close"])), DailyPublicationPolicy(timedelta(minutes=number(publication["delay_minutes"])), text_field(publication, "evidence")), cutoff, EligibilityPolicy(integer(eligibility["minimum_transactions"])), integer(fields["top_k"]), ExecutionPolicy(decimal_text(fields["fee_per_fill"])), retraining, availability_policy, data_snapshot)
+	end = None if fields.get("end_date") is None else date.fromisoformat(text_field(fields, "end_date"))
+	horizon = integer(fields.get("horizon_sessions", 10))
+	runs_root = None if fields.get("runs_root") is None else Path(text_field(fields, "runs_root"))
+	return SimulationConfiguration(source, features, date.fromisoformat(text_field(fields, "start_date")), end, AllocationPolicy(text_field(allocation, "policy")), date.fromisoformat(text_field(allocation, "anchor_date")), decimal_text(fields.get("initial_capital", "1000.00")), timedelta(minutes=number(fields["decision_minutes_before_close"])), DailyPublicationPolicy(timedelta(minutes=number(publication["delay_minutes"])), text_field(publication, "evidence")), cutoff, EligibilityPolicy(integer(eligibility["minimum_transactions"])), integer(fields.get("top_k", 1)), ExecutionPolicy(decimal_text(fields.get("fee_per_fill", "0.00"))), retraining, availability_policy, data_snapshot, horizon, runs_root)

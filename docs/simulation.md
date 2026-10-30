@@ -266,3 +266,35 @@ The cross-stage acceptance fixture also proves the fixed-model chronology: the
 subset artifact's final mature label precedes the later simulation range, the
 simulation performs no retraining, and feature/label reads do not cross each
 decision cutoff. Use the reported artifact ID rather than an archive file hash.
+
+## Stage 10: train-then-simulate, paired schedules, and replay
+
+The configurable simulation defaults are one selected ticker, `1000.00` initial
+capital, and ten exchange sessions. `train_then_simulate` fits one artifact on
+the explicitly supplied pre-evaluation decisions, requires their labels to be
+mature before the first evaluation decision, and reuses that artifact for the
+whole simulation. `chronological_retrain` remains an explicit expanding-history
+policy; fixed-artifact simulation remains unchanged.
+
+`simulation.persistence.persist_simulation_result` writes the versioned
+`stockguidance-simulation-2` report and the run manifest's prediction,
+eligibility, exclusion, execution-quote, trade, equity, benchmark, and
+provenance sections. The report retains all ordered model-universe scores, not
+only the selected top-n, so a changed simulation top-n can be checked rather
+than silently approximated. Missing entries, exits, and end positions retain
+the engine's existing explicit accounting semantics.
+
+`simulation.orchestration.simulate_paired` runs alternate-session and
+staggered-half schedules against one memoized forecast set and independent
+portfolios. `simulation.persistence.replay_saved_simulation` creates a REPLAY
+child run and consumes only saved scores and execution quotes; it does not load
+a model, query a database, or contact a provider. A changed allocation schedule
+requires saved scores for every affected session, and a changed top-n requires
+the full saved model universe. `rerun_pinned_simulation` creates a separate
+RERUN child using explicitly supplied typed score/price sources and records the
+chosen data revision; it never mutates the parent run.
+
+Failure manifests retain the exception type and message for local diagnosis;
+the run-contract sanitizer redacts credential-shaped values. CLI output remains
+generic, and no production database, live provider, or trade endpoint is used
+by replay or rerun services.
