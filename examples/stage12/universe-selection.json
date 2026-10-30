@@ -1,0 +1,7 @@
+{
+  "session_dates": ["2024-04-05", "2024-04-12", "2024-04-16"],
+  "ticker_ids": [101, 202, 303, 404],
+  "filters": {"average_volume": {"window_sessions": 20, "lower": 10, "upper": null}, "volatility": null, "legacy_transactions": null},
+  "read_volume": true,
+  "read_transactions": false
+}

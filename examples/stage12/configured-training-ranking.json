@@ -1,0 +1,22 @@
+{
+  "contract_version": "training-job-v2",
+  "source": {"provider": "fixture", "endpoint": "daily-closes", "market": "us-stocks", "universe": "stage12-deterministic", "adjustment": "adjusted", "interval": "1d"},
+  "data_root": "examples/stage12/fixture-data",
+  "database_config": "operator-supplied-disposable-dbinfo.id",
+  "date_range": {"start": {"date": "2024-04-12"}, "end": {"date": "2024-04-16"}},
+  "evaluation_range": {"start": {"date": "2024-04-23"}, "end": {"date": "2024-05-06"}},
+  "dependencies": {"training_end_gap_sessions": 0, "simulation_horizon_sessions": 10},
+  "membership": {"ordered_ticker_ids": null, "filters": {"average_volume": {"window_sessions": 20, "lower": 10, "upper": null}}},
+  "features": {"lookback_sessions": 3, "channels": ["relative_close", "price_zscore_20", "price_zscore_60", "price_delta_zscore_20", "price_delta_zscore_60", "raw_volume", "volume_zscore_20", "volume_zscore_60"], "signal_mode": "previous_close"},
+  "target": {"kind": "return_zscore_cross_sectional", "window_sessions": null},
+  "preprocessing": {"version": "preprocessing-v2", "input": "none", "output": "none", "input_axis": "flattened_input_coordinate", "output_axis": "one_shared_scalar", "fit_scope": "eligible_training_samples_only"},
+  "model": {"architecture": "mlp", "hidden_widths": [8], "activation": "leaky_relu", "layer_types": ["linear", "linear"], "bias": "all", "layer_normalization": false, "final_activation": "none", "implementation_version": "stockguidance-models-v2", "hidden_activations": null, "shared_hidden_activation": "leaky_relu"},
+  "loss": {"objective": "pairwise_ranking", "version": "loss-v2", "pair_block_size": 2},
+  "training": {"epochs": 2, "batch_size": 1, "learning_rate": 0.001, "learning_rate_gamma": 1.0, "optimizer": "adamw", "device": "cpu", "precision": "fp32", "seed": 17, "shuffle": false, "num_workers": 0, "pin_memory": false},
+  "publication": {"delay_minutes": 15, "evidence": "Stage 12 fixture publication"},
+  "decision_minutes_before_close": 30,
+  "availability_policy": "strict",
+  "calendar": {"name": "XNYS", "start": "2024-01-02", "end": "2024-06-28"},
+  "coverage": {"snapshot_id": "stage12-deterministic-snapshot", "revision": "stage12-deterministic-source-revision", "verified_sessions": ["2024-01-02","2024-01-03","2024-01-04","2024-01-05","2024-01-08","2024-01-09","2024-01-10","2024-01-11","2024-01-12","2024-01-16","2024-01-17","2024-01-18","2024-01-19","2024-01-22","2024-01-23","2024-01-24","2024-01-25","2024-01-26","2024-01-29","2024-01-30","2024-01-31","2024-02-01","2024-02-02","2024-02-05","2024-02-06","2024-02-07","2024-02-08","2024-02-09","2024-02-12","2024-02-13","2024-02-14","2024-02-15","2024-02-16","2024-02-20","2024-02-21","2024-02-22","2024-02-23","2024-02-26","2024-02-27","2024-02-28","2024-02-29","2024-03-01","2024-03-04","2024-03-05","2024-03-06","2024-03-07","2024-03-08","2024-03-11","2024-03-12","2024-03-13","2024-03-14","2024-03-15","2024-03-18","2024-03-19","2024-03-20","2024-03-21","2024-03-22","2024-03-25","2024-03-26","2024-03-27","2024-03-28","2024-04-01","2024-04-02","2024-04-03","2024-04-04","2024-04-05","2024-04-08","2024-04-09","2024-04-10","2024-04-11","2024-04-12","2024-04-15","2024-04-16","2024-04-17","2024-04-18","2024-04-19","2024-04-22","2024-04-23","2024-04-24","2024-04-25","2024-04-26","2024-04-29","2024-04-30","2024-05-01","2024-05-02","2024-05-03","2024-05-06","2024-05-07"]},
+  "runs_root": "output/stage12/runs"
+}

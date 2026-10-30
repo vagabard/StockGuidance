@@ -313,7 +313,7 @@ def _universe_data(repository: UniverseDataRepository | None, request: UniverseS
 	return repository.read(request.read_request())
 
 
-def _prediction_rows(training: TrainingResult, repository: CloseRepository, job: ConfiguredTrainingJob, feature_spec: FeatureSpecV2, target: TargetSpecification, boundary: HistoryBoundary, calendar: ExchangeCalendar, plan: DependencyPlan) -> dict[str, object]:
+def _prediction_rows(training: TrainingResult, repository: CloseRepository, job: ConfiguredTrainingJob, feature_spec: FeatureSpecV2, target: TargetSpecification, boundary: HistoryBoundary, calendar: ExchangeCalendar, plan: DependencyPlan, channel_repository: FeatureChannelRepository | None = None) -> dict[str, object]:
 	from stockguidance.inference.prediction import predict_sample
 
 	loaded = load_artifact(training.artifact)
@@ -324,7 +324,7 @@ def _prediction_rows(training: TrainingResult, repository: CloseRepository, job:
 		_cutoff(label_exits[-1] if label_exits else plan.evaluation.start_session, publication),
 		evaluation_decisions[-1].decision_cutoff,
 	)
-	dataset = build_training_dataset(evaluation_decisions, evaluation_cutoff, feature_spec, target, boundary, calendar, publication, repository, job.availability_policy, job.data_snapshot)
+	dataset = build_training_dataset(evaluation_decisions, evaluation_cutoff, feature_spec, target, boundary, calendar, publication, repository, job.availability_policy, job.data_snapshot, channel_repository)
 	rows: list[dict[str, object]] = []
 	for sample in dataset.samples:
 		if sample.features.values is None:
@@ -414,7 +414,7 @@ def execute_configured_training(
 			if checkpoint_path is not None:
 				run_service.register_file(run_handle.run_id, name="checkpoint", relative_path="checkpoints/training.pt", kind="checkpoint")
 			write_report(run_handle.reports_directory / "training.json", training_payload(training))
-			loaded_predictions = _prediction_rows(training, active_repository, job, feature_spec, job.target, active_boundary, preview.calendar, preview.plan)
+			loaded_predictions = _prediction_rows(training, active_repository, job, feature_spec, job.target, active_boundary, preview.calendar, preview.plan, channel_repository)
 			run_service.update_sections(run_handle.run_id, sections={"results": {"predictions": loaded_predictions, "metrics": {"training": training.training_mae, "evaluation": training.evaluation_mae, "objective": training.training_objective_loss, "objective_units": training.objective_loss_units, "target_units": training.target_metric_units, "excluded_training": [item.__dict__ for item in training.excluded_training], "excluded_evaluation": [item.__dict__ for item in training.excluded_evaluation]}, "artifacts": {"artifact_id": training.artifact.artifact_id}, "reports": {"path": "reports/training.json", "schema": "stockguidance-training-1"}}})
 			run_service.complete(run_handle.run_id)
 		return ConfiguredTrainingResult(training, preview.plan, selected, None if run_handle is None else run_handle.run_id)

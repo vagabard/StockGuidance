@@ -1058,3 +1058,136 @@ mixed-channel training, recommendations, both schedules, offline replay, and
 pinned rerun, including the final SQL/debugging walkthrough. No production
 database action is authorized by this Stage 11 handoff.
 
+## Stage 12 — integrated acceptance and operator handoff
+
+Status: complete for the fixture-only integrated acceptance boundary. No live
+database, provider, market-data download, schema migration, or trade was used.
+
+### Changed interfaces and implementation
+
+- Added `tools/training_recommendation_simulation_stage12.py`, a deterministic
+  124-session, four-ticker fixture that exercises standalone preparation/date
+  preview, universe selection, configured v2 training, artifact reload,
+  validate-only recommendation, both existing simulation schedules, offline
+  replay, and pinned-settings rerun. All generated runs and reports are saved
+  below the supplied output directory.
+- Added checked-in sanitized configs and a date preview under
+  `examples/stage12/`: `date-preview.json`,
+  `configured-training-raw-rmse.json`, `configured-training-ranking.json`, and
+  `universe-selection.json`.
+- Added `tests/integration/test_stage12_acceptance.py` and the operator
+  walkthrough in `docs/training_recommendation_simulation_stage12.md`.
+- Updated `docs/operations_guide.md` with the Stage 12 fixture and operator
+  handoff link.
+- Fixed configured training to pass the selected feature-channel repository
+  through mixed-channel evaluation dataset construction. This preserves the
+  configured v2 feature identity during held-out evaluation.
+- Made the database repository package's feature exports lazy so importing
+  standalone operation-recovery/MySQL preparation code does not create a
+  repository/features circular import.
+
+### Fixture decisions and acceptance evidence
+
+- The fixture has 124 XNYS sessions from 2024-01-02 through 2024-06-28, 63
+  warm-up sessions, training entries 2024-04-12 through 2024-04-16, and ten
+  later simulation sessions. `GAP` is rejected for the verified interior
+  missing observation on 2024-04-05. Complete-observation `LOWVOL` is rejected
+  by the enabled 20-session average-volume lower bound of 10. Stable IDs 101
+  (`AAA`) and 202 (`BBB`) remain selected in order.
+- Configured raw-return v2 training uses mixed close/rolling-z-score/delta/
+  volume channels, standard input normalization, min-max output normalization,
+  and RMSE. A configured cross-sectional return-z-score v2 job uses no
+  normalization and pairwise ranking loss. The raw artifact is reloaded from
+  its saved run before recommendation.
+- Recommendation uses the reloaded artifact in validate-only mode: eligible
+  symbols are `AAA` and `BBB`, one validation call is recorded, and provider
+  calls remain zero.
+- Historical simulation intentionally remains at the existing v1
+  `FeatureSpec` boundary; both `alternate_sessions` and `staggered_halves`
+  succeed, the original portfolio replays offline with matching marked
+  equity, and the pinned rerun creates a new child run. Stage 12 does not add a
+  new v2 historical-simulation model path.
+- The SQL walkthrough distinguishes rendering from execution, bounded input
+  export from code-side calculation, review/apply from verification, and the
+  equivalent SQL route. The disposable MySQL rehearsal covers interruption,
+  resume, correction invalidation, rerun, validation, and EXPLAIN without
+  claiming that SQLite or the in-memory fixture proves MySQL behavior.
+
+### Exact commands and actual results
+
+All commands below were run from `C:\Projects\StockGuidance` with the
+configured `.venv` interpreter.
+
+1. `.venv\Scripts\python.exe -m stockguidance.cli.preview_date_ranges --config examples\stage12\date-preview.json`
+   — exited 0; schema `stockguidance-date-preview-1`, with 63 warm-up
+   sessions, 10 evaluation sessions, earliest fitting date 2024-04-11,
+   earliest simulation date 2024-04-23, and training information cutoff
+   2024-04-17.
+2. `.venv\Scripts\python.exe -m stockguidance.cli.train_model --config examples\stage12\configured-training-raw-rmse.json --preview`
+   and `.venv\Scripts\python.exe -m stockguidance.cli.train_model --config examples\stage12\configured-training-ranking.json --preview`
+   — both exited 0 and produced typed plans with the same 63-session warm-up
+   and ten-session evaluation dependency plan; neither fit a model or opened a
+   database.
+3. `.venv\Scripts\python.exe -m stockguidance.cli.select_universe --config examples\stage12\universe-selection.json --step plan --sql-output output\stage12-acceptance-20261030\universe-plan.sql`
+   and `.venv\Scripts\python.exe -m stockguidance.cli.select_universe --config examples\stage12\universe-selection.json --step select --sql-output output\stage12-acceptance-20261030\universe-select.sql`
+   — both exited 0; both rendered read-only SQL and reported the
+   `python_reference` calculation route.
+4. `.venv\Scripts\python.exe tools\training_recommendation_simulation_stage12.py --output-dir output\stage12-acceptance-20261030`
+   — exited 0. The saved summary reported: 124 total sessions, 63 warm-up,
+   10 simulation sessions, interior gap 2024-04-05, selected IDs `[101, 202]`,
+   exclusions `GAP=missing_observation` and
+   `LOWVOL=average_volume_below_lower_bound`, preparation `validated=1` and
+   `prepared=1`, raw target `raw_return-v2`, raw artifact reload true,
+   cross-sectional target `return_zscore_cross_sectional-v2`, ranking loss
+   `pairwise_ranking`, raw preprocessing `standard/min_max`, recommendation
+   `AAA BBB`, validate-only calls 1, provider calls 0, both simulations
+   successful, five alternate decisions, ten staggered decisions, replay
+   matches true, and pinned rerun successful.
+5. `.venv\Scripts\python.exe tools\database_preparation_stage3_mysql.py --dbinfo-file replacement-dbinfo.id --prefix stockguidance_disposable_preparation_stage12_20261030_01 --output-dir output\stage12-acceptance-20261030\mysql-preparation`
+   — exited 0 against the disposable MySQL rehearsal. It reported
+   `custom_registry=true`, 3 dependency rows, 2 result rows,
+   `sql_code_parity=true`, `source_change_rejected=true`, `crash_resume=true`,
+   `rerun=true`, 2 validated rows, `explain_available=true`, and calculation
+   timing 4.611 ms. Only the explicitly prefixed disposable preparation scope
+   was used.
+6. `.venv\Scripts\python.exe -m pytest tests\integration\test_stage12_acceptance.py tests\database\test_preparation.py tests\architecture\test_package_imports.py tests\architecture\test_boundaries_and_viewers.py tests\cli\test_integrated_frontends.py tests\runs tests\training\test_stage8_orchestration.py tests\recommendations\test_stage9.py tests\simulation\test_stage10.py tests\documentation -q --tb=short`
+   — 53 passed, 40 existing pandas timezone warnings, in 30.73s.
+7. `$env:MYPYPATH='src'; .venv\Scripts\python.exe -m mypy --explicit-package-bases tools\training_recommendation_simulation_stage12.py tests\integration\test_stage12_acceptance.py`
+   — passed with no issues in 2 files. `.venv\Scripts\python.exe -m mypy src\stockguidance`
+   — passed with no issues in 309 source files.
+8. `.venv\Scripts\python.exe -m pytest tests -q --tb=short`
+   — 1035 passed, 2 skipped, 2 failed, 173 warnings, in 351.22s. The two
+   failures are unrelated pre-existing failures: unknown-history validation
+   still returns the generic invalid-configuration message instead of the
+   test's expected `Supported history is unknown`, and daily maintenance's
+   mocked z-score query expects five parameters while the current query
+   supplies seven after the existing volume-series addition. Neither failure
+   involves the Stage 12 files or changed interfaces above.
+9. `.venv\Scripts\python.exe -m py_compile tools\training_recommendation_simulation_stage12.py src\stockguidance\training\configured.py src\stockguidance\database\repositories\__init__.py tests\integration\test_stage12_acceptance.py`
+   — passed. `git diff --check` — passed with only LF/CRLF conversion warnings
+   and no whitespace errors.
+10. Final post-handoff recheck `.venv\Scripts\python.exe -m pytest tests\integration\test_stage12_acceptance.py -q --tb=short`
+    — 1 passed, 8 existing pandas timezone warnings, in 16.53s.
+
+### Remaining limitations and operator prerequisites
+
+The Stage 12 fixture does not replace production preparation. An operator must
+separately authorize and review schema setup, backup/restore, capacity and
+lock checks, source quiescence, and cutover. The exact standalone preparation,
+SQL-rendering, bounded calculation, review/apply, validation, interruption,
+resume, and disposable-MySQL commands are in
+`docs/training_recommendation_simulation_stage12.md`; rendered SQL is an
+inspectable script and is not silently executed by a viewer or training job.
+
+The current historical simulator still accepts the v1 fixed feature contract,
+so configured v2 artifacts are not passed into historical simulation. There is
+no hidden replay/rerun CLI in this stage; the fixture calls the explicit typed
+services and saves their child runs. Future stock descriptors, variable ticker
+ordering, embeddings, permutation-invariant models, and new transformer paths
+remain intentionally out of scope.
+
+The two full-suite failures listed above remain prerequisites for a completely
+green repository regression run. No further implementation stage is specified
+after Stage 12; the remaining work is operator approval and any separately
+requested resolution of those pre-existing failures.
+

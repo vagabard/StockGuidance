@@ -28,6 +28,13 @@ partial-import, verification, migration and separate quality tables must not be
 created beside it. The historical schema instructions below remain only as
 fixture/reference material.
 
+For the final configurable training/recommendation/simulation acceptance path,
+use the [Stage 12 operator handoff](training_recommendation_simulation_stage12.md).
+It is a sanitized, fixture-only rehearsal with explicit date preview, universe
+selection, standalone preparation/SQL debugging, saved-run inspection, paired
+simulation, offline replay, and pinned rerun commands. It does not contact a
+provider or modify the configured database.
+
 
 ## Java and performance status
 
