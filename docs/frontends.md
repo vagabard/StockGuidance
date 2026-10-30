@@ -229,25 +229,38 @@ directory string. `fixed` still rejects a just-trained in-period artifact.
 
 ## Reports and viewers
 
-Current reports identify `stockguidance-training-1`,
-`stockguidance-recommendation-1` and `stockguidance-simulation-1`.
-Choose explicit files; no directory, checkpoint or saved-score fallback exists.
+Reports identify `stockguidance-training-1`,
+`stockguidance-recommendation-1`/`-2` and
+`stockguidance-simulation-1`/`-2`. Explicit report-file viewing remains
+supported. Stage 11 also provides database-free saved-run inspection from the
+configured runs root; selecting a run reads its manifest and explicitly
+referenced report only. It never loads a model or starts replay/rerun.
 
 ```powershell
 & $stockguidancePython -m stockguidance.cli.reports summary output/simulation.json
 & $stockguidancePython -m stockguidance.cli.reports compare output/alternate.json output/staggered.json
 & $stockguidancePython -m stockguidance.cli.reports artifact --artifact output/model.sgmodel --artifact-id '<artifact identity>'
+& $stockguidancePython -m stockguidance.cli.runs --runs-root runs list --operation simulation
+& $stockguidancePython -m stockguidance.cli.runs --runs-root runs list --parent-run-id '<parent run id>'
+& $stockguidancePython -m stockguidance.cli.runs --runs-root runs open '<run id>'
+& $stockguidancePython -m stockguidance.cli.runs --runs-root runs compare '<alternate run id>' '<staggered run id>'
 & $stockguidancePython -m streamlit run src/stockguidance/viewers/reports.py
 & $stockguidancePython -m streamlit run src/stockguidance/viewers/artifacts.py
 ```
 
 The optional `viewers` dependency supplies Streamlit. UI imports are lazy and
-viewers require explicit file paths. Comparisons require identical source,
-feature/target/calendar, evaluation period, capital, execution, eligibility and
-selection specifications; model policy and allocation policy are shown for each
-run. Total return and drawdown use total marked equity, including cash and
-resting proceeds. Incomplete/stale marks remain explicit. Training MAE retains
-its in-sample label and is not presented as unbiased evaluation.
+the explicit report path field remains available. The saved-run surface accepts
+a runs-root override and filters by operation/status; child attempts are shown
+when a parent is opened. Total return and drawdown use total marked equity,
+including cash and resting proceeds. Separate series show schedule equity,
+subportfolio cash/equity, drawdown, benchmark outcomes, missing execution data,
+incomplete marks and open positions. Comparisons label configuration
+differences and only mark performance aggregation as safe when source,
+feature/target/scaler/model/loss, calendar, period, execution, eligibility,
+capital and selection specifications are compatible. Schedule policy itself is
+shown as a difference but does not make paired schedule charts incompatible.
+Training MAE retains its in-sample label and is not presented as unbiased
+evaluation; transformed targets retain their declared score units.
 
 Exit 0 means successful completion; 1 means required execution/storage/reporting
 failure; 2 means invalid arguments/configuration or an incomplete simulation.

@@ -11,6 +11,30 @@ from stockguidance.simulation.events import SimulationEvent
 from stockguidance.simulation.result import SimulationResult
 
 
+def _features_payload(features: object) -> dict[str, object]:
+	if hasattr(features, "to_mapping"):
+		value = features.to_mapping()
+		if isinstance(value, dict):
+			return value
+	field_names = getattr(features, "__dataclass_fields__", None)
+	if not isinstance(field_names, dict):
+		raise ValueError("Simulation features must be a typed dataclass")
+	value = {name: getattr(features, name) for name in field_names}
+	return {**value, "version": getattr(features, "version"), "layout": getattr(features, "layout")}
+
+
+def _target_payload(target: object) -> dict[str, object]:
+	if hasattr(target, "to_mapping"):
+		value = target.to_mapping()
+		if isinstance(value, dict):
+			return {**value, "formula": getattr(target, "raw_formula")}
+	field_names = getattr(target, "__dataclass_fields__", None)
+	if not isinstance(field_names, dict):
+		raise ValueError("Simulation target must be a typed dataclass")
+	value = {name: getattr(target, name) for name in field_names}
+	return {**value, "formula": getattr(target, "raw_formula")}
+
+
 def valuation_payload(value: PortfolioValue) -> dict[str, object]:
 	return {"session": value.session.session_date.isoformat(), "total_equity": str(value.total_equity), "marks_current": value.marks_current, "allocations": [{name: str(amount) if isinstance(amount, Decimal) else amount for name, amount in asdict(item).items()} for item in value.allocations], "positions": [{"allocation": item.allocation, **position_payload(item.position), "marked_price": str(item.price), "price_session": item.price_session.session_date.isoformat(), "marked_value": str(item.value), "mark_current": item.current} for item in value.positions]}
 
@@ -39,10 +63,10 @@ def simulation_payload(result: SimulationResult, *, schema: str = "stockguidance
 		"model_policy": result.score_policy.policy.value, "retrain_every_buy_decisions": result.score_policy.retrain_every_buy_decisions,
 		"cadence_basis": "scheduled_buy_decisions_from_allocation_anchor_including_skips",
 		"evaluation": "fixed_pre_period_model" if result.score_policy.retrain_every_buy_decisions is None else "chronological_retraining",
-		"source": asdict(request.source), "features": {**asdict(request.features), "version": request.features.version, "layout": request.features.layout},
+		"source": asdict(request.source), "features": _features_payload(request.features),
 		"availability_policy": request.availability_policy.value, "availability_assumption": request.availability_policy.assumption, "point_in_time_replay": not request.availability_policy.retrospective, "data_snapshot": None if request.data_snapshot is None else request.data_snapshot.isoformat(),
 		"research_disclaimer": None if not request.availability_policy.retrospective else "Retrospective research assumes historical publication timing; corrected/adjusted history and the selected universe may contain hindsight and do not establish an original point-in-time replay.",
-		"target": {**asdict(request.target), "formula": request.target.raw_formula},
+		"target": _target_payload(request.target),
 		"calendar": {"id": request.allocation.anchor_session.calendar_id, "version": result.calendar_version},
 		"start_session": request.start.isoformat(), "end_session": request.end.isoformat(), "decision_lead_seconds": request.decision_lead.total_seconds(),
 		"allocation": {"policy": request.allocation.policy.value, "anchor_session": request.allocation.anchor_session.session_date.isoformat(), "cash_rest": request.allocation.cash_rest.value, "rebalance": False},

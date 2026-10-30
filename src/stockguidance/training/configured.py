@@ -39,6 +39,8 @@ from stockguidance.market_data.atomic import atomic_write
 from stockguidance.market_data.history import HistoryBoundary, HistoryProvenance
 from stockguidance.market_data.publication import DailyPublicationPolicy
 from stockguidance.preprocessing import PreprocessingSpec
+from stockguidance.reporting.storage import write_report
+from stockguidance.reporting.training import training_payload
 from stockguidance.runs.contracts import RunConfig, RunOperation
 from stockguidance.runs.service import RunDirectoryService, RunHandle
 from stockguidance.targets.specification import TargetSpec, TargetSpecification
@@ -411,8 +413,9 @@ def execute_configured_training(
 			run_service.register_file(run_handle.run_id, name="model", relative_path="artifacts/model.sgmodel")
 			if checkpoint_path is not None:
 				run_service.register_file(run_handle.run_id, name="checkpoint", relative_path="checkpoints/training.pt", kind="checkpoint")
+			write_report(run_handle.reports_directory / "training.json", training_payload(training))
 			loaded_predictions = _prediction_rows(training, active_repository, job, feature_spec, job.target, active_boundary, preview.calendar, preview.plan)
-			run_service.update_sections(run_handle.run_id, sections={"results": {"predictions": loaded_predictions, "metrics": {"training": training.training_mae, "evaluation": training.evaluation_mae, "objective": training.training_objective_loss, "objective_units": training.objective_loss_units, "target_units": training.target_metric_units, "excluded_training": [item.__dict__ for item in training.excluded_training], "excluded_evaluation": [item.__dict__ for item in training.excluded_evaluation]}, "artifacts": {"artifact_id": training.artifact.artifact_id}}})
+			run_service.update_sections(run_handle.run_id, sections={"results": {"predictions": loaded_predictions, "metrics": {"training": training.training_mae, "evaluation": training.evaluation_mae, "objective": training.training_objective_loss, "objective_units": training.objective_loss_units, "target_units": training.target_metric_units, "excluded_training": [item.__dict__ for item in training.excluded_training], "excluded_evaluation": [item.__dict__ for item in training.excluded_evaluation]}, "artifacts": {"artifact_id": training.artifact.artifact_id}, "reports": {"path": "reports/training.json", "schema": "stockguidance-training-1"}}})
 			run_service.complete(run_handle.run_id)
 		return ConfiguredTrainingResult(training, preview.plan, selected, None if run_handle is None else run_handle.run_id)
 	except Exception as error:

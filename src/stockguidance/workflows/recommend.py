@@ -172,13 +172,29 @@ def _ranked_payload(item: RankedTicker, *, versioned: bool) -> dict[str, Any]:
 	return payload
 
 
+def _feature_report_mapping(features: FeatureSpec | FeatureSpecV2) -> dict[str, object]:
+	if isinstance(features, FeatureSpecV2):
+		return features.to_mapping()
+	return {
+		"ticker_ids": list(features.ticker_ids),
+		"lookback_sessions": features.lookback_sessions,
+		"signal_mode": features.signal_mode.value,
+		"interval": features.interval.value,
+		"missing_history": features.missing_history.value,
+		"feature_order": [item.value for item in features.feature_order],
+		"adjustment": features.adjustment.value,
+		"version": features.version,
+		"layout": features.layout,
+	}
+
+
 def _recommendation_report(run: RecommendationRunResult) -> dict[str, Any]:
 	result = run.recommendation
 	request = result.request
 	versioned = request.target.version != "raw_return-v1" or any(item.symbol is not None for item in run.scores)
 	symbols = {item.ticker_id: item.symbol for item in run.scores}
 	return {
-		"schema": "stockguidance-recommendation-2" if versioned else "stockguidance-recommendation-1",
+		"schema": "stockguidance-recommendation-2" if versioned else "stockguidance-recommendation-1", "successful": True,
 		"artifact_id": result.artifact_id,
 		"source": {"provider": request.source.identity.provider, "endpoint": request.source.identity.endpoint, "market": request.source.identity.market, "universe": request.source.identity.universe, "adjustment": request.source.identity.adjustment.value, "interval": request.source.identity.interval.value},
 		"data_revision": result.data_revision,
@@ -192,7 +208,7 @@ def _recommendation_report(run: RecommendationRunResult) -> dict[str, Any]:
 		"eligibility": [{"ticker_id": item.ticker_id, "symbol": symbols.get(item.ticker_id), "state": item.state.value, "detail": item.detail, "session": None if item.observation is None else item.observation.timing.session.session_date.isoformat(), "available_at": None if item.observation is None else item.observation.timing.available_at.isoformat(), "transactions": None if item.observation is None else item.observation.transactions} for item in run.eligibility],
 		"ranking": [_ranked_payload(item, versioned=versioned) for item in result.ranking],
 		"timing": {"previous_session": request.timing.previous_session.session_date.isoformat(), "entry_session": request.timing.entry_session.session_date.isoformat(), "exit_session": request.timing.exit_session.session_date.isoformat(), "decision_cutoff": request.timing.decision_cutoff.isoformat(), "entry_close": request.timing.entry_time.isoformat()},
-		"features": request.features.to_mapping() if hasattr(request.features, "to_mapping") else {"ticker_ids": list(request.features.ticker_ids), "lookback_sessions": request.features.lookback_sessions, "feature_order": [item.value for item in request.features.feature_order]},
+		"features": _feature_report_mapping(request.features),
 		"target": request.target.to_mapping(),
 		"availability_policy": request.availability_policy.value,
 	}
@@ -211,7 +227,7 @@ def _persist_recommendation_run(service: RunDirectoryService, handle: RunHandle,
 		metadata = loaded.metadata if isinstance(loaded, LoadedModel) else loaded.members[0].metadata
 		service.register_external(handle.run_id, name="model", kind="artifact", sha256=artifact_reference.artifact_id, external_reference=str(artifact_reference.path))
 	universe = None if metadata is None or metadata.universe is None else metadata.universe.to_mapping()
-	feature_mapping = result.recommendation.request.features.to_mapping() if hasattr(result.recommendation.request.features, "to_mapping") else {"ticker_ids": list(result.recommendation.request.features.ticker_ids), "lookback_sessions": result.recommendation.request.features.lookback_sessions, "feature_order": [item.value for item in result.recommendation.request.features.feature_order]}
+	feature_mapping = _feature_report_mapping(result.recommendation.request.features)
 	specifications: dict[str, object] = {"features": feature_mapping, "target": result.recommendation.request.target.to_mapping(), "model": None if metadata is None else metadata.model.to_mapping(), "loss": None if metadata is None or metadata.loss is None else metadata.loss.to_mapping(), "preprocessing": None if metadata is None or metadata.preprocessing is None else metadata.preprocessing.to_mapping()}
 	results = {
 		"predictions": {"schema": "recommendation-scores-1", "scope": "ordered_model_universe", "rows": report["scores"], "score_units": result.recommendation.score_units},

@@ -960,3 +960,101 @@ sources; no live-data source is inferred. Future work can add standalone
 viewer/CLI adapters and then proceed to the remaining visualization and
 cross-stage rehearsal requirements without changing the v1 contracts.
 
+## Stage 11 — run inspection and performance visualization
+
+Status: complete for the database-free saved-run inspection layer, strict
+report loading, runs-root CLI/viewer surfaces, performance series, comparison
+compatibility checks, tests, and documentation. No database, provider,
+artifact/model execution, replay, rerun, trade submission, credential output,
+or commit was performed.
+
+### Changed interfaces
+
+- `stockguidance.reporting.inspection` adds typed `RunInspection`,
+  `PerformanceSeries`, `RunComparison`, and `ConfigurationDifference`
+  contracts. It opens a manifest plus its explicitly referenced report,
+  derives resolved dates/universe/specifications, feature/target units,
+  normalization/loss, training/held-out metrics, full/top-n scores and
+  medians, exclusions, trades, equity, benchmark rows, drawdown, subportfolio
+  cash/equity, missing-data issues, incomplete marks, and open positions.
+- `stockguidance.cli.runs` now supports filtered `list`, typed `open`/`read`,
+  and compatibility-aware `compare`, with `--runs-root`, operation/status,
+  parent, and artifact-validation controls. These commands remain
+  database/network/training-free. Exact commands are documented in
+  `docs/frontends.md`.
+- `viewers/reports.py` retains explicit report-file viewing and optionally
+  exposes a runs-root selector, operation/status filters, child attempts,
+  saved-run details, separate equity/drawdown/subportfolio/benchmark tables
+  and charts, and missing/incomplete/open-position diagnostics. UI display
+  does not call artifact loading, model execution, replay, or rerun services.
+- `ReportKind` and strict loading now accept
+  `stockguidance-recommendation-2` and the existing simulation v2 contract,
+  including configured feature and target mappings. Recommendation report
+  generation now includes its success marker and complete v1 feature identity.
+  Configured training attempts now persist a typed `reports/training.json`
+  alongside their existing manifest results.
+- Simulation report serialization uses versioned feature/target mappings for
+  configured v2 contracts, preserving the v1 report semantics and JSON-safe
+  loading.
+
+### Accepted decisions and compatibility
+
+- Paired schedule comparisons use the same frozen source, dates, universe,
+  feature/target/scaler/model/loss, execution, eligibility, capital, and
+  selection identity. Allocation schedule policy is retained as a visible
+  configuration difference but does not block separate alternate/staggered
+  performance charts.
+- Any other specification difference, including target units, prevents the
+  comparison from being marked aggregatable; differences are returned with
+  their paths and left/right values. No mixed-unit equity or score aggregate
+  is produced.
+- Missing reports are inspectable for failed or manifest-only attempts.
+  Present but missing/corrupt/incompatible reports produce a stable error
+  indicator without echoing raw file contents. Corrupt manifests remain in
+  filtered listings as invalid entries and are rejected by typed reads.
+- Inspection only reads saved files. It never infers a runs root from a
+  database, executes an artifact, refreshes data, contacts a provider, or
+  silently requests replay/rerun. Existing explicit report-file and v1
+  viewers remain supported.
+
+### Verification commands and actual results
+
+1. `Get-ChildItem -Force; git status --short; rg --files -g AGENTS.md` — no
+   applicable `AGENTS.md`; the worktree was clean before Stage 11 and no
+   existing user changes were reset or overwritten.
+2. `.venv\Scripts\python.exe -m pytest tests\reporting\test_stage11.py -q`
+   — passed, 5 tests, 4 existing pandas timezone warnings.
+3. `.venv\Scripts\python.exe -m pytest tests\reporting tests\runs tests\architecture tests\cli -q --tb=short`
+   — passed, 89 tests, 32 existing pandas timezone warnings in 46.55s.
+4. `.venv\Scripts\python.exe -m pytest tests\reporting\test_stage11.py tests\reporting\test_reports.py tests\runs tests\simulation\test_stage10.py tests\recommendations\test_stage9.py tests\training\test_stage8_orchestration.py tests\architecture\test_boundaries_and_viewers.py tests\cli\test_integrated_frontends.py -q --tb=short`
+   — passed, 54 tests, 24 existing pandas timezone warnings in 23.84s.
+5. `.venv\Scripts\python.exe -m mypy src\stockguidance` — passed with no
+   issues in 309 source files.
+6. `.venv\Scripts\python.exe -m mypy src\stockguidance\reporting src\stockguidance\runs src\stockguidance\viewers src\stockguidance\cli\runs.py src\stockguidance\cli\reports.py src\stockguidance\training\configured.py src\stockguidance\workflows\recommend.py`
+   — passed with no issues in 21 source files.
+7. `.venv\Scripts\python.exe -m stockguidance.cli.runs --help` and
+   `.venv\Scripts\python.exe -m stockguidance.cli.reports --help` — both
+   exited 0 without creating files or initializing application services.
+8. `rg -n "[ \t]+$" src/stockguidance/reporting/inspection.py tests/reporting/test_stage11.py`
+   — no trailing-whitespace matches.
+9. `git diff --check` — passed; Git emitted only existing LF/CRLF conversion
+   warnings and no whitespace errors.
+10. Final post-handoff recheck `.venv\Scripts\python.exe -m pytest tests\reporting\test_stage11.py tests\reporting\test_reports.py -q` — passed, 15 tests, 4 existing pandas timezone warnings in 9.52s; `.venv\Scripts\python.exe -m mypy src\stockguidance\reporting\inspection.py` — passed with no issues.
+
+### Remaining limitations and next-stage prerequisites
+
+Stage 11 does not add replay/rerun controls to the viewer; callers must use
+the existing explicit typed replay/rerun services, which create child runs.
+The viewer charts are presentation series derived from saved reports and do
+not claim live refresh or production performance. Training reports created by
+older Stage 8 attempts remain manifest-only and are still inspectable through
+their saved metrics/specifications; new configured attempts include the
+explicit training report. Report comparison is intentionally compatibility
+checked and does not calculate a cross-run aggregate.
+
+Stage 12 remains the next prerequisite: integrated deterministic fixture and
+operator rehearsal across preparation, date preview, universe selection,
+mixed-channel training, recommendations, both schedules, offline replay, and
+pinned rerun, including the final SQL/debugging walkthrough. No production
+database action is authorized by this Stage 11 handoff.
+
