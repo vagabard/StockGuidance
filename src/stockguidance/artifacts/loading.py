@@ -25,7 +25,7 @@ class LoadedModel:
 
 def load_model_bytes(content: bytes) -> LoadedModel:
 	manifest, files = read_archive(content)
-	if manifest["schema"] != "stockguidance-inference-1":
+	if manifest["schema"] not in ("stockguidance-inference-1", "stockguidance-inference-2"):
 		raise ValueError("Unsupported inference artifact; old open-to-close models require retraining")
 	payload = exact_mapping(manifest["payload"], ("metadata", "weights_sha256"))
 	if set(files) != {"weights.pt"} or sha256(files["weights.pt"]).hexdigest() != payload["weights_sha256"] or content_id(payload) != manifest["artifact_id"]:

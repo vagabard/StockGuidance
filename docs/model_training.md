@@ -174,8 +174,8 @@ entry is excluded before T's exit close/publication even if future prices exist
 in storage. Training and inference share exactly the same stateless window
 transforms and ticker order. Stage 6 adds explicit target transforms and
 training-only fitted preprocessing; the fitting state is versioned separately
-and is not refit on holdout or inference data. Artifact binding for the new
-state is reserved for Stage 8.
+and is not refit on holdout or inference data. Stage 8 binds that state to the
+standalone artifact and run manifest.
 
 Evaluation is optional and strictly chronological: its entire requested period
 follows the entire requested training period, all its decisions follow the
@@ -204,10 +204,26 @@ LayerNorm still applies only when input width exceeds 5000. Empty hidden widths
 correctly build one direct linear mapping; the old implementation accidentally
 appended another hidden/output path after that mapping.
 
-Raw return regression requires unrestricted output: bounded activations and
-softmax/logsoftmax are rejected by `ModelSpec`. Hidden activation choices remain
-available. Default fitting retains L1/MAE loss, AdamW, learning rate `1e-7`, batch
-size 256, fp32, no shuffling and automatic device selection. Adam/SGD,
+Version `stockguidance-models-v1` retains the original shared hidden activation
+and unrestricted output contract. New `stockguidance-models-v2` MLP jobs may
+provide either `shared_hidden_activation` or one `hidden_activations` value per
+hidden layer, plus a final activation from the typed activation enum. The
+conv/transformer architecture keeps its existing internal activation and rejects
+these incompatible overrides. Input and output widths still come from the
+resolved feature specification and frozen ticker order; no variable-order or
+stock-token model is introduced.
+
+Default fitting retains L1/MAE, AdamW, learning rate `1e-7`, batch size 256,
+fp32, no shuffling and automatic device selection. New jobs can select
+`{"objective": "rmse", "version": "loss-v2"}` or
+`{"objective": "pairwise_ranking", "version": "loss-v2", "pair_block_size": 128}`.
+RMSE is the square root of total squared error divided by total element count.
+Ranking uses the mean softplus margin over non-tied ticker pairs within each
+decision session, evaluated in bounded ticker blocks; pairless sessions are
+skipped and an entirely pairless training set fails. Reports keep objective
+loss, target-space MAE/RMSE, non-tied pair counts, ordering accuracy, and units
+separate. Raw-return metrics are null for transformed target scores that cannot
+be inverted to returns. Adam/SGD,
 exponential learning-rate decay, CUDA fp16/bf16 autocast, worker count and
 pin-memory settings are explicit options. CPU requires fp32. No distributed
 trainer or automatic production sweep is introduced. The seed is recorded.
@@ -251,9 +267,47 @@ Exports rebuild and validate the model and compare predictions before atomic
 replacement. Interrupted export preserves the existing destination. A required
 checkpoint/export failure propagates; no successful result is returned.
 
+## Configured training schema 2
+
+Stage 8 adds `training-job-v2`, decoded by
+`stockguidance.training.configured.load_configured_job`. It composes the typed
+date/dependency resolver, verified coverage snapshot, automatic or explicit
+stable-ID universe selection, preparation/readiness hooks, fitted preprocessing,
+training, export, checkpointing and the Stage 1 run directory. The resolver is
+pure and does not fit or read a database:
+
+```powershell
+.venv\Scripts\python.exe -m stockguidance.cli.train_model `
+  --config examples\stage8\configured-training.json --preview
+```
+
+The checked-in example is non-secret and fixture-only. A real run must inject a
+typed close repository or an explicit database connection/readiness provider;
+the workflow never downloads live data, changes a production schema, or emits
+credentials. Every configured attempt creates a run manifest, including failed
+preparation, selection, fitting, checkpoint, and export outcomes.
+
+`training-job-v2` separates training-end gaps and mature label exits from the
+fitting cutoff. Holdout decisions use the later label cutoff, while fitting
+preprocessing is computed only from eligible training samples. Automatic
+selection orders stable ticker IDs; an explicit `ordered_ticker_ids` list is
+preserved exactly. The resulting v2 artifact records feature layout, target
+semantics, fitted preprocessing, loss, model controls, universe labels and
+source evidence. Inference rejects a same-width reordered universe or any
+source/calendar/target/preprocessing mismatch.
+
+The v2 archive is `stockguidance-inference-2`; v1 archives remain readable and
+retain their original metadata shape. Versioned checkpoints bind the same
+semantic identity and universe order, while dimension equality alone is never
+treated as compatibility. Descriptor vectors, variable ticker ordering,
+embeddings, permutation-invariant models and new transformer paths remain out
+of scope.
+
 ## Checkpoints and ensembles
 
-Resumable `.pt` checkpoints use separate schema `stockguidance-checkpoint-1`.
+Resumable `.pt` checkpoints use separate schemas
+`stockguidance-checkpoint-1` (legacy/v1) and
+`stockguidance-checkpoint-3` (configured semantic identity).
 They contain model, optimizer, scheduler, AMP scaler, completed epoch, CPU/CUDA
 random state and loader generator state. Their compatibility digest binds the
 full training configuration (except total epoch count), resolved device/precision,

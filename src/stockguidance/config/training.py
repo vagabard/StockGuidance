@@ -6,7 +6,7 @@ from stockguidance.market_data.identity import mapping
 from stockguidance.models.specification import ModelSpec
 from stockguidance.preprocessing import PreprocessingSpec
 from stockguidance.targets.specification import TargetKind, TargetSpec, TargetSpecV2
-from stockguidance.training.configuration import DeviceChoice, OptimizerChoice, Precision, TrainingConfig
+from stockguidance.training.configuration import DeviceChoice, LossObjective, LossSpec, OptimizerChoice, Precision, TrainingConfig
 
 
 def number(value: object) -> float:
@@ -21,6 +21,19 @@ def boolean(value: object) -> bool:
 	return value
 
 
+def decode_loss(value: object) -> LossSpec:
+	fields = mapping(value)
+	allowed = {"objective", "version", "pair_block_size"}
+	if set(fields) - allowed:
+		raise ValueError("Unknown loss configuration fields")
+	defaults = LossSpec().to_mapping()
+	fields = {**defaults, **fields}
+	pair_block_size = fields["pair_block_size"]
+	if pair_block_size is not None and type(pair_block_size) is not int:
+		raise ValueError("Pair block size must be an integer or null")
+	return LossSpec(LossObjective(str(fields["objective"])), str(fields["version"]), pair_block_size)
+
+
 def decode_training_configuration(value: object, model: object) -> TrainingConfig:
 	fields = mapping(value)
 	defaults = asdict(TrainingConfig())
@@ -32,6 +45,7 @@ def decode_training_configuration(value: object, model: object) -> TrainingConfi
 	model_defaults = mapping(json.loads(json.dumps(asdict(ModelSpec()))))
 	return TrainingConfig(
 		model=decode_model({**model_defaults, **model_fields}),
+		loss=decode_loss(fields["loss"]),
 		epochs=integer(fields["epochs"]), batch_size=integer(fields["batch_size"]),
 		learning_rate=number(fields["learning_rate"]), learning_rate_gamma=number(fields["learning_rate_gamma"]),
 		optimizer=OptimizerChoice(str(fields["optimizer"])), device=DeviceChoice(str(fields["device"])), precision=Precision(str(fields["precision"])),

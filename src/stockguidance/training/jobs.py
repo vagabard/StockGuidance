@@ -2,6 +2,7 @@ from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 import json
 from pathlib import Path
+from typing import TYPE_CHECKING, cast
 
 from stockguidance.artifacts.decoding import decode_features, exact_mapping
 from stockguidance.calendar.clock import SystemClock
@@ -22,7 +23,7 @@ from stockguidance.database.raw_rebuild import RawPayloadProvider
 from stockguidance.database.configuration import load_database_configuration
 from stockguidance.database.simplified_runtime import source_from_database, target_schema_state
 from stockguidance.database.write_connections import WriteConnectionFactory
-from stockguidance.features.specification import FeatureSpec
+from stockguidance.features.specification import FeatureSpec, FeatureSpecV2, FeatureSpecification
 from stockguidance.market_data.history import HistoryBoundary, UnknownHistoryBoundary
 from stockguidance.market_data.availability import AvailabilityPolicy
 from stockguidance.market_data.history_store import JsonHistoryStore
@@ -35,13 +36,16 @@ from stockguidance.training.configuration import TrainingConfig
 from stockguidance.training.result import TrainingResult
 from stockguidance.workflows.train_model import HistoryTrainingRequest, train_from_history
 from stockguidance.workflows.simplified_training import execute_simplified_training
+
+if TYPE_CHECKING:
+	from stockguidance.training.configured import ConfiguredTrainingJob
 from stockguidance.market_data.providers.configured_polygon import ConfiguredPolygonProvider
 
 
 @dataclass(frozen=True)
 class TrainingJob:
 	source: SourceConfig
-	features: FeatureSpec
+	features: FeatureSpecification
 	configuration: TrainingConfig
 	start: date
 	end: date
@@ -59,6 +63,9 @@ class TrainingJob:
 
 def load_job(path: Path) -> TrainingJob:
 	fields = mapping(json.loads(path.read_text(encoding="utf-8")))
+	if fields.get("contract_version") == "training-job-v2":
+		from stockguidance.training.configured import load_configured_job
+		return load_configured_job(path)  # type: ignore[return-value]
 	required = ("source", "data_root", "database_config", "features", "model", "training", "start_date", "end_date", "training_cutoff", "publication_delay_minutes", "publication_evidence", "decision_minutes_before_close", "evaluation")
 	if set(fields) - {*required, "availability_policy", "data_snapshot", "target", "preprocessing"} or any(name not in fields for name in required):
 		raise ValueError("Incomplete or unsupported training job fields")
@@ -137,6 +144,9 @@ def execute_job(
 	provider: RawPayloadProvider | None = None,
 	clock: Clock | None = None,
 ) -> TrainingResult:
+	if hasattr(job, "date_plan") and hasattr(job, "feature_spec"):
+		from stockguidance.training.configured import execute_configured_training
+		return execute_configured_training(cast("ConfiguredTrainingJob", job), artifact_path, connect=connect, provider=provider, clock=clock, checkpoint=checkpoint_path is not None, resume_from=resume_from).training
 	connection = connect or MySQLConnectionFactory()
 	names = load_database_configuration(job.source.database_config).load_table_names()
 	try:
@@ -155,5 +165,5 @@ def execute_job(
 			provider = ConfiguredPolygonProvider()
 		return execute_simplified_training(job, artifact_path, connect=connection, provider=provider, clock=clock, checkpoint_path=checkpoint_path, resume_from=resume_from)
 	history = open_job_history(job, connect=connection)
-	request = HistoryTrainingRequest(history.decisions, job.cutoff, job.features, job.target, job.configuration, artifact_path, history.evaluation_decisions, job.evaluation_cutoff, checkpoint_path, resume_from, job.availability_policy, job.data_snapshot)
+	request = HistoryTrainingRequest(history.decisions, job.cutoff, job.features, job.target, job.configuration, artifact_path, history.evaluation_decisions, job.evaluation_cutoff, checkpoint_path, resume_from, job.availability_policy, job.data_snapshot, job.preprocessing)
 	return train_from_history(request, history.boundary, history.calendar, job.publication, history.repository)

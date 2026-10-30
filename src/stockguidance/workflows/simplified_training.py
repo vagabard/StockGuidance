@@ -12,11 +12,12 @@ from stockguidance.calendar.exchange import ExchangeCalendar
 from stockguidance.config.source import SourceConfig
 from stockguidance.database.write_connections import WriteConnectionFactory
 from stockguidance.database.raw_rebuild import RawPayloadProvider
-from stockguidance.features.specification import FeatureSpec
+from stockguidance.features.specification import FeatureSpecification
 from stockguidance.market_data.availability import AvailabilityPolicy
 from stockguidance.market_data.publication import DailyPublicationPolicy
 from stockguidance.targets.specification import TargetSpecification
 from stockguidance.training.configuration import TrainingConfig
+from stockguidance.preprocessing import PreprocessingSpec
 from stockguidance.training.result import TrainingResult
 from stockguidance.workflows.simplified_readiness import (
 	SimplifiedCloseRepository,
@@ -29,7 +30,7 @@ class SimplifiedTrainingJob(Protocol):
 	@property
 	def source(self) -> SourceConfig: ...
 	@property
-	def features(self) -> FeatureSpec: ...
+	def features(self) -> FeatureSpecification: ...
 	@property
 	def configuration(self) -> TrainingConfig: ...
 	@property
@@ -54,6 +55,8 @@ class SimplifiedTrainingJob(Protocol):
 	def availability_policy(self) -> AvailabilityPolicy: ...
 	@property
 	def data_snapshot(self) -> datetime | None: ...
+	@property
+	def preprocessing(self) -> PreprocessingSpec: ...
 
 
 def _calendar(job: SimplifiedTrainingJob) -> ExchangeCalendar:
@@ -107,6 +110,7 @@ def execute_simplified_training(
 		resume_from,
 		job.availability_policy,
 		job.data_snapshot,
+		job.preprocessing,
 	)
 	training = train_from_history(request, result.boundary, calendar, job.publication, repository)
 	# The dataset revision already includes every read row.  Keep the explicit

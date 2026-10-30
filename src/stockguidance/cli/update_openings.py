@@ -9,6 +9,7 @@ from stockguidance.database.connections import MySQLConnectionFactory
 from stockguidance.market_data.opening_refresh import OpeningRefresh
 from stockguidance.market_data.opening_store import OpeningStore
 from stockguidance.market_data.providers.configured_openings import ConfiguredOpeningProvider
+from stockguidance.features.specification import FeatureSpec
 from stockguidance.training.jobs import load_job, open_job_history
 
 
@@ -19,6 +20,8 @@ def main(argv: list[str] | None = None) -> int:
 	arguments = parser.parse_args(argv)
 	try:
 		job = load_job(arguments.config)
+		if not isinstance(job.features, FeatureSpec):
+			raise ValueError("Opening capture requires legacy explicit feature semantics")
 		history = open_job_history(job, connect=MySQLConnectionFactory())
 		entry = history.calendar.session(arguments.session)
 		clock = SystemClock()

@@ -1,0 +1,103 @@
+{
+  "contract_version": "training-job-v2",
+  "source": {
+    "provider": "fixture",
+    "endpoint": "daily-closes",
+    "market": "us-stocks",
+    "universe": "fixture-full-universe",
+    "adjustment": "adjusted",
+    "interval": "1d"
+  },
+  "data_root": "fixture-data",
+  "database_config": "fixture-db.id",
+  "date_range": {
+    "start": {"date": "2024-07-03"},
+    "end": {"date": "2024-07-05"}
+  },
+  "evaluation_range": {
+    "start": {"date": "2024-07-09"},
+    "end": {"date": "2024-07-11"}
+  },
+  "dependencies": {
+    "training_end_gap_sessions": 0,
+    "simulation_horizon_sessions": 3
+  },
+  "membership": {
+    "ordered_ticker_ids": null,
+    "filters": {}
+  },
+  "features": {
+    "lookback_sessions": 1,
+    "channels": ["relative_close"],
+    "signal_mode": "previous_close"
+  },
+  "target": {
+    "kind": "raw_return",
+    "window_sessions": null
+  },
+  "preprocessing": {
+    "version": "preprocessing-v2",
+    "input": "standard",
+    "output": "min_max",
+    "input_axis": "flattened_input_coordinate",
+    "output_axis": "one_shared_scalar",
+    "fit_scope": "eligible_training_samples_only"
+  },
+  "model": {
+    "architecture": "mlp",
+    "hidden_widths": [],
+    "activation": "leaky_relu",
+    "layer_types": ["linear"],
+    "bias": "all",
+    "layer_normalization": true,
+    "final_activation": "none",
+    "implementation_version": "stockguidance-models-v2",
+    "hidden_activations": null,
+    "shared_hidden_activation": "leaky_relu"
+  },
+  "loss": {
+    "objective": "rmse",
+    "version": "loss-v2",
+    "pair_block_size": null
+  },
+  "training": {
+    "epochs": 1,
+    "batch_size": 1,
+    "learning_rate": 0.01,
+    "learning_rate_gamma": 1.0,
+    "optimizer": "adam",
+    "device": "cpu",
+    "precision": "fp32",
+    "seed": 17,
+    "shuffle": false,
+    "num_workers": 0,
+    "pin_memory": false
+  },
+  "publication": {
+    "delay_minutes": 15,
+    "evidence": "Fixture-only publication policy"
+  },
+  "decision_minutes_before_close": 30,
+  "availability_policy": "strict",
+  "data_snapshot": null,
+  "calendar": {
+    "name": "XNYS",
+    "start": "2024-07-01",
+    "end": "2024-07-11"
+  },
+  "coverage": {
+    "snapshot_id": "stage8-fixture-snapshot",
+    "revision": "stage8-fixture-revision",
+    "verified_sessions": [
+      "2024-07-01",
+      "2024-07-02",
+      "2024-07-03",
+      "2024-07-05",
+      "2024-07-08",
+      "2024-07-09",
+      "2024-07-10",
+      "2024-07-11"
+    ]
+  },
+  "runs_root": "runs"
+}

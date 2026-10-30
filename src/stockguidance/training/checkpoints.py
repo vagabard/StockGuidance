@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 from stockguidance.artifacts.weights import validated_state
 from stockguidance.market_data.atomic import atomic_write
 from stockguidance.market_data.identity import content_id, mapping
-from stockguidance.training.configuration import TrainingConfig
+from stockguidance.training.configuration import LossObjective, TrainingConfig
 
 if TYPE_CHECKING:
 	import torch
@@ -18,19 +18,29 @@ if TYPE_CHECKING:
 	from torch.optim.lr_scheduler import ExponentialLR
 
 
-def checkpoint_identity(config: TrainingConfig, revision: str, *, device: str, precision: str, framework_version: str, preprocessing_identity: str | None = None) -> str:
+def checkpoint_identity(config: TrainingConfig, revision: str, *, device: str, precision: str, framework_version: str, preprocessing_identity: str | None = None, semantics_identity: str | None = None, universe_identity: str | None = None) -> str:
 	settings = asdict(config)
 	del settings["epochs"]
-	payload: dict[str, object] = {"schema": "training-checkpoint-1" if preprocessing_identity is None else "training-checkpoint-2", "configuration": settings, "data_revision": revision, "effective_device": device, "effective_precision": precision, "framework_version": framework_version}
+	settings["model"] = config.model.to_mapping()
+	if config.loss.objective is LossObjective.MAE and config.loss.version == "mae-v1":
+		del settings["loss"]
+	else:
+		settings["loss"] = config.loss.to_mapping()
+	schema = "training-checkpoint-3" if semantics_identity is not None or universe_identity is not None else "training-checkpoint-1" if preprocessing_identity is None else "training-checkpoint-2"
+	payload: dict[str, object] = {"schema": schema, "configuration": settings, "data_revision": revision, "effective_device": device, "effective_precision": precision, "framework_version": framework_version}
 	if preprocessing_identity is not None:
 		payload["preprocessing_identity"] = preprocessing_identity
+	if semantics_identity is not None:
+		payload["semantics_identity"] = semantics_identity
+	if universe_identity is not None:
+		payload["universe_identity"] = universe_identity
 	return content_id(payload)
 
 
 def save_checkpoint(path: Path, identity: str, epoch: int, model: nn.Module, optimizer: Optimizer, scheduler: ExponentialLR, scaler: GradScaler, generator: torch.Generator, *, schema: str = "stockguidance-checkpoint-1") -> None:
 	import torch
 
-	if schema not in ("stockguidance-checkpoint-1", "stockguidance-checkpoint-2"):
+	if schema not in ("stockguidance-checkpoint-1", "stockguidance-checkpoint-2", "stockguidance-checkpoint-3"):
 		raise ValueError("Unsupported checkpoint schema")
 	state = {"schema": schema, "identity": identity, "epoch": epoch, "model": validated_state(model.state_dict(), model), "optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict(), "scaler": scaler.state_dict(), "rng": torch.get_rng_state(), "loader_rng": generator.get_state(), "cuda_rng": torch.cuda.get_rng_state_all() if next(model.parameters()).device.type == "cuda" else []}
 	output = BytesIO()

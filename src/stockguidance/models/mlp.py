@@ -17,13 +17,16 @@ def mlp_type() -> type[nn.Module]:
 	from torch import nn
 
 	class MultiLayerLinearNet(nn.Module):
-		def __init__(self, input_size: int, output_size: int, hidden_layers: list[int], activation_factory: Callable[[], nn.Module] | None = None, final_activation: Callable[[], nn.Module] | None = None, num_layers: int = 3, layer_types: list[str] | None = None, sequence_length: int = 1, bias_mode: str = "all", layer_normalization: bool = True) -> None:
+		def __init__(self, input_size: int, output_size: int, hidden_layers: list[int], activation_factory: Callable[[], nn.Module] | None = None, final_activation: Callable[[], nn.Module] | None = None, num_layers: int = 3, layer_types: list[str] | None = None, sequence_length: int = 1, bias_mode: str = "all", layer_normalization: bool = True, activation_factories: list[Callable[[], nn.Module]] | tuple[Callable[[], nn.Module], ...] | None = None) -> None:
 			super().__init__()
 			self.input_size, self.output_size = input_size, output_size
 			self.num_layers, self.layer_types = num_layers, layer_types
 			self.sequence_length, self.bias_mode = sequence_length, bias_mode
 			self.layer_normalization = layer_normalization
 			activation_factory = activation_factory or nn.ReLU
+			hidden_activation_factories = list(activation_factories) if activation_factories is not None else [activation_factory] * max(0, num_layers - 1)
+			if len(hidden_activation_factories) != max(0, num_layers - 1):
+				raise ValueError("Hidden activation count must match hidden layer count")
 			widths = [width if width > 0 else input_size for width in hidden_layers] or [input_size]
 			widths.extend([widths[-1]] * max(0, num_layers - 1 - len(widths)))
 			widths = widths[:max(0, num_layers - 1)]
@@ -34,17 +37,20 @@ def mlp_type() -> type[nn.Module]:
 				if layer_index < num_layers - 1:
 					if layer_normalization and input_size > 5000:
 						layers.append(nn.LayerNorm(output_width))
-					layers.append(activation_factory())
+					layers.append(hidden_activation_factories[layer_index]())
 			if final_activation is not None:
 				layers.append(final_activation())
 			self.net = nn.Sequential(*layers)
-			self._initialize_linear_layers(activation_factory(), sigmoid_range_type())
+			self._initialize_linear_layers(hidden_activation_factories, sigmoid_range_type(), activation_factory)
 
-		def _initialize_linear_layers(self, sample_act: nn.Module, sigmoid_range_type: type[nn.Module]) -> None:
-			family = self._resolve_init_family(sample_act, sigmoid_range_type)
+		def _initialize_linear_layers(self, activation_factories: list[Callable[[], nn.Module]], sigmoid_range_type: type[nn.Module], fallback_factory: Callable[[], nn.Module]) -> None:
+			linear_index = 0
 			for layer in self.net:
 				if not isinstance(layer, nn.Linear) or isinstance(layer, random_percent_type()):
 					continue
+				factory = activation_factories[min(linear_index, len(activation_factories) - 1)] if activation_factories else fallback_factory
+				sample_act = factory()
+				family = self._resolve_init_family(sample_act, sigmoid_range_type)
 				if family == "xavier":
 					nn.init.xavier_uniform_(layer.weight)
 				elif family == "kaiming_leaky_relu":
@@ -53,6 +59,7 @@ def mlp_type() -> type[nn.Module]:
 					nn.init.kaiming_uniform_(layer.weight, a=0.0, mode="fan_in", nonlinearity="relu")
 				if layer.bias is not None:
 					nn.init.zeros_(layer.bias)
+				linear_index += 1
 
 		def _resolve_init_family(self, sample_act: nn.Module, sigmoid_range_type: type[nn.Module]) -> str:
 			if isinstance(sample_act, (nn.Sigmoid, nn.Tanh, nn.Tanhshrink, sigmoid_range_type)):

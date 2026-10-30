@@ -18,7 +18,14 @@ def predict_sample(artifact: LoadedModel | LoadedEnsemble, sample: Sample) -> tu
 
 	import torch
 
-	inputs = torch.tensor(sample.features.values, dtype=torch.float32).reshape(1, -1)
+	import numpy as np
+
+	values = np.asarray(sample.features.values, dtype=np.float64).reshape(1, -1)
+	preprocessing = members[0].metadata.preprocessing if members[0].metadata.preprocessing is not None else None
+	if preprocessing is not None:
+		preprocessing.validate_for(sample.features.specification, sample.target_specification)
+		values = preprocessing.transform_inputs(values)
+	inputs = torch.tensor(values, dtype=torch.float32)
 	if inputs.shape != (1, semantics.features.input_size) or not torch.isfinite(inputs).all():
 		raise ValueError("Invalid inference input layout or values")
 	scores = torch.zeros((1, len(semantics.features.ticker_ids)), dtype=torch.float32)
@@ -31,4 +38,7 @@ def predict_sample(artifact: LoadedModel | LoadedEnsemble, sample: Sample) -> tu
 			scores += weight * outputs
 	if not torch.isfinite(scores).all():
 		raise ValueError("Ensemble emitted non-finite outputs")
+	if preprocessing is not None:
+		inverted = preprocessing.inverse_outputs(scores.cpu().numpy())
+		return tuple(float(value) for value in inverted[0])
 	return tuple(float(value) for value in scores[0])

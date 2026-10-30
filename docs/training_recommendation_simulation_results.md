@@ -670,3 +670,157 @@ preprocessing with configured training, checkpoint/artifact export, and strict
 compatibility validation before recommendations or simulation consume these
 new semantics.
 
+## Stage 7 — model controls, RMSE, and ranking objectives
+
+Status: complete for the versioned model controls, typed loss configuration,
+bounded pairwise objective, target-space metric aggregation, focused tests, and
+documentation. No database preparation or migration, provider request, live
+data download, trade submission, credential output, or commit was performed.
+
+### Changed interfaces
+
+- `ModelSpec` accepts `stockguidance-models-v2` per-hidden-layer activation
+  tuples, `shared_hidden_activation` shorthand, and a typed selectable final
+  activation. `resolved_hidden_activations`, `resolved_final_activation`, and
+  `to_mapping()` keep dimensions derived from the explicit feature sample and
+  preserve the strict v1 serialized model shape.
+- The MLP factory now constructs the resolved activation sequence and final
+  activation. The existing conv/transformer architecture explicitly rejects
+  incompatible v2 activation overrides; no stock-token, variable-order, or
+  permutation handling was added.
+- `LossSpec` and `LossObjective` add versioned `mae-v1` compatibility plus
+  `loss-v2` RMSE and pairwise ranking objectives. Job decoding accepts the
+  typed loss block and defaults omitted loss settings to legacy MAE.
+- `stockguidance.training.losses` provides exact RMSE, bounded pairwise
+  `softplus(-sign(target_delta) * score_delta)`, pair counts, ordering counts,
+  and aggregate metrics. Pair blocks do not sample pairs and aggregate by
+  total squared error/count or total pair loss/count across dates and batches.
+- `fit_epoch_metrics` and `evaluate_metrics` calculate MAE/RMSE in target
+  units, invert the shared fitted output scale before objective/metric work,
+  skip pairless dates, reject an entirely pairless ranking dataset, and keep
+  finite zero-error RMSE gradients. Existing scalar `fit_epoch`/`evaluate`
+  wrappers remain available.
+- `TrainingResult`, epoch metrics, and `training_payload` now separately
+  record objective loss/version/units, target-space MAE/RMSE, non-tied pair
+  count, ordering accuracy, and raw-return metrics. Raw-return metrics remain
+  null for transformed targets that cannot be inverted to raw returns.
+- v1 artifact model metadata and checkpoint identities retain their legacy
+  shape; v2 model/loss settings are included in compatibility identities.
+
+### Accepted decisions and semantics
+
+- Existing jobs retain shared hidden activation, unrestricted output, v1 MAE,
+  and their original serialized meanings. Changed model controls require
+  `stockguidance-models-v2`; RMSE and ranking require `loss-v2`.
+- Ranking is within each decision-session target row over non-tied unordered
+  ticker pairs only. Pairless rows are skipped; an entirely pairless training
+  or evaluation set fails clearly. `pair_block_size` bounds temporary work and
+  is not a silent approximation or sampling policy.
+- RMSE is `sqrt(total_squared_error / total_value_count)`, never an average of
+  per-batch RMSE values. Ordering accuracy counts strictly correctly ordered
+  non-tied pairs, so predicted ties are not counted as correct.
+- Metrics and ranking operate after optional output normalization inversion;
+  transformed target scores are reported as `target_score` rather than
+  fractional raw returns. Stable ticker order and the existing tensor layout
+  remain unchanged.
+
+### Verification commands and actual results
+
+1. `.venv\Scripts\python.exe -m pytest tests\training\test_stage7_objectives.py tests\models\test_stage7_controls.py -q` — passed, 9 tests.
+2. `.venv\Scripts\python.exe -m pytest tests\models tests\training tests\artifacts tests\reporting tests\configuration tests\preprocessing tests\targets -q` — passed, 189 tests in 16.61s, with 15 existing pandas timezone/Torch transformer warnings.
+3. `.venv\Scripts\python.exe -m pytest tests\architecture tests\recommendations tests\simulation -q` — passed, 154 tests in 35.03s, with 20 existing pandas timezone warnings.
+4. `.venv\Scripts\python.exe -m mypy src\stockguidance` — passed, no issues in 304 source files.
+5. `.venv\Scripts\python.exe -m py_compile src\stockguidance\models\specification.py src\stockguidance\models\mlp.py src\stockguidance\models\factory.py src\stockguidance\artifacts\decoding.py src\stockguidance\training\configuration.py src\stockguidance\training\losses.py src\stockguidance\training\engine.py src\stockguidance\training\service.py src\stockguidance\training\result.py src\stockguidance\reporting\training.py` — passed.
+6. `git diff --check` — passed; only existing LF/CRLF conversion warnings were emitted.
+
+### Standalone commands
+
+```powershell
+.venv\Scripts\python.exe -m pytest tests\training\test_stage7_objectives.py tests\models\test_stage7_controls.py -q
+.venv\Scripts\python.exe -m mypy src\stockguidance
+```
+
+These commands are local CPU/unit checks and do not create a database, contact
+a provider, fit against live data, or submit trades.
+
+### Remaining limitations and next-stage prerequisites
+
+Stage 7 does not compose automatic date/universe/preparation orchestration,
+bind transformed targets/scalers/loss metadata into a new standalone
+inference-artifact schema, or create saved training runs. The current artifact
+codec can round-trip the model-control record, but Stage 8 must define the
+versioned artifact metadata that binds model/loss controls to target,
+preprocessing, universe, and layout identities. Stage 7 also does not add
+raw-return reconstruction for z-score targets; those metrics correctly remain
+unavailable.
+
+Stage 8 is next: compose the completed Stages 1–7 services into configured
+training, readiness/preparation, automatic universe selection, v2 artifact and
+checkpoint compatibility, and saved-run export. Recommendations, simulation,
+replay, and visualization remain later stages and were not implemented here.
+
+## Stage 8 — configured training and standalone artifacts
+
+Status: complete for the configured training resolver/runner, explicit
+preparation hooks, verified date and coverage composition, automatic stable-ID
+universe selection, fitted preprocessing integration, v2 standalone artifact
+metadata, semantic checkpoint resume, saved-run recording, preview validation,
+and focused tests. No production database, provider, live-data refresh, schema
+migration, trade submission, credential output, or commit was performed.
+
+### Changed interfaces
+
+- `ConfiguredTrainingJob` and `load_configured_job` implement the sanitized
+  `training-job-v2` contract. `resolve_configured_training` is a pure preview
+  path; `validate_configured_preparation` and `prepare_configured_training`
+  expose independently callable injected preparation/readiness steps.
+- Configured execution composes the Stage 2 dependency plan, explicit coverage,
+  Stage 4 universe selection, Stage 5 sample construction, Stage 6 fitted
+  preprocessing, Stage 7 model/loss controls, typed training/export, and the
+  Stage 1 run directory. Run failures are retained with resolution,
+  preparation, universe, training, or export stage labels.
+- Automatic universes use sorted stable IDs; explicit `ordered_ticker_ids`
+  retain their declared order. `FeatureSpecV2`, `ArtifactUniverse`, and fitted
+  preprocessing preserve the exact ticker-to-feature/output mapping and reject
+  same-width reorderings.
+- `stockguidance-inference-2` archives strictly bind feature layout, target,
+  scaler, model, loss, universe labels/evidence, availability, and provenance.
+  `stockguidance-inference-1` remains loadable with its original metadata
+  contract. Configured checkpoints use semantic/universe-bound schema 3;
+  v1/v2 preprocessing-only checkpoint compatibility remains explicit.
+- `train_model --preview` resolves a v2 job without fitting, database access,
+  provider access, or artifact export. Requested artifact paths remain available
+  as a copy of the run-owned artifact while all attempt outputs live below the
+  configured runs root.
+
+### Accepted decisions and semantics
+
+- Training-end gaps, fitting cutoffs, mature label exits, and holdout label
+  cutoffs are separate typed values. Holdout decisions follow the fitting
+  cutoff, and normalization is fitted only from eligible training samples.
+- Database-backed readiness remains injected and typed. The existing bounded
+  standalone preparation/SQL rendering tools remain separate from code-side
+  calculation; Stage 8 does not execute SQL or alter schemas by itself.
+- V1 explicit-ticker jobs retain v1 defaults and artifact readability. No stock
+  descriptors, variable ticker ordering, embeddings, permutation-invariant
+  models, or new transformer paths were added.
+
+### Verification commands and actual results
+
+1. `.venv\Scripts\python.exe -m pytest tests\training\test_stage8_orchestration.py -q` — passed, 4 tests, 8 existing pandas timezone warnings.
+2. `.venv\Scripts\python.exe -m pytest tests\training tests\artifacts tests\models tests\runs tests\cli\test_opening_frontends.py -q` — passed, 155 tests, 31 existing pandas/Torch warnings, 23.62s.
+3. `.venv\Scripts\python.exe -m pytest tests\architecture tests\documentation tests\configuration tests\preprocessing tests\targets -q` — passed, 66 tests, 8 existing pandas timezone warnings, 7.11s.
+4. `.venv\Scripts\python.exe -c "from pathlib import Path; from stockguidance.training.jobs import load_job; job=load_job(Path('examples/stage8/configured-training.json')); print(job.contract_version, job.target.version, job.configuration.model.implementation_version)"` — passed and printed `training-job-v2 raw_return-v2 stockguidance-models-v2`.
+5. `.venv\Scripts\python.exe -m stockguidance.cli.train_model --config examples\stage8\configured-training.json --preview` — passed with exit 0 and printed the resolved `stockguidance-training-preview-1` plan; no provider/database access occurred.
+6. `.venv\Scripts\python.exe -m mypy src\stockguidance` — passed, no issues in 305 source files.
+7. `.venv\Scripts\python.exe -m py_compile` over the affected Stage 8 artifact, CLI, inference, training, workflow, recommendation, and simulation modules — passed.
+8. `git diff --check` — passed; only Git’s existing LF/CRLF conversion warnings were emitted.
+
+### Remaining limitations and next-stage prerequisites
+
+Stage 8 does not score latest data for recommendations, select recommendation
+medians/top-n outputs, simulate portfolios, replay saved scores, rerun child
+runs, or visualize reports. Stage 9 must consume the artifact-owned ticker,
+target, and preprocessing metadata without rediscovering model dimensions and
+must save recommendation failures and complete score/eligibility outputs.
+

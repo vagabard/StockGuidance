@@ -24,7 +24,7 @@ def export_artifact(path: Path, model: nn.Module, metadata: ArtifactMetadata) ->
 	weights = weights_bytes(model)
 	payload = {"metadata": metadata_payload(metadata), "weights_sha256": sha256(weights).hexdigest()}
 	identity = content_id(payload)
-	content = archive_bytes({"schema": "stockguidance-inference-1", "artifact_id": identity, "payload": payload}, {"weights.pt": weights})
+	content = archive_bytes({"schema": "stockguidance-inference-2" if metadata.versioned else "stockguidance-inference-1", "artifact_id": identity, "payload": payload}, {"weights.pt": weights})
 	loaded = load_model_bytes(content)
 	parameter = next(model.parameters())
 	probe = torch.linspace(-0.1, 0.1, metadata.semantics.features.input_size, dtype=torch.float32).reshape(1, -1)

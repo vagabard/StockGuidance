@@ -25,9 +25,43 @@ class Precision(StrEnum):
 	BF16 = "bf16"
 
 
+class LossObjective(StrEnum):
+	MAE = "mae"
+	RMSE = "rmse"
+	PAIRWISE_RANKING = "pairwise_ranking"
+
+
+@dataclass(frozen=True)
+class LossSpec:
+	"""Versioned objective selection for target-space training."""
+
+	objective: LossObjective = LossObjective.MAE
+	version: str = "mae-v1"
+	pair_block_size: int | None = None
+
+	def __post_init__(self) -> None:
+		require_enum(self.objective, LossObjective, "loss objective")
+		if self.version not in ("mae-v1", "loss-v2"):
+			raise ValueError("Unsupported loss specification version")
+		if self.objective is LossObjective.MAE and self.version == "mae-v1" and self.pair_block_size is not None:
+			raise ValueError("The v1 MAE loss does not accept pairwise settings")
+		if self.objective is not LossObjective.MAE and self.version != "loss-v2":
+			raise ValueError("RMSE and pairwise ranking require loss-v2")
+		if self.objective is LossObjective.PAIRWISE_RANKING:
+			if self.pair_block_size is None:
+				object.__setattr__(self, "pair_block_size", 128)
+			require_positive_int(self.pair_block_size, "pair block size")
+		elif self.pair_block_size is not None:
+			require_positive_int(self.pair_block_size, "pair block size")
+
+	def to_mapping(self) -> dict[str, object]:
+		return {"objective": self.objective.value, "version": self.version, "pair_block_size": self.pair_block_size}
+
+
 @dataclass(frozen=True)
 class TrainingConfig:
 	model: ModelSpec = ModelSpec()
+	loss: LossSpec = LossSpec()
 	epochs: int = 80
 	batch_size: int = 256
 	learning_rate: float = 1e-7
@@ -43,6 +77,8 @@ class TrainingConfig:
 	def __post_init__(self) -> None:
 		if not isinstance(self.model, ModelSpec):
 			raise ValueError("Training requires an explicit model specification")
+		if not isinstance(self.loss, LossSpec):
+			raise ValueError("Training requires an explicit loss specification")
 		for name in ("epochs", "batch_size"):
 			require_positive_int(getattr(self, name), name)
 		for name in ("learning_rate", "learning_rate_gamma"):
