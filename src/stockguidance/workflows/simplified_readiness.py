@@ -42,7 +42,7 @@ from stockguidance.database.raw_rebuild import RawPayloadProvider
 from stockguidance.database.simplified_schema import require_simplified_schema
 from stockguidance.database.table_names import TableNames, TableRole, load_table_names, quote_identifier
 from stockguidance.database.write_connections import WriteConnectionFactory
-from stockguidance.features.specification import FeatureSpec
+from stockguidance.features.specification import FeatureSpec, FeatureSpecV2, FeatureSpecification
 from stockguidance.market_data.availability import AvailabilityPolicy, ObservationTiming
 from stockguidance.market_data.history import HistoryBoundary, HistoryProvenance
 from stockguidance.market_data.identity import content_id
@@ -156,9 +156,10 @@ class RequiredSessionScope:
 	feature_sessions: tuple[TradingSession, ...]
 	label_sessions: tuple[TradingSession, ...]
 	normalization_warmup: int
+	feature_dependency_sessions: tuple[TradingSession, ...] = ()
 
 	def __post_init__(self) -> None:
-		for name, values in (("sessions", self.sessions), ("feature_sessions", self.feature_sessions), ("label_sessions", self.label_sessions)):
+		for name, values in (("sessions", self.sessions), ("feature_sessions", self.feature_sessions), ("label_sessions", self.label_sessions), ("feature_dependency_sessions", self.feature_dependency_sessions)):
 			if not isinstance(values, tuple) or any(not isinstance(value, TradingSession) for value in values):
 				raise ValueError(f"{name} must contain trading sessions")
 		if type(self.normalization_warmup) is not int or self.normalization_warmup < 0:
@@ -168,7 +169,7 @@ class RequiredSessionScope:
 def required_session_scope(
 	calendar: SessionCalendar,
 	decisions: tuple[DecisionTiming, ...],
-	features: FeatureSpec,
+	features: FeatureSpecification,
 	_target: TargetSpec,
 	*,
 	include_labels: bool,
@@ -184,7 +185,7 @@ def required_session_scope(
 		raise ValueError("Readiness requires explicit chronological decisions")
 	if any(right.entry_session.sequence <= left.entry_session.sequence for left, right in zip(decisions, decisions[1:])):
 		raise ValueError("Readiness decisions must be chronological")
-	if not isinstance(features, FeatureSpec) or not isinstance(_target, TargetSpec):
+	if not isinstance(features, (FeatureSpec, FeatureSpecV2)) or not isinstance(_target, TargetSpec):
 		raise ValueError("Readiness requires current feature and target specifications")
 	if type(normalization_warmup) is not int or normalization_warmup < 0:
 		raise ValueError("normalization_warmup must be nonnegative")
@@ -192,21 +193,24 @@ def required_session_scope(
 		raise ValueError("extra_sessions must contain trading sessions")
 
 	feature: set[TradingSession] = set()
+	feature_dependencies: set[TradingSession] = set()
 	labels: set[TradingSession] = set()
 	for timing in decisions:
+		history_length = features.required_history_sessions if isinstance(features, FeatureSpecV2) else features.lookback_sessions
 		window = tuple(calendar.shift(timing.entry_session, offset) for offset in range(-features.lookback_sessions, 0))
 		feature.update(window)
+		feature_dependencies.update(calendar.shift(timing.entry_session, offset) for offset in range(-history_length, 0))
 		if include_labels:
 			labels.update((timing.entry_session, timing.exit_session))
 	feature.update(extra_sessions)
-	all_required = set(feature) | labels
+	all_required = set(feature) | feature_dependencies | labels
 	if not all_required:
 		raise ValueError("Readiness produced an empty session scope")
 	first = min(all_required, key=lambda item: item.sequence)
 	for offset in range(-normalization_warmup, 0):
 		all_required.add(calendar.shift(first, offset))
 	ordered = tuple(sorted(all_required, key=lambda item: item.sequence))
-	return RequiredSessionScope(ordered, tuple(sorted(feature, key=lambda item: item.sequence)), tuple(sorted(labels, key=lambda item: item.sequence)), normalization_warmup)
+	return RequiredSessionScope(ordered, tuple(sorted(feature, key=lambda item: item.sequence)), tuple(sorted(labels, key=lambda item: item.sequence)), normalization_warmup, tuple(sorted(feature_dependencies, key=lambda item: item.sequence)))
 
 
 def boundary_for_scope(source: SourceConfig, calendar: SessionCalendar, scope: RequiredSessionScope, established_at: datetime) -> HistoryBoundary:
@@ -431,7 +435,7 @@ class SimplifiedReadinessWorkflow:
 	def ensure(
 		self,
 		decisions: tuple[DecisionTiming, ...],
-		features: FeatureSpec,
+		features: FeatureSpecification,
 		target: TargetSpec,
 		*,
 		label_cutoff: datetime | None = None,

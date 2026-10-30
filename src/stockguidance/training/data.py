@@ -1,5 +1,6 @@
 from stockguidance.artifacts.contracts import ModelSemantics
 from stockguidance.datasets.training import TrainingDataset
+from stockguidance.features.specification import FeatureSpec
 from stockguidance.market_data.identity import content_id
 
 
@@ -7,6 +8,8 @@ def dataset_semantics(dataset: TrainingDataset) -> ModelSemantics:
 	if not isinstance(dataset, TrainingDataset) or not dataset.eligible:
 		raise ValueError("Training requires complete features and mature close-to-close outcomes")
 	first = dataset.eligible[0]
+	if not isinstance(first.features.specification, FeatureSpec):
+		raise ValueError("Configured feature semantics require the versioned v2 artifact contract")
 	return ModelSemantics(first.source, first.features.specification, first.target_specification, first.timing.entry_session.calendar_id, first.calendar_version, availability_policy=first.availability_policy)
 
 

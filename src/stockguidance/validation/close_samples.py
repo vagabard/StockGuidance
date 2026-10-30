@@ -79,11 +79,11 @@ def validate_close_samples(
 		elif sample.feature_state is not WindowState.EXPECTED_AVAILABLE:
 			category = FindingCategory.UNVERIFIED if sample.feature_state is WindowState.UNVERIFIED else FindingCategory.NOT_YET_AVAILABLE
 			findings.append(ValidationFinding(category, ValidationCheck.FEATURE, "Close window is not published by the pre-close decision", entry.session_date))
-		for issue in sample.features.issues:
-			if specification.signal_mode is SignalMode.ENTRY_OPEN and issue.session == entry:
+		for feature_issue in sample.features.issues:
+			if specification.signal_mode is SignalMode.ENTRY_OPEN and feature_issue.session == entry:
 				continue
-			category = FindingCategory(issue.state.value)
-			if issue.session not in requested and issue.state in {PriceState.MISSING, PriceState.UNVERIFIED}:
+			category = FindingCategory(feature_issue.state.value)
+			if feature_issue.session not in requested and feature_issue.state in {PriceState.MISSING, PriceState.UNVERIFIED}:
 				category = FindingCategory.NOT_ASSESSED
-			findings.append(ValidationFinding(category, ValidationCheck.FEATURE, issue.detail, entry.session_date, (symbols.get(issue.ticker_id, f"ticker_id={issue.ticker_id}"),), dependency_session_date=issue.session.session_date))
+			findings.append(ValidationFinding(category, ValidationCheck.FEATURE, feature_issue.detail, entry.session_date, (symbols.get(feature_issue.ticker_id, f"ticker_id={feature_issue.ticker_id}"),), dependency_session_date=feature_issue.session.session_date))
 	return tuple(findings), tuple(samples)

@@ -110,23 +110,30 @@ data was received later remains unavailable. No old availability or price is
 invented. Live supported history and publication entitlement remain unknown
 without operator evidence, as documented in the updater/validation guides.
 
-## Future normalized feature inputs
+## Configured rolling feature inputs
 
-The current training, inference, recommendation and simulation paths do not
-consume the stored z-score materializations. A future versioned feature adapter
-must record the z-score family, normalization window, calculation version,
-precision, availability policy and input layout in every sample, cache and
-artifact identity. Its warm-up scope must extend by the normalization window in
-exchange sessions in addition to the model's own number of timesteps; those are
-different concepts and must not be conflated. Training, inference,
-recommendation and simulation must eventually use the same adapter and
-availability decisions.
+`FeatureSpecV2` now connects the shared sample builder to prepared price,
+price-delta, raw-volume, and volume z-score channels. See
+[`feature_channels.md`](feature_channels.md) for the typed repository boundary,
+readiness rules, dependency arithmetic, and standalone volume-preparation
+commands. The z-score family, window, calculation version, precision,
+availability policy, revision, and explicit `(time, ticker, feature)` layout
+are part of the sample identity. Its warm-up scope extends by the rolling
+window in exchange sessions in addition to the model's own number of timesteps;
+those are different concepts and must not be conflated. Training and inference
+use the same configured adapter and availability decisions.
 
 A later artifact-owned encoding adapter may map stable database ticker IDs to a
 stock vocabulary. The vocabulary and the unknown-stock policy are intentionally
 not chosen in this release. Database IDs remain storage identities and never
 become vector offsets. No embedding class, encoding enum or network integration
 is added until that feature design is versioned and shared by all consumers.
+
+A future versioned feature adapter may add other prepared families only with an
+explicit calculation version, normalization window, availability policy, and
+input layout. Those identities must remain bound through the sample, cache and
+artifact identity; stable database ticker IDs remain identities and never
+become vector offsets.
 
 ## Validation and migration
 

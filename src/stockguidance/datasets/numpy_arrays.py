@@ -3,14 +3,14 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from stockguidance.datasets.training import TrainingDataset
-from stockguidance.features.specification import FeatureSpec
+from stockguidance.features.specification import FeatureSpecification
 
 if TYPE_CHECKING:
 	import numpy as np
 	from numpy.typing import NDArray
 
 
-def validate_arrays(features: object, targets: object, specification: FeatureSpec) -> None:
+def validate_arrays(features: object, targets: object, specification: FeatureSpecification) -> None:
 	import numpy as np
 
 	if not isinstance(features, np.ndarray) or not isinstance(targets, np.ndarray):

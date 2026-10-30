@@ -2,14 +2,16 @@ from datetime import datetime
 
 from stockguidance.calendar.decisions import DecisionTiming
 from stockguidance.calendar.protocols import SessionCalendar
+from stockguidance.calendar.sessions import TradingSession
 from stockguidance.config.validation import require_aware_datetime
 from stockguidance.database.repositories.closes import CloseData, CloseQuery, CloseRepository
 from stockguidance.database.repositories.sessions import SessionQuery
 from stockguidance.datasets.sample import Sample, TargetState
-from stockguidance.features.construction import FeatureValues, construct_features
+from stockguidance.features.channels import FeatureChannelData, FeatureChannelQuery, FeatureChannelRepository
+from stockguidance.features.construction import FeatureValues, construct_configured_features, construct_features
 from stockguidance.features.opening_values import opening_values
 from stockguidance.features.history_window import WindowState, plan_feature_history
-from stockguidance.features.specification import FeatureSpec, SignalMode
+from stockguidance.features.specification import FeatureChannel, FeatureSpec, FeatureSpecV2, FeatureSpecification, SignalMode
 from stockguidance.market_data.closes import PriceState
 from stockguidance.market_data.availability import AvailabilityPolicy
 from stockguidance.market_data.history import HistoryBoundary
@@ -20,17 +22,18 @@ from stockguidance.targets.specification import TargetSpec
 
 
 def build_sample(
-	specification: FeatureSpec, target: TargetSpec, timing: DecisionTiming,
+	specification: FeatureSpecification, target: TargetSpec, timing: DecisionTiming,
 	boundary: HistoryBoundary, calendar: SessionCalendar, publication: DailyPublicationPolicy,
-	repository: CloseRepository, *, label_cutoff: datetime | None = None,
+	repository: CloseRepository | None, *, label_cutoff: datetime | None = None,
 	availability_policy: AvailabilityPolicy = AvailabilityPolicy.STRICT, data_snapshot: datetime | None = None,
+	channel_repository: FeatureChannelRepository | None = None,
 ) -> Sample:
 	"""One construction path for inference and historical training/evaluation.
 
 	Only an explicit label cutoff authorizes outcome reads. Features always
 	retain their original decision cutoff, even during later training.
 	"""
-	if not isinstance(specification, FeatureSpec) or not isinstance(target, TargetSpec) or not isinstance(timing, DecisionTiming):
+	if not isinstance(specification, (FeatureSpec, FeatureSpecV2)) or not isinstance(target, TargetSpec) or not isinstance(timing, DecisionTiming):
 		raise ValueError("Sample construction requires explicit specifications and decision timing")
 	boundary.validate_for(boundary.source, calendar)
 	if not isinstance(availability_policy, AvailabilityPolicy):
@@ -47,7 +50,9 @@ def build_sample(
 	cutoff = timing.decision_cutoff if label_cutoff is None else label_cutoff
 	query_as_of = availability_policy.query_as_of(cutoff, data_snapshot)
 	window = plan_feature_history(calendar, boundary, specification, timing, publication)
-	sessions = set(window.sessions if window.state is WindowState.EXPECTED_AVAILABLE else ())
+	sessions: set[TradingSession] = set()
+	if window.state is WindowState.EXPECTED_AVAILABLE and (not isinstance(specification, FeatureSpecV2) or specification.close_channels or specification.requires_entry_open):
+		sessions.update(window.dependency_sessions if isinstance(specification, FeatureSpecV2) else window.sessions)
 	target_state = TargetState.NOT_REQUESTED
 	if label_cutoff is not None:
 		expected = tuple(publication.expected_at(session) for session in (timing.entry_session, timing.exit_session))
@@ -61,15 +66,30 @@ def build_sample(
 			target_state = TargetState.READY
 			sessions.update((timing.entry_session, timing.exit_session))
 	data = None
+	channel_data: FeatureChannelData | None = None
+	if isinstance(specification, FeatureSpecV2) and window.state is WindowState.EXPECTED_AVAILABLE and specification.external_channels:
+		if channel_repository is None:
+			raise ValueError("Configured stored channels require a feature channel repository")
+		channel_query = FeatureChannelQuery(boundary.source, specification, window.dependency_sessions, window.sessions, query_as_of)
+		channel_data = channel_repository.read(channel_query)
+		if not isinstance(channel_data, FeatureChannelData) or channel_data.query != channel_query:
+			raise ValueError("Feature channel repository changed the requested source, sessions, cutoff, or layout")
 	openings = None
 	if window.state is WindowState.EXPECTED_AVAILABLE and specification.signal_mode is SignalMode.ENTRY_OPEN:
+		if repository is None:
+			raise ValueError("Entry-open features require a close repository")
 		openings = opening_values(specification, timing, boundary, repository)
 	if sessions:
+		if repository is None:
+			raise ValueError("Close-backed features or labels require a close repository")
 		query = CloseQuery(SessionQuery(boundary, tuple(sorted(sessions, key=lambda session: session.sequence)), query_as_of), specification.ticker_ids)
 		data = repository.read(query)
 		if not isinstance(data, CloseData) or data.query != query:
 			raise ValueError("Close repository changed the requested source, sessions, cutoff, or ticker layout")
-	if window.state is WindowState.EXPECTED_AVAILABLE and data is not None:
+	if window.state is WindowState.EXPECTED_AVAILABLE and isinstance(specification, FeatureSpecV2):
+		features = construct_configured_features(specification, timing, window.sessions, data, channel_data, openings, availability_policy, publication)
+	elif window.state is WindowState.EXPECTED_AVAILABLE and data is not None:
+		assert isinstance(specification, FeatureSpec)
 		features = construct_features(specification, timing, window.sessions, data, openings, availability_policy, publication)
 	else:
 		features = FeatureValues(specification, window.sessions, None)
@@ -84,11 +104,16 @@ def build_sample(
 				target_state = TargetState.UNVERIFIED
 			else:
 				target_state = TargetState.UNAVAILABLE
-	feature_revision = content_id({"window_state": window.state.value, "history_start": boundary.history_start.isoformat()})
+	feature_revision = content_id({"window_state": window.state.value, "history_start": boundary.history_start.isoformat(), "dependency_sessions": [session.session_date.isoformat() for session in window.dependency_sessions]})
 	if data is not None and window.state is WindowState.EXPECTED_AVAILABLE:
 		feature_query = CloseQuery(SessionQuery(boundary, window.sessions, query_as_of), specification.ticker_ids)
 		feature_revision = CloseData(feature_query, tuple(item for item in data.observations if item.timing.session in window.sessions), tuple(issue for issue in data.issues if issue.session in window.sessions)).revision
 	if openings is not None:
 		feature_revision = content_id({"closes": feature_revision, "openings": openings.revision})
-	revision = content_id({"closes": feature_revision if data is None else data.revision, "openings": None if openings is None else openings.revision}) if openings is not None else feature_revision if data is None else data.revision
+	if channel_data is not None:
+		feature_revision = content_id({"closes": feature_revision, "channels": channel_data.revision_with_readiness})
+	if channel_data is not None:
+		revision = content_id({"closes": None if data is None else data.revision, "features": feature_revision, "openings": None if openings is None else openings.revision})
+	else:
+		revision = content_id({"closes": feature_revision if data is None else data.revision, "openings": None if openings is None else openings.revision}) if openings is not None else feature_revision if data is None else data.revision
 	return Sample(boundary.source, timing, features, window.state, target, targets, target_state, label_cutoff, feature_revision, revision, calendar.version, availability_policy, query_as_of)

@@ -1,12 +1,12 @@
 from stockguidance.calendar.decisions import DecisionTiming
 from stockguidance.database.repositories.closes import CloseRepository
-from stockguidance.features.specification import FeatureSpec
+from stockguidance.features.specification import FeatureSpecification
 from stockguidance.market_data.closes import CloseIssue, PriceState
 from stockguidance.market_data.history import HistoryBoundary
 from stockguidance.market_data.openings import OpeningData, OpeningQuery, OpeningRepository
 
 
-def opening_values(specification: FeatureSpec, timing: DecisionTiming, boundary: HistoryBoundary, repository: CloseRepository) -> OpeningData:
+def opening_values(specification: FeatureSpecification, timing: DecisionTiming, boundary: HistoryBoundary, repository: CloseRepository) -> OpeningData:
 	query = OpeningQuery(boundary, (timing.entry_session,), specification.ticker_ids, timing.decision_cutoff)
 	if isinstance(repository, OpeningRepository):
 		data = repository.read_openings(query)

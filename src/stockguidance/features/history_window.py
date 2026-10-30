@@ -4,7 +4,7 @@ from enum import StrEnum
 from stockguidance.calendar.decisions import DecisionTiming
 from stockguidance.calendar.protocols import SessionCalendar
 from stockguidance.calendar.sessions import TradingSession
-from stockguidance.features.specification import FeatureSpec
+from stockguidance.features.specification import FeatureSpec, FeatureSpecV2, FeatureSpecification
 from stockguidance.market_data.history import HistoryBoundary
 from stockguidance.market_data.publication import DailyPublicationPolicy
 
@@ -23,24 +23,27 @@ class FeatureHistoryWindow:
 	state: WindowState
 	sessions: tuple[TradingSession, ...]
 	first_usable_entry: TradingSession
+	dependency_sessions: tuple[TradingSession, ...] = ()
 
 
 def plan_feature_history(
-	calendar: SessionCalendar, boundary: HistoryBoundary, specification: FeatureSpec,
+	calendar: SessionCalendar, boundary: HistoryBoundary, specification: FeatureSpecification,
 	timing: DecisionTiming, publication: DailyPublicationPolicy,
 ) -> FeatureHistoryWindow:
 	boundary.validate_for(boundary.source, calendar)
 	if timing.entry_session != calendar.session(timing.entry_session.session_date):
 		raise ValueError("Decision entry does not match the authoritative calendar")
-	first = calendar.shift(calendar.session(boundary.history_start), specification.lookback_sessions)
+	history_length = specification.required_history_sessions if isinstance(specification, FeatureSpecV2) else specification.lookback_sessions
+	first = calendar.shift(calendar.session(boundary.history_start), history_length)
 	if timing.entry_session.sequence < first.sequence:
-		return FeatureHistoryWindow(WindowState.INSUFFICIENT_HISTORY, (), first)
+		return FeatureHistoryWindow(WindowState.INSUFFICIENT_HISTORY, (), first, ())
 	window = tuple(calendar.shift(timing.entry_session, offset) for offset in range(-specification.lookback_sessions, 0))
-	publication_times = tuple(publication.expected_at(session) for session in window)
+	dependency = tuple(calendar.shift(timing.entry_session, offset) for offset in range(-history_length, 0))
+	publication_times = tuple(publication.expected_at(session) for session in dependency)
 	if any(available_at is None for available_at in publication_times):
 		state = WindowState.UNVERIFIED
 	elif any(available_at is not None and available_at > timing.decision_cutoff for available_at in publication_times):
 		state = WindowState.NOT_YET_AVAILABLE
 	else:
 		state = WindowState.EXPECTED_AVAILABLE
-	return FeatureHistoryWindow(state, window, first)
+	return FeatureHistoryWindow(state, window, first, dependency)

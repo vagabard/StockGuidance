@@ -503,3 +503,76 @@ Standalone SQL debugging commands:
 .venv\Scripts\python.exe -m stockguidance.cli.select_universe --config examples\stage4\universe-selection-sql.json --step validate --sql-output output\stage4-universe-verify.sql
 ```
 
+## Stage 5 handoff — configured channels and shared samples
+
+### Status
+
+Stage 5 is complete. Configured ordered feature channels now have a typed
+repository/read boundary, exact dependency and warm-up planning, shared sample
+construction, readiness evidence, diagnostics, and read-only simplified-DB
+consumption. Existing v1 close and entry-open feature behavior remains
+unchanged.
+
+### Implemented
+
+- Added `FeatureSpecV2` with stable ticker identity order, explicit
+  `session,ticker,feature` axes, and versioned channels for relative close,
+  log close, price z-scores at 20/60, price-delta z-scores at 20/60, raw
+  volume, volume z-scores at 20/60, and entry-open return.
+- Added typed `FeatureChannelQuery`, `FeatureChannelObservation`,
+  `FeatureReadinessEvidence`, and `FeatureChannelRepository` contracts.
+  Repository data must cover the exact dependency/scored session and ticker
+  keys; non-ready values remain unavailable rather than becoming zeroes.
+- Added configured feature construction for price-only, delta-only,
+  volume-only, mixed, and both-window specifications. The builder preserves
+  population-z-score semantics and propagates missing, insufficient,
+  unverified, late, invalid, zero-variance, stale, pending, and incomplete
+  states as explicit issues.
+- Connected feature dependency sessions to simplified readiness and shared
+  sample construction. The read-only model/sample path requires injected
+  prepared channel data; explicit preparation remains a separate operation.
+- Added `MySQLFeatureChannelRepository`, which reads custom registry-selected
+  tables and Stage 3 completion metadata through bounded read transactions,
+  rejects overlapping unfinished operations, and does not create, repair, or
+  migrate schema. Prepared z-score rows are accepted only with compatible
+  series metadata, completion metadata, row coverage, and explicit statuses.
+- Added channel/value/exclusion details to feature diagnostics and documented
+  the contract in `docs/feature_channels.md`.
+
+### Verification commands and actual results
+
+1. `.venv\Scripts\python.exe -m py_compile src\stockguidance\features\specification.py src\stockguidance\features\channels.py src\stockguidance\features\construction.py src\stockguidance\features\history_window.py src\stockguidance\database\repositories\features.py src\stockguidance\datasets\building.py src\stockguidance\workflows\simplified_readiness.py tests\features\test_configured_channels.py` — passed.
+2. `.venv\Scripts\python.exe -m mypy src\stockguidance` — passed; no issues in 302 source files.
+3. `.venv\Scripts\python.exe -m pytest tests\features tests\datasets tests\training tests\history tests\diagnostics -q` — passed; 135 tests, 16 pandas timezone warnings, 18.90s.
+4. `.venv\Scripts\python.exe -m pytest tests\database -q` — passed; 151 tests, 4 pandas timezone warnings, 14.98s.
+5. `.venv\Scripts\python.exe -m pytest tests\documentation tests\architecture -q` — passed; 19 tests, 8 pandas timezone warnings, 16.15s.
+6. `git diff --check` — passed; Git reported only LF/CRLF conversion warnings for modified text files.
+7. `.venv\Scripts\python.exe -m pytest tests\features tests\workflows\test_database_simplification_stage9.py -q` — passed; 15 tests, 4 pandas timezone warnings, 3.60s.
+8. `.venv\Scripts\python.exe -m pytest tests\documentation -q` — passed; 7 tests in 1.24s.
+9. `.venv\Scripts\python.exe -m mypy src\stockguidance` after the final interface tightening — passed; no issues in 302 source files.
+
+No live data was downloaded, no production database was modified, no schema
+was migrated, and no trade was submitted. The Stage 3 volume preparation
+commands remain standalone and rerunnable:
+
+```powershell
+.venv\Scripts\python.exe -m stockguidance.cli.prepare_database --config examples\stage3\volume-zscore-preparation.json --step plan
+.venv\Scripts\python.exe -m stockguidance.cli.prepare_database --config examples\stage3\volume-zscore-preparation.json --step select --operation-id <operation-id>
+.venv\Scripts\python.exe -m stockguidance.cli.prepare_database --config examples\stage3\volume-zscore-preparation.json --step calculate --operation-id <operation-id>
+.venv\Scripts\python.exe -m stockguidance.cli.prepare_database --config examples\stage3\volume-zscore-preparation.json --step apply --operation-id <operation-id>
+.venv\Scripts\python.exe -m stockguidance.cli.prepare_database --config examples\stage3\volume-zscore-preparation.json --step validate --operation-id <operation-id>
+```
+
+### Remaining limitations and prerequisites
+
+Stage 5 does not add job parsing, target/scaler fitting, model-factory
+support, artifact codecs, recommendations, historical simulation, saved runs,
+or viewer orchestration. `training/data.py` deliberately rejects the new
+feature specification until the later versioned artifact/model contract is
+implemented. The MySQL adapter was not run against a live database in this
+stage; a disposable read rehearsal remains an operator-level follow-up.
+
+Stage 6 is next and must consume these exact shared samples for target and
+scaler work. Future descriptor vectors, variable ticker ordering, embeddings,
+permutation-invariant models, and new transformer paths remain out of scope.
+

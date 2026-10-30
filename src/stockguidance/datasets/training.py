@@ -7,7 +7,8 @@ from stockguidance.config.validation import require_aware_datetime
 from stockguidance.database.repositories.closes import CloseRepository
 from stockguidance.datasets.building import build_sample
 from stockguidance.datasets.sample import Sample
-from stockguidance.features.specification import FeatureSpec
+from stockguidance.features.channels import FeatureChannelRepository
+from stockguidance.features.specification import FeatureSpecification
 from stockguidance.market_data.history import HistoryBoundary
 from stockguidance.market_data.availability import AvailabilityPolicy
 from stockguidance.market_data.publication import DailyPublicationPolicy
@@ -48,9 +49,10 @@ class TrainingDataset:
 
 def build_training_dataset(
 	decisions: tuple[DecisionTiming, ...], training_cutoff: datetime,
-	specification: FeatureSpec, target: TargetSpec, boundary: HistoryBoundary,
-	calendar: SessionCalendar, publication: DailyPublicationPolicy, repository: CloseRepository,
+	specification: FeatureSpecification, target: TargetSpec, boundary: HistoryBoundary,
+	calendar: SessionCalendar, publication: DailyPublicationPolicy, repository: CloseRepository | None,
 	availability_policy: AvailabilityPolicy = AvailabilityPolicy.STRICT, data_snapshot: datetime | None = None,
+	channel_repository: FeatureChannelRepository | None = None,
 ) -> TrainingDataset:
 	require_aware_datetime(training_cutoff, "training cutoff")
 	if not isinstance(decisions, tuple) or any(not isinstance(timing, DecisionTiming) or timing.decision_cutoff > training_cutoff for timing in decisions):
@@ -60,4 +62,4 @@ def build_training_dataset(
 	if not isinstance(availability_policy, AvailabilityPolicy):
 		raise ValueError("Training requires a typed availability policy")
 	query_as_of = availability_policy.query_as_of(training_cutoff, data_snapshot)
-	return TrainingDataset(tuple(build_sample(specification, target, timing, boundary, calendar, publication, repository, label_cutoff=training_cutoff, availability_policy=availability_policy, data_snapshot=query_as_of) for timing in decisions), training_cutoff, query_as_of)
+	return TrainingDataset(tuple(build_sample(specification, target, timing, boundary, calendar, publication, repository, label_cutoff=training_cutoff, availability_policy=availability_policy, data_snapshot=query_as_of, channel_repository=channel_repository) for timing in decisions), training_cutoff, query_as_of)
