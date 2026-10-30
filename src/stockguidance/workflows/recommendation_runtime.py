@@ -1,6 +1,8 @@
 from datetime import timedelta
 
 from stockguidance.artifacts.contracts import ArtifactReference
+from stockguidance.artifacts.ensembles import LoadedEnsemble
+from stockguidance.artifacts.loading import LoadedModel
 from stockguidance.calendar.clock import SystemClock
 from stockguidance.config.source import PriceAdjustment
 from stockguidance.calendar.decisions import DecisionTiming
@@ -10,6 +12,7 @@ from stockguidance.database.repositories.eligibility import VerifiedEligibilityR
 from stockguidance.database.repositories.mysql_market_data import MySQLMarketDataRepository
 from stockguidance.database.repositories.mysql_validation import MySQLValidationRepository
 from stockguidance.database.repositories.verified_closes import VerifiedCloseRepository
+from stockguidance.database.repositories.features import MySQLFeatureChannelRepository
 from stockguidance.database.repositories.signals import SignalRepository
 from stockguidance.database.simplified_runtime import source_from_database, target_schema_state
 from stockguidance.database.write_connections import WriteConnectionFactory
@@ -27,9 +30,12 @@ from stockguidance.portfolio.policy import AllocationSpec
 from stockguidance.portfolio.precision import ExecutionPolicy
 from stockguidance.portfolio.serialization import decimal_text, load_portfolio
 from stockguidance.portfolio.state import initial_portfolio
-from stockguidance.recommendations.configuration import ArtifactKind, RecommendationJob, RetrainingPlan
+from stockguidance.recommendations.configuration import ArtifactKind, RecommendationJob, RefreshMode, RetrainingPlan
+from stockguidance.features.specification import FeatureSpecification
+from stockguidance.targets.specification import TargetSpecification
 from stockguidance.recommendations.artifacts import load_recommendation_artifact
 from stockguidance.recommendations.options import RecommendationOptions
+from stockguidance.runs.service import RunDirectoryService
 from stockguidance.targets.specification import TargetSpec
 from stockguidance.workflows.recommend import recommend
 from stockguidance.workflows.recommendation_dependencies import RecommendationServices
@@ -39,15 +45,24 @@ from stockguidance.workflows.simplified_readiness import SimplifiedCloseReposito
 from stockguidance.workflows.failures import FailureCode, StageExecutionError, StageFailure, WorkflowStage
 
 
-def _preflight_current_artifact(arguments: RecommendationOptions) -> None:
+def _preflight_current_artifact(arguments: RecommendationOptions) -> LoadedModel | LoadedEnsemble | None:
 	if arguments.policy is not ModelRefreshPolicy.CURRENT:
-		return
+		return None
 	if arguments.artifact_id is None:
 		raise ValueError("Current requires an explicit artifact identity")
 	try:
-		load_recommendation_artifact(ArtifactReference(arguments.artifact, arguments.artifact_id), ArtifactKind(arguments.artifact_kind))
+		return load_recommendation_artifact(ArtifactReference(arguments.artifact, arguments.artifact_id), ArtifactKind(arguments.artifact_kind))
 	except Exception:
 		raise StageExecutionError(StageFailure(WorkflowStage.ARTIFACT, FailureCode.INCOMPATIBLE_ARTIFACT, "Explicit current artifact is unavailable or incompatible; legacy models require rebuilding")) from None
+
+
+def _artifact_owned_specification(configuration: RecommendationConfiguration, artifact: LoadedModel | LoadedEnsemble | None, *, current: bool) -> tuple[FeatureSpecification, TargetSpecification]:
+	if not current or artifact is None:
+		return configuration.features, configuration.target
+	semantics = artifact.metadata.semantics if hasattr(artifact, "metadata") else artifact.semantics
+	if semantics.source != configuration.source.identity:
+		raise ValueError("Recommendation source differs from the artifact-owned source")
+	return semantics.features, semantics.target
 
 
 def _target_assemble(configuration: RecommendationConfiguration, arguments: RecommendationOptions, connect: WriteConnectionFactory, table_names: TableNames) -> RecommendationRunResult:
@@ -57,6 +72,8 @@ def _target_assemble(configuration: RecommendationConfiguration, arguments: Reco
 		raise ValueError("Recommendation source differs from the database-owned configuration")
 	if (configuration.retraining is not None) != (arguments.policy is ModelRefreshPolicy.RETRAIN):
 		raise ValueError("Model policy and training configuration differ")
+	owned_artifact = _preflight_current_artifact(arguments)
+	features, target = _artifact_owned_specification(configuration, owned_artifact, current=arguments.policy is ModelRefreshPolicy.CURRENT)
 	clock = SystemClock()
 	first = min(configuration.start or configuration.anchor_date, configuration.anchor_date)
 	last = max(configuration.end, configuration.entry_date) + timedelta(days=30)
@@ -70,12 +87,12 @@ def _target_assemble(configuration: RecommendationConfiguration, arguments: Reco
 		settings = configuration.retraining
 		training_decisions = tuple(DecisionTiming(calendar.shift(session, -1), session, calendar.shift(session, 1), session.closes_at - settings.decision_lead) for session in calendar.sessions(settings.start, settings.end))
 		retraining = RetrainingPlan(training_decisions, settings.training, arguments.artifact)
-	scope = required_session_scope(calendar, tuple((*training_decisions, timing)), configuration.features, TargetSpec(), include_labels=bool(training_decisions))
+	scope = required_session_scope(calendar, tuple((*training_decisions, timing)), features, target, include_labels=bool(training_decisions))
 	boundary = boundary_for_scope(source, calendar, scope, clock.now())
 	if policy is ModelRefreshPolicy.CURRENT and arguments.artifact_id is None:
 		raise ValueError("Current requires an explicit artifact identity")
 	reference = None if arguments.artifact_id is None else ArtifactReference(arguments.artifact, arguments.artifact_id)
-	job = RecommendationJob(source, scope.sessions[0].session_date, configuration.end, configuration.entry_date, configuration.features, TargetSpec(), ModelSelection(policy, None if reference is None else reference.artifact_id), AllocationSpec(configuration.allocation_policy, calendar.session(configuration.anchor_date)), configuration.publication, configuration.corrections, configuration.eligibility, configuration.top_k, reference, ArtifactKind(arguments.artifact_kind), retraining, configuration.availability_policy)
+	job = RecommendationJob(source, scope.sessions[0].session_date, configuration.end, configuration.entry_date, features, target, ModelSelection(policy, None if reference is None else reference.artifact_id), AllocationSpec(configuration.allocation_policy, calendar.session(configuration.anchor_date)), configuration.publication, configuration.corrections, configuration.eligibility, configuration.top_k, reference, ArtifactKind(arguments.artifact_kind), retraining, configuration.availability_policy, arguments.refresh_mode, None)
 	portfolio = None
 	if arguments.portfolio_state is not None:
 		portfolio = load_portfolio(arguments.portfolio_state, job.allocation, calendar)
@@ -87,8 +104,9 @@ def _target_assemble(configuration: RecommendationConfiguration, arguments: Reco
 	closes = SimplifiedCloseRepository(source, connect, names)
 	readiness = SimplifiedReadinessWorkflow(source, connect, calendar, job.publication, provider, clock, table_names=names, staging_root=source.data_root / ".database-simplification" / "pending")
 	opening_store = OpeningStore(source.data_root)
-	services = RecommendationServices(provider, None, None, SignalRepository(closes, opening_store), SimplifiedEligibilityRepository(closes), OpeningRefresh(source, opening_store, ConfiguredOpeningProvider(arguments.max_retries), closes), readiness)
-	return recommend(job, boundary, calendar, services, clock, portfolio=portfolio, execution=ExecutionPolicy(decimal_text(arguments.fee_per_fill)))
+	channels = MySQLFeatureChannelRepository(source, connect, names)
+	services = RecommendationServices(provider, None, None, SignalRepository(closes, opening_store), SimplifiedEligibilityRepository(closes), OpeningRefresh(source, opening_store, ConfiguredOpeningProvider(arguments.max_retries), closes), readiness, channels)
+	return recommend(job, boundary, calendar, services, clock, portfolio=portfolio, execution=ExecutionPolicy(decimal_text(arguments.fee_per_fill)), runs=RunDirectoryService(configuration.runs_root))
 
 
 def assemble_and_recommend(configuration: RecommendationConfiguration, arguments: RecommendationOptions) -> RecommendationRunResult:
@@ -121,7 +139,9 @@ def assemble_and_recommend(configuration: RecommendationConfiguration, arguments
 		settings = configuration.retraining
 		decisions = tuple(DecisionTiming(calendar.shift(session, -1), session, calendar.shift(session, 1), session.closes_at - settings.decision_lead) for session in calendar.sessions(settings.start, settings.end))
 		retraining = RetrainingPlan(decisions, settings.training, arguments.artifact)
-	job = RecommendationJob(configuration.source, configuration.start or boundary.history_start, configuration.end, configuration.entry_date, configuration.features, TargetSpec(), ModelSelection(policy, None if reference is None else reference.artifact_id), AllocationSpec(configuration.allocation_policy, calendar.session(configuration.anchor_date)), configuration.publication, configuration.corrections, configuration.eligibility, configuration.top_k, reference, ArtifactKind(arguments.artifact_kind), retraining, configuration.availability_policy)
+	owned_artifact = _preflight_current_artifact(arguments)
+	features, target = _artifact_owned_specification(configuration, owned_artifact, current=policy is ModelRefreshPolicy.CURRENT)
+	job = RecommendationJob(configuration.source, configuration.start or boundary.history_start, configuration.end, configuration.entry_date, features, target, ModelSelection(policy, None if reference is None else reference.artifact_id), AllocationSpec(configuration.allocation_policy, calendar.session(configuration.anchor_date)), configuration.publication, configuration.corrections, configuration.eligibility, configuration.top_k, reference, ArtifactKind(arguments.artifact_kind), retraining, configuration.availability_policy, arguments.refresh_mode, None)
 	clock = SystemClock()
 	portfolio = None
 	if arguments.portfolio_state is not None:
@@ -136,4 +156,4 @@ def assemble_and_recommend(configuration: RecommendationConfiguration, arguments
 	market_data = MySQLMarketDataRepository(job.source, connect, table_names)
 	market_data.legacy_read_only = job.source.identity.adjustment is PriceAdjustment.ADJUSTED
 	services = RecommendationServices(ConfiguredPolygonProvider(arguments.max_retries), market_data, validation, SignalRepository(closes, opening_store), VerifiedEligibilityRepository(closes), OpeningRefresh(job.source, opening_store, ConfiguredOpeningProvider(arguments.max_retries), closes))
-	return recommend(job, boundary, calendar, services, clock, portfolio=portfolio, execution=ExecutionPolicy(decimal_text(arguments.fee_per_fill)))
+	return recommend(job, boundary, calendar, services, clock, portfolio=portfolio, execution=ExecutionPolicy(decimal_text(arguments.fee_per_fill)), runs=RunDirectoryService(configuration.runs_root))

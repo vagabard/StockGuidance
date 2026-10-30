@@ -10,11 +10,14 @@ from stockguidance.recommendations.request import RecommendationRequest
 class RankedTicker:
 	ticker_id: int
 	score: float
+	symbol: str | None = None
 
 	def __post_init__(self) -> None:
 		require_positive_int(self.ticker_id, "ticker_id")
 		if isinstance(self.score, bool) or not isinstance(self.score, (int, float)) or not isfinite(self.score):
 			raise ValueError("score must be a finite number")
+		if self.symbol is not None and (not isinstance(self.symbol, str) or not self.symbol.strip()):
+			raise ValueError("symbol must be nonempty when provided")
 
 
 @dataclass(frozen=True)
@@ -29,16 +32,26 @@ class RecommendationResult:
 	artifact_id: str
 	data_revision: str
 	ranking: tuple[RankedTicker, ...]
+	score_units: str = "fractional_return"
+	eligible_count: int | None = None
+	median_eligible_score: float | None = None
+	median_returned_score: float | None = None
 
 	def __post_init__(self) -> None:
 		if not isinstance(self.request, RecommendationRequest):
 			raise ValueError("request must be a RecommendationRequest")
 		require_text(self.artifact_id, "artifact_id")
 		require_text(self.data_revision, "data_revision")
+		require_text(self.score_units, "score_units")
 		if self.request.model.policy is ModelRefreshPolicy.CURRENT and self.artifact_id != self.request.model.artifact_id:
 			raise ValueError("current recommendations must identify the requested artifact")
-		if not isinstance(self.ranking, tuple) or not self.ranking:
-			raise ValueError("ranking must be a nonempty immutable tuple")
+		if not isinstance(self.ranking, tuple) or (not self.ranking and not self.request.permits_empty_selection):
+			raise ValueError("ranking must be an immutable tuple and cannot be empty for v1 recommendations")
+		if self.eligible_count is not None and (type(self.eligible_count) is not int or self.eligible_count < 0):
+			raise ValueError("eligible_count must be a nonnegative integer or null")
+		for name, value in (("median_eligible_score", self.median_eligible_score), ("median_returned_score", self.median_returned_score)):
+			if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float)) or not isfinite(value)):
+				raise ValueError(f"{name} must be finite when provided")
 		seen: set[int] = set()
 		previous_score = float("inf")
 		for ranked in self.ranking:

@@ -12,12 +12,24 @@ from stockguidance.database.simplified_runtime import SimplifiedUpdateResult, Si
 
 
 @dataclass(frozen=True)
+class ValidationOnlyRefresh:
+	data_revision: str
+	successful: bool
+	downloaded_sessions: int = 0
+	mode: str = "validate-only"
+
+	def __post_init__(self) -> None:
+		if not isinstance(self.data_revision, str) or not self.data_revision or type(self.successful) is not bool:
+			raise ValueError("Validation-only refresh evidence is invalid")
+
+
+@dataclass(frozen=True)
 class RecommendationRunResult:
 	recommendation: RecommendationResult
 	scores: tuple[RankedTicker, ...]
 	eligibility: tuple[TickerEligibility, ...]
 	sample: Sample
-	refresh: UpdateResult | SimplifiedUpdateResult
+	refresh: UpdateResult | SimplifiedUpdateResult | ValidationOnlyRefresh
 	validation: ValidationResult | SimplifiedValidationResult
 	member_artifact_ids: tuple[str, ...]
 	member_weights: tuple[float, ...]

@@ -7,20 +7,25 @@ from stockguidance.artifacts.contracts import ArtifactReference
 from stockguidance.calendar.decisions import DecisionTiming
 from stockguidance.config.source import SourceConfig
 from stockguidance.config.validation import require_date, require_enum, require_positive_int
-from stockguidance.features.specification import FeatureSpec
+from stockguidance.features.specification import FeatureSpec, FeatureSpecV2, FeatureSpecification
 from stockguidance.market_data.corrections import CorrectionPolicy
 from stockguidance.market_data.availability import AvailabilityPolicy
 from stockguidance.market_data.publication import DailyPublicationPolicy
 from stockguidance.models.policy import ModelRefreshPolicy, ModelSelection
 from stockguidance.portfolio.policy import AllocationSpec
 from stockguidance.recommendations.eligibility import EligibilityPolicy
-from stockguidance.targets.specification import TargetSpec
+from stockguidance.targets.specification import TargetSpec, TargetSpecification
 from stockguidance.training.configuration import TrainingConfig
 
 
 class ArtifactKind(StrEnum):
 	MODEL = "model"
 	ENSEMBLE = "ensemble"
+
+
+class RefreshMode(StrEnum):
+	REFRESH = "refresh"
+	VALIDATE_ONLY = "validate-only"
 
 
 @dataclass(frozen=True)
@@ -44,8 +49,8 @@ class RecommendationJob:
 	start: date
 	end: date
 	entry_date: date
-	features: FeatureSpec
-	target: TargetSpec
+	features: FeatureSpecification
+	target: TargetSpecification
 	model: ModelSelection
 	allocation: AllocationSpec
 	publication: DailyPublicationPolicy
@@ -56,14 +61,19 @@ class RecommendationJob:
 	artifact_kind: ArtifactKind = ArtifactKind.MODEL
 	retraining: RetrainingPlan | None = None
 	availability_policy: AvailabilityPolicy = AvailabilityPolicy.STRICT
+	refresh_mode: RefreshMode = RefreshMode.REFRESH
+	allow_empty_selection: bool | None = None
 
 	def __post_init__(self) -> None:
-		for value, expected in ((self.source, SourceConfig), (self.features, FeatureSpec), (self.target, TargetSpec), (self.model, ModelSelection), (self.allocation, AllocationSpec), (self.publication, DailyPublicationPolicy), (self.corrections, CorrectionPolicy), (self.eligibility, EligibilityPolicy)):
+		for value, expected in ((self.source, SourceConfig), (self.features, (FeatureSpec, FeatureSpecV2)), (self.target, TargetSpec), (self.model, ModelSelection), (self.allocation, AllocationSpec), (self.publication, DailyPublicationPolicy), (self.corrections, CorrectionPolicy), (self.eligibility, EligibilityPolicy)):
 			if not isinstance(value, expected):
 				raise ValueError("Recommendation jobs require typed configuration")
 		for session_date in (self.start, self.end, self.entry_date):
 			require_date(session_date, "recommendation session")
 		require_enum(self.artifact_kind, ArtifactKind, "artifact kind")
+		require_enum(self.refresh_mode, RefreshMode, "recommendation refresh mode")
+		if self.allow_empty_selection is not None and type(self.allow_empty_selection) is not bool:
+			raise ValueError("allow_empty_selection must be boolean or null")
 		require_positive_int(self.top_k, "top_k")
 		if not isinstance(self.availability_policy, AvailabilityPolicy):
 			raise ValueError("Recommendation requires a typed availability policy")
@@ -78,3 +88,11 @@ class RecommendationJob:
 				raise ValueError("current requires its explicit artifact and cannot request training")
 		elif not isinstance(self.retraining, RetrainingPlan) or self.current_artifact is not None or self.artifact_kind is not ArtifactKind.MODEL:
 			raise ValueError("retrain requires one typed training plan and uses its returned model artifact")
+
+	@property
+	def permits_empty_selection(self) -> bool:
+		"""V2 result semantics preserve a valid empty eligible universe."""
+
+		if self.target.version == "raw_return-v1":
+			return False
+		return self.allow_empty_selection is not False

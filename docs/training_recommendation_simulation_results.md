@@ -824,3 +824,72 @@ runs, or visualize reports. Stage 9 must consume the artifact-owned ticker,
 target, and preprocessing metadata without rediscovering model dimensions and
 must save recommendation failures and complete score/eligibility outputs.
 
+## Stage 9 — artifact-owned recommendations, validate-only readiness, and saved attempts
+
+Status: complete for the requested Stage 9 recommendation workflow, including
+artifact-owned current-model semantics, validate-only refresh/readiness,
+versioned score/report contracts, deterministic eligibility ranking, target
+space statistics, saved successful/failed attempts, focused tests, and
+documentation. No production database, live provider, schema migration,
+trade submission, notification, credential output, or commit was performed.
+
+### Changed interfaces
+
+- `RecommendationJob`, `RecommendationRequest`, the recommendation CLI, and
+  configuration decoding accept the explicit `refresh`/`validate-only` mode.
+  Refresh remains the strict default. Validate-only performs bounded source,
+  completion, receipt-cutoff, and timing validation without invoking the
+  provider or update writer; the simplified target-schema path uses the same
+  read-only validation contract.
+- Current runtime assembly loads the selected model/ensemble before preparing
+  the request and uses its exact feature, target, ordered ticker, and fitted
+  preprocessing semantics. Configuration cannot override artifact dimensions
+  or rediscover the universe from current survivors. Versioned artifacts must
+  carry stable ticker labels; v1 compatibility remains unchanged.
+- `RankedTicker` optionally carries its stable symbol. Versioned reports use
+  `stockguidance-recommendation-2`, explicit score units, ordered scores,
+  labels, eligibility evidence, top-n ranking, eligible count, and null-safe
+  eligible/returned medians. Ties remain deterministic by stable ticker ID.
+  Versioned jobs may return fewer than `top_k`, including an empty valid
+  selection; v1 raw-return jobs retain their prior nonempty-result failure.
+- The public recommendation workflow now creates a
+  `RunOperation.RECOMMENDATION` attempt, records external artifact identity,
+  writes `reports/recommendation.json`, fills saved-run result sections with
+  all scores and eligibility/exclusions, and marks both successes and
+  sanitized failures under the configured runs root. No order or notification
+  side effect was added.
+
+### Accepted decisions and semantics
+
+- Scores are reported after artifact-owned output preprocessing is inverted,
+  in the declared target space: `fractional_return` for raw returns and
+  `z_score` for transformed targets. Medians use all eligible scores and the
+  returned top-n scores, with the usual odd/even median and null for an empty
+  set.
+- Validate-only is a read-only readiness mode. It does not refresh provider
+  data, repair preparation, initialize schema, migrate schema, or silently
+  change a production database. Existing strict refresh behavior remains the
+  production path.
+- Stable ticker IDs and explicit tensor axes remain the identity contract.
+  No stock descriptors, variable ticker ordering, embeddings,
+  permutation-invariant models, or new transformer path was introduced.
+
+### Verification commands and actual results
+
+1. `.venv\Scripts\python.exe -m pytest tests\recommendations\test_stage9.py -q` — passed, 6 tests, 4 existing pandas timezone warnings, 7.62s.
+2. `.venv\Scripts\python.exe -m pytest tests\recommendations -q` — passed, 112 tests, 8 existing pandas timezone warnings, 37.71s.
+3. `.venv\Scripts\python.exe -m pytest tests\cli\test_integrated_frontends.py -q` — passed, 8 tests, 8 existing pandas timezone warnings, 3.71s.
+4. `.venv\Scripts\python.exe -m pytest tests\architecture tests\artifacts tests\recommendations tests\reporting tests\configuration tests\runs tests\documentation -q` — passed, 235 tests, 23 existing pandas/Torch warnings, 47.93s.
+5. `.venv\Scripts\python.exe -m pytest tests\workflows\test_database_simplification_stage9.py tests\training\test_stage8_orchestration.py -q` — passed, 10 tests, 8 existing pandas timezone warnings, 6.01s.
+6. `.venv\Scripts\python.exe -m mypy src\stockguidance` — passed, no issues in 305 source files.
+7. `git diff --check` — passed; only Git’s existing LF/CRLF conversion warnings were emitted.
+
+### Remaining limitations and next-stage prerequisites
+
+Stage 9 does not implement historical portfolio simulation, replay/rerun
+children, visualization, or entry-opening Stage 10 behavior. Versioned
+stored feature channels still require the existing prepared database and
+typed channel repository; validate-only reports missing/stale preparation
+instead of creating it. The next selected stage must consume these saved
+recommendation contracts without changing the v1 semantics.
+

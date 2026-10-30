@@ -11,7 +11,7 @@ from stockguidance.recommendations.request import RecommendationRequest
 def prepare_request(job: RecommendationJob, boundary: HistoryBoundary, calendar: SessionCalendar, clock: Clock) -> RecommendationRequest:
 	boundary.validate_for(job.source.identity, calendar)
 	timing = resolve_decision(calendar, job.entry_date, clock)
-	request = RecommendationRequest(job.source, MarketDataRequest(job.source.identity, job.start, job.end, timing.decision_cutoff), timing, job.features, job.target, job.model, job.allocation, job.eligibility, job.top_k, job.availability_policy)
+	request = RecommendationRequest(job.source, MarketDataRequest(job.source.identity, job.start, job.end, timing.decision_cutoff), timing, job.features, job.target, job.model, job.allocation, job.eligibility, job.top_k, job.availability_policy, job.refresh_mode, job.allow_empty_selection)
 	if job.start < boundary.history_start or job.end < timing.previous_session.session_date:
 		raise ValueError("Coverage must respect supported history and include the previous session")
 	if calendar.session(job.allocation.anchor_session.session_date) != job.allocation.anchor_session:

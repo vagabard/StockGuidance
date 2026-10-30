@@ -31,6 +31,22 @@ provenance, artifact, prediction, eligibility, exclusion, metric, report,
 trade, equity, and benchmark sections for later stages. Empty sections mean
 that work has not populated them; they are not successful placeholder results.
 
+## Recommendation runs
+
+Stage 9 recommendation attempts use the same lifecycle and save both success
+and failure. A completed recommendation stores its external model reference,
+artifact-owned specifications, refresh/data provenance, all ordered scores
+before top-n filtering, all eligibility evidence and exclusions, aggregate
+score metrics, and `reports/recommendation.json`. A failed attempt stores a
+generic stage/code failure record without raw provider, database, or
+credential text. The saved run is inspectable with the database-free commands
+below and can be validated without loading a model or opening a database.
+
+`validate-only` recommendation runs record that mode and the verified data
+revision. They use read-only readiness checks: no provider request, update
+operation, schema migration, or database write is part of the validate-only
+path.
+
 ## Lifecycle
 
 The process state transitions are:

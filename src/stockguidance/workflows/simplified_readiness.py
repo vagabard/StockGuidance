@@ -464,9 +464,9 @@ class SimplifiedReadinessWorkflow:
 			cutoff = data_snapshot
 		else:
 			cutoff = as_of or label_cutoff or max(item.decision_cutoff for item in decisions)
+		assert cutoff is not None
 		if cutoff.tzinfo is None:
 			raise ValueError("Readiness requires an aware database cutoff")
-		assert cutoff is not None
 		effective_cutoff: datetime = cutoff
 		boundary = boundary_for_scope(self.source, self.calendar, scope, self.clock.now())
 		published_candidates: list[TradingSession] = []
@@ -489,6 +489,58 @@ class SimplifiedReadinessWorkflow:
 		if validation.state == "unfinished_operation":
 			raise SimplifiedCoverageError("operation", "An unfinished database operation overlaps the requested range")
 		self._require_completion(published)
+		revision = database_revision(self.source, self.connect, published, self.table_names)
+		update = replace(update, data_revision=revision)
+		return SimplifiedReadinessResult(self.source, boundary, scope, update, validation, revision)
+
+	def validate_only(
+		self,
+		decisions: tuple[DecisionTiming, ...],
+		features: FeatureSpecification,
+		target: TargetSpecification,
+		*,
+		label_cutoff: datetime | None = None,
+		as_of: datetime | None = None,
+		availability_policy: AvailabilityPolicy = AvailabilityPolicy.STRICT,
+		data_snapshot: datetime | None = None,
+		normalization_warmup: int = 0,
+		extra_sessions: tuple[TradingSession, ...] = (),
+	) -> SimplifiedReadinessResult:
+		"""Validate an already reconciled scope without invoking a provider or writer."""
+
+		if not isinstance(availability_policy, AvailabilityPolicy):
+			raise ValueError("Readiness requires a typed availability policy")
+		if label_cutoff is not None and label_cutoff.tzinfo is None:
+			raise ValueError("Readiness label cutoff must be timezone aware")
+		include_labels = label_cutoff is not None
+		try:
+			scope = required_session_scope(self.calendar, decisions, features, target, include_labels=include_labels, normalization_warmup=normalization_warmup, extra_sessions=extra_sessions)
+		except (IndexError, KeyError) as error:
+			raise SimplifiedCoverageError("history", "Insufficient exchange-session history for the requested feature or label dependencies") from error
+		if availability_policy.retrospective:
+			if data_snapshot is None:
+				raise ValueError("Retrospective readiness requires an explicit data snapshot")
+			cutoff = data_snapshot
+		else:
+			cutoff = as_of or label_cutoff or max(item.decision_cutoff for item in decisions)
+		assert cutoff is not None
+		if cutoff.tzinfo is None:
+			raise ValueError("Readiness requires an aware database cutoff")
+		published_items: list[TradingSession] = []
+		for session in scope.sessions:
+			expected = self.publication.expected_at(session)
+			if session.closes_at <= cutoff and (expected is None or expected <= cutoff):
+				published_items.append(session)
+		published = tuple(published_items)
+		if not published:
+			raise SimplifiedCoverageError("coverage", "No required exchange session is available at the requested cutoff")
+		SourceConfigurationRepository(self.source, self.connect, self.table_names).assert_compatible()
+		validation = validate_simplified_database(self.source, self.connect, self.calendar, published, table_names=self.table_names)
+		if validation.state == "unfinished_operation":
+			raise SimplifiedCoverageError("operation", "An unfinished database operation overlaps the requested range")
+		boundary = boundary_for_scope(self.source, self.calendar, scope, self.clock.now())
+		findings = tuple(f"{item.phase}: {item.reason}" for item in validation.findings if item.blocking)
+		update = SimplifiedUpdateResult(self.source, published, None, False, 0, validation.complete, findings)
 		revision = database_revision(self.source, self.connect, published, self.table_names)
 		update = replace(update, data_revision=revision)
 		return SimplifiedReadinessResult(self.source, boundary, scope, update, validation, revision)

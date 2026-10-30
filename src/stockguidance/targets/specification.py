@@ -60,6 +60,12 @@ class TargetSpec:
 		return self.version
 
 	@property
+	def score_units(self) -> str:
+		"""Units used for predictions after any fitted output inversion."""
+
+		return "fractional_return"
+
+	@property
 	def baseline_offsets(self) -> tuple[int, ...]:
 		return ()
 
@@ -112,6 +118,10 @@ class TargetSpecV2(TargetSpec):
 	@property
 	def target_identity(self) -> str:
 		return self.version
+
+	@property
+	def score_units(self) -> str:
+		return "fractional_return" if self.kind is TargetKind.RAW_RETURN else "z_score"
 
 	@property
 	def baseline_offsets(self) -> tuple[int, ...]:

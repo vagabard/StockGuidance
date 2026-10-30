@@ -3,11 +3,11 @@ from datetime import date, timedelta
 import json
 from pathlib import Path
 
-from stockguidance.artifacts.decoding import decode_features, exact_mapping, integer
+from stockguidance.artifacts.decoding import decode_features, decode_target, exact_mapping, integer
 from stockguidance.config.training import decode_training_configuration, number
 from stockguidance.config.source import SourceConfig
 from stockguidance.config.validation import require_positive_int
-from stockguidance.features.specification import FeatureSpec
+from stockguidance.features.specification import FeatureSpec, FeatureSpecV2, FeatureSpecification
 from stockguidance.market_data.corrections import CorrectionPolicy
 from stockguidance.market_data.availability import AvailabilityPolicy
 from stockguidance.market_data.identity import decode_source, mapping, text_field
@@ -16,6 +16,7 @@ from stockguidance.market_data.publication import DailyPublicationPolicy
 from stockguidance.portfolio.policy import AllocationPolicy
 from stockguidance.recommendations.eligibility import EligibilityPolicy
 from stockguidance.training.configuration import TrainingConfig
+from stockguidance.targets.specification import TargetSpec, TargetSpecification
 
 
 @dataclass(frozen=True)
@@ -29,7 +30,7 @@ class RetrainingConfiguration:
 @dataclass(frozen=True)
 class RecommendationConfiguration:
 	source: SourceConfig
-	features: FeatureSpec
+	features: FeatureSpecification
 	start: date | None
 	end: date
 	entry_date: date
@@ -41,6 +42,8 @@ class RecommendationConfiguration:
 	top_k: int
 	retraining: RetrainingConfiguration | None
 	availability_policy: AvailabilityPolicy = AvailabilityPolicy.STRICT
+	target: TargetSpecification = TargetSpec()
+	runs_root: Path | None = None
 
 	def __post_init__(self) -> None:
 		require_positive_int(self.top_k, "top_k")
@@ -48,6 +51,8 @@ class RecommendationConfiguration:
 			raise ValueError("Invalid recommendation coverage, entry or allocation dates")
 		if self.features.adjustment is not self.source.identity.adjustment or self.features.interval is not self.source.identity.interval:
 			raise ValueError("Recommendation features and source differ")
+		if not isinstance(self.target, TargetSpec):
+			raise ValueError("Recommendation target must be typed")
 		if self.retraining is not None and (self.retraining.end >= self.entry_date or (self.start is not None and self.retraining.start < self.start)):
 			raise ValueError("Retraining must lie inside coverage before the entry session")
 
@@ -55,7 +60,7 @@ class RecommendationConfiguration:
 def load_configuration(path: Path) -> RecommendationConfiguration:
 	fields = mapping(json.loads(path.read_text(encoding="utf-8")))
 	required = ("source", "data_root", "database_config", "features", "start_date", "end_date", "entry_date", "allocation", "publication", "corrections", "eligibility", "top_k", "retraining")
-	if set(fields) - {*required, "availability_policy"} or any(name not in fields for name in required):
+	if set(fields) - {*required, "availability_policy", "target", "runs_root"} or any(name not in fields for name in required):
 		raise ValueError("Incomplete or unsupported recommendation configuration fields")
 	identity = decode_source(exact_mapping(fields["source"], ("provider", "endpoint", "market", "universe", "adjustment", "interval")))
 	if (identity.provider, identity.endpoint, identity.market, identity.universe) != ("polygon", GROUPED_ENDPOINT, "us-stocks", GROUPED_UNIVERSE):
@@ -74,6 +79,8 @@ def load_configuration(path: Path) -> RecommendationConfiguration:
 		if start > end or not timedelta(0) < lead < timedelta(days=1):
 			raise ValueError("Invalid retraining bounds or decision lead")
 		retraining = RetrainingConfiguration(start, end, lead, decode_training_configuration(training["training"], training["model"]))
-	if not isinstance(features, FeatureSpec):
-		raise ValueError("Recommendation configuration requires legacy explicit feature semantics")
-	return RecommendationConfiguration(source, features, None if fields["start_date"] is None else date.fromisoformat(text_field(fields, "start_date")), date.fromisoformat(text_field(fields, "end_date")), date.fromisoformat(text_field(fields, "entry_date")), AllocationPolicy(text_field(allocation, "policy")), date.fromisoformat(text_field(allocation, "anchor_date")), DailyPublicationPolicy(timedelta(minutes=number(publication["delay_minutes"])), text_field(publication, "evidence")), CorrectionPolicy(timedelta(days=number(corrections["recent_window_days"])), timedelta(hours=number(corrections["recent_refresh_hours"])), timedelta(days=number(corrections["archive_refresh_days"])), text_field(corrections, "evidence")), EligibilityPolicy(integer(eligibility["minimum_transactions"])), integer(fields["top_k"]), retraining, AvailabilityPolicy(str(fields.get("availability_policy", AvailabilityPolicy.STRICT.value))))
+	if not isinstance(features, (FeatureSpec, FeatureSpecV2)):
+		raise ValueError("Recommendation configuration requires a typed feature specification")
+	target = TargetSpec() if fields.get("target") is None else decode_target(fields["target"])
+	runs_root = None if fields.get("runs_root") is None else Path(text_field(fields, "runs_root"))
+	return RecommendationConfiguration(source, features, None if fields["start_date"] is None else date.fromisoformat(text_field(fields, "start_date")), date.fromisoformat(text_field(fields, "end_date")), date.fromisoformat(text_field(fields, "entry_date")), AllocationPolicy(text_field(allocation, "policy")), date.fromisoformat(text_field(allocation, "anchor_date")), DailyPublicationPolicy(timedelta(minutes=number(publication["delay_minutes"])), text_field(publication, "evidence")), CorrectionPolicy(timedelta(days=number(corrections["recent_window_days"])), timedelta(hours=number(corrections["recent_refresh_hours"])), timedelta(days=number(corrections["archive_refresh_days"])), text_field(corrections, "evidence")), EligibilityPolicy(integer(eligibility["minimum_transactions"])), integer(fields["top_k"]), retraining, AvailabilityPolicy(str(fields.get("availability_policy", AvailabilityPolicy.STRICT.value))), target, runs_root)

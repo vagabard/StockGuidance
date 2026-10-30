@@ -7,7 +7,7 @@ from stockguidance.workflows.recommendation_runtime import assemble_and_recommen
 from stockguidance.models.policy import ModelRefreshPolicy
 from stockguidance.portfolio.precision import ExecutionPolicy
 from stockguidance.portfolio.serialization import decimal_text
-from stockguidance.recommendations.configuration import ArtifactKind
+from stockguidance.recommendations.configuration import ArtifactKind, RefreshMode
 from stockguidance.recommendations.options import RecommendationOptions
 from stockguidance.reporting.recommendations import recommendation_payload, render_recommendations
 from stockguidance.workflows.failures import StageExecutionError
@@ -20,6 +20,7 @@ def build_parser() -> argparse.ArgumentParser:
 	parser.add_argument("--artifact", required=True, type=Path, help="Explicit current artifact or retraining output file")
 	parser.add_argument("--artifact-id", help="Required SHA256 identity in current mode")
 	parser.add_argument("--artifact-kind", choices=[kind.value for kind in ArtifactKind], default=ArtifactKind.MODEL.value)
+	parser.add_argument("--refresh-mode", choices=[mode.value for mode in RefreshMode], default=RefreshMode.REFRESH.value, help="refresh source data or validate already updated data without provider calls")
 	parser.add_argument("--max-retries", type=int, default=5)
 	parser.add_argument("--format", choices=("json", "text"), default="json")
 	capital = parser.add_mutually_exclusive_group()
@@ -58,7 +59,7 @@ def main(argv: list[str] | None = None) -> int:
 		print(json.dumps({"successful": False, "stage": "request", "failure": "invalid_request", "message": message}))
 		return 2
 	try:
-		options = RecommendationOptions(ModelRefreshPolicy(arguments.policy), arguments.artifact, arguments.artifact_id, ArtifactKind(arguments.artifact_kind), arguments.max_retries, arguments.portfolio_state, arguments.capital, arguments.fee_per_fill)
+		options = RecommendationOptions(ModelRefreshPolicy(arguments.policy), arguments.artifact, arguments.artifact_id, ArtifactKind(arguments.artifact_kind), arguments.max_retries, arguments.portfolio_state, arguments.capital, arguments.fee_per_fill, RefreshMode(arguments.refresh_mode))
 		result = assemble_and_recommend(configuration, options)
 		output = json.dumps(recommendation_payload(result), sort_keys=True, allow_nan=False) if arguments.format == "json" else render_recommendations(result)
 		print(output)

@@ -164,6 +164,40 @@ Exit 0 means all required stages completed and suggestions are ready before the
 entry close. Exit 2 means invalid arguments/configuration. Exit 1 means required
 setup, refresh, validation, artifact, training, prediction or reporting failure;
 there is no successful recommendation payload following a required failure.
+## Stage 9: saved-artifact recommendations
+
+Current recommendations use the selected artifact as the authority for the
+feature tensor, target semantics, fitted preprocessing, ordered ticker IDs,
+and (for versioned artifacts) ticker labels. The workflow does not rebuild a
+universe from today's surviving rows or override model dimensions from the
+configuration. Versioned scores are emitted after artifact-owned output
+preprocessing is inverted and retain explicit `score_units` (`fractional_return`
+for raw-return targets and `z_score` for transformed targets).
+
+Use `--refresh-mode validate-only` when the required history or prepared
+target database should only be checked. This mode verifies the same bounded
+coverage, source identity, completed-session evidence, receipt cutoffs, and
+timing as refresh mode, but makes no provider calls and performs no writes.
+Refresh mode remains the strict production default. A stale boundary,
+unfinished preparation operation, missing receipt, or entry-close deadline
+still fails the recommendation.
+
+Every attempt is saved below the configured runs root (`runs` by default, or
+`runs_root` in the configuration). A completed recommendation contains an
+external artifact reference, the ordered pre-top-n scores, every eligibility
+assessment and exclusion, score units, eligible count, odd/even medians, and
+`reports/recommendation.json`. Versioned reports include stable ticker labels;
+ties are ordered by stable numeric ticker ID. Versioned target jobs may
+successfully return fewer than `top_k`, including an empty selection, with
+null medians. Legacy raw-return v1 jobs preserve the prior nonempty-result
+failure behavior.
+
+The result is informational only. Stage 9 does not submit orders, send
+notifications, modify production databases, migrate schemas, or download
+live data when validate-only is selected. SQL/database preparation remains a
+separate bounded, inspectable workflow; the recommendation run records its
+resulting revision and provenance rather than silently preparing schema.
+
 Stage 10 [entry-opening recommendations](entry_open.md) require the explicit
 opening channel, a compatible distinct artifact and timely captured observations
 for the full ordered universe. Both model policies capture current openings after

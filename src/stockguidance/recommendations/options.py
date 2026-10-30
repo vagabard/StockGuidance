@@ -6,7 +6,7 @@ from stockguidance.config.validation import require_positive_int
 from stockguidance.models.policy import ModelRefreshPolicy
 from stockguidance.portfolio.precision import ExecutionPolicy
 from stockguidance.portfolio.serialization import decimal_text
-from stockguidance.recommendations.configuration import ArtifactKind
+from stockguidance.recommendations.configuration import ArtifactKind, RefreshMode
 
 
 @dataclass(frozen=True)
@@ -19,11 +19,12 @@ class RecommendationOptions:
 	portfolio_state: Path | None = None
 	capital: str | None = None
 	fee_per_fill: str = "0.00"
+	refresh_mode: RefreshMode = RefreshMode.REFRESH
 
 	def __post_init__(self) -> None:
 		require_positive_int(self.max_retries, "provider retries")
 		ExecutionPolicy(decimal_text(self.fee_per_fill))
-		if not isinstance(self.policy, ModelRefreshPolicy) or not isinstance(self.artifact_kind, ArtifactKind) or not isinstance(self.artifact, Path):
+		if not isinstance(self.policy, ModelRefreshPolicy) or not isinstance(self.artifact_kind, ArtifactKind) or not isinstance(self.artifact, Path) or not isinstance(self.refresh_mode, RefreshMode):
 			raise ValueError("Recommendation requires typed model selection")
 		if self.policy is ModelRefreshPolicy.CURRENT:
 			if self.artifact_id is None:

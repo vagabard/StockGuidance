@@ -6,6 +6,7 @@ from stockguidance.database.repositories.closes import CloseRepository
 from stockguidance.database.repositories.eligibility import EligibilityRepository
 from stockguidance.database.repositories.market_data import MarketDataRepository
 from stockguidance.database.repositories.validation import ValidationRepository
+from stockguidance.features.channels import FeatureChannelRepository
 from stockguidance.market_data.history import HistoryBoundary
 from stockguidance.market_data.opening_refresh import OpeningRefresh
 from stockguidance.market_data.providers.contracts import MarketDataProvider
@@ -24,6 +25,7 @@ class RecommendationServices:
 	eligibility: EligibilityRepository
 	openings: OpeningRefresh | None = None
 	simplified_readiness: SimplifiedReadinessWorkflow | None = None
+	channels: FeatureChannelRepository | None = None
 
 
 class HistoryTrainer(Protocol):
