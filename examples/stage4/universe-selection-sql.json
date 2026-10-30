@@ -1,0 +1,18 @@
+{
+  "session_dates": [
+    "2026-01-05",
+    "2026-01-06",
+    "2026-01-07"
+  ],
+  "ticker_ids": [
+    2,
+    7
+  ],
+  "filters": {
+    "average_volume": null,
+    "volatility": null,
+    "legacy_transactions": null
+  },
+  "read_volume": false,
+  "read_transactions": false
+}

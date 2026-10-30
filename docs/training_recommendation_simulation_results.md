@@ -396,3 +396,110 @@ it must not duplicate the preparation lifecycle or introduce stock-descriptor
 vectors, variable ticker ordering, embeddings, permutation-invariant models,
 or transformer paths.
 
+## Stage 4 — frozen universe selection and optional filters
+
+Status: complete for the typed frozen-universe selector, simplified-database
+read adapter, read-only SQL rendering/inspection CLI, Stage 1 evidence hook,
+tests, and operator documentation. No production database, provider refresh,
+schema migration, model construction, trade submission, credential output, or
+commit was performed.
+
+### Changed interfaces
+
+- `stockguidance.universe.selection` adds the versioned
+  `stockguidance-universe-selection-1` contracts: `UniverseFilters`,
+  `UniverseSelectionRequest`, `UniverseSourceData`, typed ticker/session/raw
+  evidence, `UniverseSelectionResult`, per-ticker `TickerExclusion`, and
+  filter measurements.
+- `UniverseSelectionRequest.from_dependency_plan(...)` derives membership,
+  Stage 2 warm-up/label dependencies, and training-only filter sessions. Average
+  volume uses exactly `W` trailing sessions; volatility uses `W + 1` closes for
+  `W` predecessor-backed returns. Evaluation/simulation sessions are not read.
+- `assess_universe` blocks unknown/incomplete whole-session coverage, records
+  verified absence and per-ticker raw gaps separately, applies enabled filters
+  with inclusive bounds, and uses population volatility. `select_universe`
+  raises `EmptyUniverseError` with its complete exclusion result before any
+  model/network construction. Stable-ID ordering and validated explicit ordered
+  subsets are both supported.
+- `persist_universe_evidence` and `persist_universe_failure_evidence` update the
+  Stage 1 `universe` and `results.exclusions` sections; no second run store was
+  added.
+- `stockguidance.database.repositories.universe.MySQLUniverseRepository` reads
+  registry-selected ticker/session/raw rows and simplified raw completion,
+  revision, and information-cutoff evidence without creating or migrating
+  schema. Optional volume and transaction columns are omitted when their
+  filters are disabled.
+- `stockguidance.database.universe_selection` adds bounded
+  `UniverseSqlScope`/`RenderedUniverseSql` output for `plan`, `select`, and
+  `validate`. SQL is read-only, uses validated custom registry names, contains
+  no Python `%s` placeholders, and clearly identifies Python as the reference
+  calculation route.
+- `stockguidance.cli.select_universe` and the `select_universe` project script
+  render SQL without a database. `docs/universe_selection.md` and
+  `examples/stage4/universe-selection-sql.json` provide the standalone commands
+  and sanitized scope.
+
+### Accepted decisions and semantics
+
+- Training membership is selected from the Stage 2 training range plus its
+  required feature/target warm-up and mature-label dependencies. Future
+  simulation survival and evaluation observations do not select the default
+  universe.
+- `COMPLETE` whole-session evidence is required. Verified `MISSING` sessions
+  become explicit exclusions; `INCOMPLETE`, `INCONSISTENT`, `UNVERIFIED`, and
+  `NOT_YET_AVAILABLE` whole-session states block selection rather than silently
+  shrinking the candidate set.
+- Average daily volume is the arithmetic mean of shares. Volatility is the
+  population standard deviation of fractional close-to-close returns and is not
+  annualized. Every enabled filter requires a positive window and at least one
+  nonnegative bound; lower/upper comparisons are inclusive.
+- `legacy_transactions` remains a separately named training-cutoff count filter
+  and is never treated as volume. Disabled filters authorize no optional
+  dependency reads.
+- Automatic selection sorts stable IDs and stores symbol labels separately.
+  Explicit ordered subsets preserve their requested order only after identity,
+  coverage, and filter validation. IDs remain identities, not tensor positions
+  or descriptors.
+
+### Verification commands and actual results
+
+1. `git status --short` before authoring — clean; all Stage 4 changes are new
+   scoped files plus the `select_universe` entry in `pyproject.toml`. No existing
+   user changes were reset or incorporated.
+2. `.venv\Scripts\python.exe -m pytest tests\universe tests\database\test_universe_selection_sql.py -q` — passed, 13 tests in 2.14s, 4 existing pandas timezone warnings.
+3. `.venv\Scripts\python.exe -m pytest tests\universe tests\database\test_universe_selection_sql.py tests\runs tests\exchange_calendar\test_date_ranges.py tests\documentation -q` — passed, 42 tests in 16.85s, 24 existing pandas timezone warnings.
+4. `.venv\Scripts\python.exe -m pytest tests\architecture tests\recommendations tests\database\test_registry_consumers.py tests\workflows\test_database_simplification_stage9.py -q` — passed, 127 tests in 72.91s, 20 existing pandas timezone warnings.
+5. `.venv\Scripts\python.exe -m mypy src\stockguidance\universe src\stockguidance\database\repositories\universe.py src\stockguidance\database\universe_selection.py src\stockguidance\cli\select_universe.py` — passed with no issues in 5 source files.
+6. `.venv\Scripts\python.exe -m py_compile src\stockguidance\universe\selection.py src\stockguidance\universe\__init__.py src\stockguidance\database\repositories\universe.py src\stockguidance\database\universe_selection.py src\stockguidance\cli\select_universe.py` — passed.
+7. `.venv\Scripts\python.exe -m pytest tests\database -q` — passed, 151 tests in 15.89s, 4 existing pandas timezone warnings.
+8. `.venv\Scripts\python.exe -m stockguidance.cli.select_universe --help` — passed without database/provider side effects.
+9. `.venv\Scripts\python.exe -m stockguidance.cli.select_universe --config examples\stage4\universe-selection-sql.json --step select --sql-output output\stage4-universe-select.sql` — passed and rendered bounded read-only SQL using the configured registry names.
+10. `.venv\Scripts\python.exe -m stockguidance.cli.select_universe --config examples\stage4\universe-selection-sql.json --step validate --sql-output output\stage4-universe-verify.sql` — passed and rendered verification SELECTs.
+11. `git diff --check` — passed; Git emitted only the existing LF/CRLF conversion warning for `pyproject.toml`.
+
+The Stage 4 SQL scripts were rendered only; no live or disposable MySQL
+execution was performed for this stage. SQLite was not used as evidence for
+MySQL behavior. The typed adapter is covered by strict typing and scoped query
+construction; a disposable MySQL read rehearsal remains an operator-level
+follow-up if database execution of this new read path is desired.
+
+### Remaining limitations and next-stage prerequisites
+
+Stage 4 does not connect selected channels to shared samples, fit scalers,
+construct targets, train models, recommend, simulate, or change artifacts.
+Selection evidence is ready for Stage 1 manifests, but later training
+orchestration must supply the resolved Stage 2 plan and invoke the Stage 4
+adapter/selector before deriving model dimensions. Stage 5 is next: it must
+consume this frozen ordered universe and connect existing price/delta plus
+prepared volume channels to samples, preserving exact axes and identity maps.
+It must not add descriptors, embeddings, variable ticker ordering, permutation
+handling, or new transformer paths.
+
+Standalone SQL debugging commands:
+
+```powershell
+.venv\Scripts\python.exe -m stockguidance.cli.select_universe --config examples\stage4\universe-selection-sql.json --step plan --sql-output output\stage4-universe-plan.sql
+.venv\Scripts\python.exe -m stockguidance.cli.select_universe --config examples\stage4\universe-selection-sql.json --step select --sql-output output\stage4-universe-select.sql
+.venv\Scripts\python.exe -m stockguidance.cli.select_universe --config examples\stage4\universe-selection-sql.json --step validate --sql-output output\stage4-universe-verify.sql
+```
+
