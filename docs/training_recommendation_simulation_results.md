@@ -576,3 +576,97 @@ Stage 6 is next and must consume these exact shared samples for target and
 scaler work. Future descriptor vectors, variable ticker ordering, embeddings,
 permutation-invariant models, and new transformer paths remain out of scope.
 
+## Stage 6 — targets and fitted input/output normalization
+
+Status: complete for the versioned target contracts, target construction and
+readiness propagation, job parsing, pure fitted preprocessing, dataset/cache/
+checkpoint compatibility identities, focused tests, and documentation. No
+production database, provider, live-data refresh, schema migration, model
+artifact migration, trade submission, credential output, or commit was
+performed.
+
+### Changed interfaces
+
+- `stockguidance.targets.specification.TargetSpec` remains the raw
+  `raw_return-v1` contract. `TargetSpecV2` adds explicit raw v2, per-ticker
+  return z-score (20/60-session), and same-day cross-sectional return z-score
+  identities. `TargetSpecification` is the shared typed union.
+- `construct_targets` computes raw close-to-close labels first and retains them
+  in `TargetValues.raw`. It applies population-moment transforms to
+  `TargetValues.transformed`, records outcome-only `TargetStatistics`, handles
+  ties and one-ticker universes as zero transformed scores, and preserves
+  explicit missing/unready issues.
+- `build_sample` and `required_session_scope` carry per-ticker baseline close
+  dependencies as label dependencies without turning them into training
+  entries. `SimplifiedTrainingJob`, `TrainingJob`, `HistoryTrainingRequest`,
+  and `inspect_features` now propagate the requested target instead of
+  replacing it with `TargetSpec()`.
+- `stockguidance.preprocessing` adds `PreprocessingSpec`,
+  `FittedTransform`, `FittedPreprocessing`, `fit_preprocessing`, and
+  `fit_training_preprocessing`. Input state is per flattened input coordinate;
+  output state is one shared scalar. Standardization uses population variance,
+  min-max does not clip, and constant dimensions map to zero. State has strict
+  JSON-safe round-trip, feature/ticker/target identity validation, and inverse
+  output scaling.
+- `TrainingDataset.with_preprocessing` and `training_arrays` apply an already
+  fitted state without refitting. Dataset revisions, v2 sample-cache keys, and
+  v2 checkpoint identities include the preprocessing/target identities. v1
+  dataset/cache/checkpoint identity payloads remain unchanged when no v2 state
+  is present.
+- `docs/target_preprocessing.md`, `docs/close_samples.md`, and
+  `docs/model_training.md` document the formulas, axes, leakage boundary,
+  serialization, and Stage 8 artifact limitation.
+
+### Accepted decisions and semantics
+
+- The Stage 0 accepted target choice is implemented as same-day
+  cross-sectional next-session-return z-score using the full fixed universe;
+  the separately accepted per-ticker rolling return z-score uses the prior
+  mature 20 or 60 returns. Existing stored price/price-delta z-score channels
+  remain input features and are not substituted for target transforms.
+- Raw fractional returns remain available for accounting and reporting. A
+  transformed target is not relabeled as a raw return. Cross-sectional and
+  rolling moments are outcome metadata, never inference inputs.
+- Normalization defaults to none and independently supports standard and
+  min-max methods. Fitting is explicitly scoped to eligible training arrays;
+  holdout/inference data only uses transform or inverse operations.
+- Stable ticker IDs and declared feature order are required in fitted state;
+  reordered or changed specifications cannot reuse it. No descriptors,
+  embeddings, variable-order models, or transformer paths were introduced.
+
+### Verification commands and actual results
+
+1. `.venv\Scripts\python.exe -m pytest tests\targets tests\preprocessing tests\datasets tests\training tests\workflows\test_database_simplification_stage9.py tests\configuration tests\documentation -q` — passed, 154 tests, 8 existing pandas timezone warnings, 14.97s.
+2. `.venv\Scripts\python.exe -m pytest tests\training\test_checkpoints.py tests\preprocessing tests\targets -q` — passed, 7 tests, 4 existing pandas timezone warnings, 2.06s; this includes v2 checkpoint identity binding.
+3. `.venv\Scripts\python.exe -m pytest tests\architecture tests\artifacts tests\recommendations tests\simulation -q` — passed, 198 tests, 23 warnings (existing pandas timezone and Torch transformer warnings), 36.99s.
+4. `.venv\Scripts\python.exe -m mypy src\stockguidance` — passed, no issues in 303 source files.
+5. `.venv\Scripts\python.exe -m py_compile src\stockguidance\preprocessing.py src\stockguidance\targets\specification.py src\stockguidance\targets\construction.py src\stockguidance\datasets\building.py src\stockguidance\datasets\training.py src\stockguidance\training\jobs.py src\stockguidance\workflows\simplified_training.py src\stockguidance\cli\inspect_features.py` — passed.
+6. `git diff --check` — passed; Git reported only the existing LF/CRLF conversion warnings and no whitespace errors.
+
+No live or disposable MySQL rehearsal was needed for this stage: target
+transforms and fitted state are code/artifact concerns, and no database schema
+or target column was added. No provider requests or live data downloads were
+made.
+
+### Standalone commands
+
+```powershell
+.venv\Scripts\python.exe -m pytest tests\targets tests\preprocessing -q
+.venv\Scripts\python.exe -m mypy src\stockguidance\targets src\stockguidance\preprocessing.py src\stockguidance\datasets src\stockguidance\workflows\simplified_readiness.py src\stockguidance\config\training.py src\stockguidance\training
+```
+
+### Remaining limitations and next-stage prerequisites
+
+Stage 6 does not automatically fit preprocessing inside the end-to-end job
+orchestration, change model/loss controls, or extend the standalone inference
+artifact codec. `TrainingDataset` can carry a fitted state and the numerical
+adapter applies it, but Stage 8 must bind target/scaler/universe metadata into
+standalone artifacts and inference loading. Target v2 training through the
+existing v1 artifact codec is intentionally not claimed complete.
+
+Stage 7 is next and must consume the target-space/preprocessed arrays for
+RMSE/ranking objectives while preserving v1 MAE. Stage 8 must compose fitted
+preprocessing with configured training, checkpoint/artifact export, and strict
+compatibility validation before recommendations or simulation consume these
+new semantics.
+

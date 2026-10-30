@@ -50,7 +50,7 @@ from stockguidance.market_data.publication import DailyPublicationPolicy
 from stockguidance.market_data.quality import QualityFlag
 from stockguidance.market_data.closes import CloseIssue, CloseObservation, PriceState
 from stockguidance.recommendations.eligibility import LiquidityObservation
-from stockguidance.targets.specification import TargetSpec
+from stockguidance.targets.specification import TargetSpec, TargetSpecification
 
 
 class SimplifiedCoverageError(RuntimeError):
@@ -157,9 +157,10 @@ class RequiredSessionScope:
 	label_sessions: tuple[TradingSession, ...]
 	normalization_warmup: int
 	feature_dependency_sessions: tuple[TradingSession, ...] = ()
+	target_dependency_sessions: tuple[TradingSession, ...] = ()
 
 	def __post_init__(self) -> None:
-		for name, values in (("sessions", self.sessions), ("feature_sessions", self.feature_sessions), ("label_sessions", self.label_sessions), ("feature_dependency_sessions", self.feature_dependency_sessions)):
+		for name, values in (("sessions", self.sessions), ("feature_sessions", self.feature_sessions), ("label_sessions", self.label_sessions), ("feature_dependency_sessions", self.feature_dependency_sessions), ("target_dependency_sessions", self.target_dependency_sessions)):
 			if not isinstance(values, tuple) or any(not isinstance(value, TradingSession) for value in values):
 				raise ValueError(f"{name} must contain trading sessions")
 		if type(self.normalization_warmup) is not int or self.normalization_warmup < 0:
@@ -170,7 +171,7 @@ def required_session_scope(
 	calendar: SessionCalendar,
 	decisions: tuple[DecisionTiming, ...],
 	features: FeatureSpecification,
-	_target: TargetSpec,
+	_target: TargetSpecification,
 	*,
 	include_labels: bool,
 	normalization_warmup: int = 0,
@@ -194,6 +195,7 @@ def required_session_scope(
 
 	feature: set[TradingSession] = set()
 	feature_dependencies: set[TradingSession] = set()
+	target_dependencies: set[TradingSession] = set()
 	labels: set[TradingSession] = set()
 	for timing in decisions:
 		history_length = features.required_history_sessions if isinstance(features, FeatureSpecV2) else features.lookback_sessions
@@ -202,15 +204,17 @@ def required_session_scope(
 		feature_dependencies.update(calendar.shift(timing.entry_session, offset) for offset in range(-history_length, 0))
 		if include_labels:
 			labels.update((timing.entry_session, timing.exit_session))
+			for offset in (*_target.baseline_offsets, 1):
+				target_dependencies.add(calendar.shift(timing.entry_session, offset))
 	feature.update(extra_sessions)
-	all_required = set(feature) | feature_dependencies | labels
+	all_required = set(feature) | feature_dependencies | target_dependencies | labels
 	if not all_required:
 		raise ValueError("Readiness produced an empty session scope")
 	first = min(all_required, key=lambda item: item.sequence)
 	for offset in range(-normalization_warmup, 0):
 		all_required.add(calendar.shift(first, offset))
 	ordered = tuple(sorted(all_required, key=lambda item: item.sequence))
-	return RequiredSessionScope(ordered, tuple(sorted(feature, key=lambda item: item.sequence)), tuple(sorted(labels, key=lambda item: item.sequence)), normalization_warmup, tuple(sorted(feature_dependencies, key=lambda item: item.sequence)))
+	return RequiredSessionScope(ordered, tuple(sorted(feature, key=lambda item: item.sequence)), tuple(sorted(labels, key=lambda item: item.sequence)), normalization_warmup, tuple(sorted(feature_dependencies, key=lambda item: item.sequence)), tuple(sorted(target_dependencies, key=lambda item: item.sequence)))
 
 
 def boundary_for_scope(source: SourceConfig, calendar: SessionCalendar, scope: RequiredSessionScope, established_at: datetime) -> HistoryBoundary:
@@ -436,7 +440,7 @@ class SimplifiedReadinessWorkflow:
 		self,
 		decisions: tuple[DecisionTiming, ...],
 		features: FeatureSpecification,
-		target: TargetSpec,
+		target: TargetSpecification,
 		*,
 		label_cutoff: datetime | None = None,
 		as_of: datetime | None = None,

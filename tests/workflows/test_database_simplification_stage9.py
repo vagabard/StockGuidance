@@ -27,7 +27,7 @@ from stockguidance.workflows.simplified_readiness import (
 	required_session_scope,
 )
 from stockguidance.features.specification import FeatureSpec
-from stockguidance.targets.specification import TargetSpec
+from stockguidance.targets.specification import TargetKind, TargetSpec, TargetSpecV2
 
 
 NOW = datetime(2024, 7, 11, 23, tzinfo=timezone.utc)
@@ -86,6 +86,13 @@ def test_required_scope_expands_exchange_lookback_labels_and_normalization() -> 
 	assert tuple(item.session_date for item in scope.label_sessions) == (date(2024, 7, 5), date(2024, 7, 8))
 	assert tuple(item.session_date for item in scope.sessions) == (date(2024, 7, 1), date(2024, 7, 2), date(2024, 7, 3), date(2024, 7, 5), date(2024, 7, 8)
 	)
+
+
+def test_required_scope_carries_explicit_cross_sectional_target_dependencies() -> None:
+	calendar = _calendar()
+	target = TargetSpecV2(kind=TargetKind.RETURN_ZSCORE_CROSS_SECTIONAL)
+	scope = required_session_scope(calendar, (_decision(calendar),), FeatureSpec((1,), 2), target, include_labels=True)
+	assert tuple(item.session_date for item in scope.target_dependency_sessions) == (date(2024, 7, 8),)
 
 
 def test_readiness_reports_insufficient_exchange_history(tmp_path: Path) -> None:

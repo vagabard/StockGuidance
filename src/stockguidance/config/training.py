@@ -4,6 +4,8 @@ import json
 from stockguidance.artifacts.decoding import decode_model, integer
 from stockguidance.market_data.identity import mapping
 from stockguidance.models.specification import ModelSpec
+from stockguidance.preprocessing import PreprocessingSpec
+from stockguidance.targets.specification import TargetKind, TargetSpec, TargetSpecV2
 from stockguidance.training.configuration import DeviceChoice, OptimizerChoice, Precision, TrainingConfig
 
 
@@ -35,3 +37,24 @@ def decode_training_configuration(value: object, model: object) -> TrainingConfi
 		optimizer=OptimizerChoice(str(fields["optimizer"])), device=DeviceChoice(str(fields["device"])), precision=Precision(str(fields["precision"])),
 		seed=integer(fields["seed"]), shuffle=boolean(fields["shuffle"]), num_workers=integer(fields["num_workers"]), pin_memory=boolean(fields["pin_memory"]),
 	)
+
+
+def decode_target(value: object | None) -> TargetSpec:
+	"""Decode the optional v2 target while keeping omitted jobs exactly v1."""
+
+	if value is None:
+		return TargetSpec()
+	fields = mapping(value)
+	if set(fields) != {"kind", "window_sessions"}:
+		raise ValueError("Incomplete or unsupported target specification")
+	kind = TargetKind(str(fields["kind"]))
+	window = fields["window_sessions"]
+	if window is not None and type(window) is not int:
+		raise ValueError("Target window must be an integer or null")
+	return TargetSpecV2(kind=kind, rolling_window_sessions=window)
+
+
+def decode_preprocessing(value: object | None) -> PreprocessingSpec:
+	if value is None:
+		return PreprocessingSpec()
+	return PreprocessingSpec.from_mapping(value)

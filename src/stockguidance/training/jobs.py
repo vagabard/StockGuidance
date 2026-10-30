@@ -8,7 +8,7 @@ from stockguidance.calendar.clock import SystemClock
 from stockguidance.calendar.decisions import DecisionTiming
 from stockguidance.calendar.exchange import ExchangeCalendar
 from stockguidance.calendar.protocols import SessionCalendar
-from stockguidance.config.training import decode_training_configuration, number
+from stockguidance.config.training import decode_preprocessing, decode_target, decode_training_configuration, number
 from stockguidance.config.source import SourceConfig
 from stockguidance.config.validation import require_aware_datetime
 from stockguidance.calendar.clock import Clock
@@ -29,7 +29,8 @@ from stockguidance.market_data.history_store import JsonHistoryStore
 from stockguidance.market_data.identity import decode_source, mapping, text_field
 from stockguidance.market_data.publication import DailyPublicationPolicy
 from stockguidance.market_data.opening_store import OpeningStore
-from stockguidance.targets.specification import TargetSpec
+from stockguidance.preprocessing import PreprocessingSpec
+from stockguidance.targets.specification import TargetSpec, TargetSpecification
 from stockguidance.training.configuration import TrainingConfig
 from stockguidance.training.result import TrainingResult
 from stockguidance.workflows.train_model import HistoryTrainingRequest, train_from_history
@@ -52,12 +53,14 @@ class TrainingJob:
 	evaluation_cutoff: datetime | None
 	availability_policy: AvailabilityPolicy = AvailabilityPolicy.STRICT
 	data_snapshot: datetime | None = None
+	target: TargetSpecification = TargetSpec()
+	preprocessing: PreprocessingSpec = PreprocessingSpec()
 
 
 def load_job(path: Path) -> TrainingJob:
 	fields = mapping(json.loads(path.read_text(encoding="utf-8")))
 	required = ("source", "data_root", "database_config", "features", "model", "training", "start_date", "end_date", "training_cutoff", "publication_delay_minutes", "publication_evidence", "decision_minutes_before_close", "evaluation")
-	if set(fields) - {*required, "availability_policy", "data_snapshot"} or any(name not in fields for name in required):
+	if set(fields) - {*required, "availability_policy", "data_snapshot", "target", "preprocessing"} or any(name not in fields for name in required):
 		raise ValueError("Incomplete or unsupported training job fields")
 	identity = decode_source(exact_mapping(fields["source"], ("provider", "endpoint", "market", "universe", "adjustment", "interval")))
 	source = SourceConfig(identity, Path(text_field(fields, "data_root")), Path(text_field(fields, "database_config")))
@@ -90,7 +93,9 @@ def load_job(path: Path) -> TrainingJob:
 		raise ValueError("Data snapshot cannot be in the future")
 	if availability_policy.retrospective and data_snapshot is not None and data_snapshot < cutoff:
 		raise ValueError("Retrospective data_snapshot must include the training cutoff")
-	return TrainingJob(source, features, configuration, start, end, cutoff, publication, lead, evaluation_start, evaluation_end, evaluation_cutoff, availability_policy, data_snapshot)
+	target = decode_target(fields.get("target"))
+	preprocessing = decode_preprocessing(fields.get("preprocessing"))
+	return TrainingJob(source, features, configuration, start, end, cutoff, publication, lead, evaluation_start, evaluation_end, evaluation_cutoff, availability_policy, data_snapshot, target, preprocessing)
 
 
 @dataclass(frozen=True)
@@ -150,5 +155,5 @@ def execute_job(
 			provider = ConfiguredPolygonProvider()
 		return execute_simplified_training(job, artifact_path, connect=connection, provider=provider, clock=clock, checkpoint_path=checkpoint_path, resume_from=resume_from)
 	history = open_job_history(job, connect=connection)
-	request = HistoryTrainingRequest(history.decisions, job.cutoff, job.features, TargetSpec(), job.configuration, artifact_path, history.evaluation_decisions, job.evaluation_cutoff, checkpoint_path, resume_from, job.availability_policy, job.data_snapshot)
+	request = HistoryTrainingRequest(history.decisions, job.cutoff, job.features, job.target, job.configuration, artifact_path, history.evaluation_decisions, job.evaluation_cutoff, checkpoint_path, resume_from, job.availability_policy, job.data_snapshot)
 	return train_from_history(request, history.boundary, history.calendar, job.publication, history.repository)

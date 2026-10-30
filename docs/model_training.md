@@ -172,8 +172,10 @@ Only complete, mature samples enter the dense training tensors. Excluded entry
 dates and feature/target/price states remain in the result. A sample for a T-1
 entry is excluded before T's exit close/publication even if future prices exist
 in storage. Training and inference share exactly the same stateless window
-transforms and ticker order. No fitted preprocessing or target normalization
-is introduced.
+transforms and ticker order. Stage 6 adds explicit target transforms and
+training-only fitted preprocessing; the fitting state is versioned separately
+and is not refit on holdout or inference data. Artifact binding for the new
+state is reserved for Stage 8.
 
 Evaluation is optional and strictly chronological: its entire requested period
 follows the entire requested training period, all its decisions follow the

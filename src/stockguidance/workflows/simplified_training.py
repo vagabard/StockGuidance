@@ -15,7 +15,7 @@ from stockguidance.database.raw_rebuild import RawPayloadProvider
 from stockguidance.features.specification import FeatureSpec
 from stockguidance.market_data.availability import AvailabilityPolicy
 from stockguidance.market_data.publication import DailyPublicationPolicy
-from stockguidance.targets.specification import TargetSpec
+from stockguidance.targets.specification import TargetSpecification
 from stockguidance.training.configuration import TrainingConfig
 from stockguidance.training.result import TrainingResult
 from stockguidance.workflows.simplified_readiness import (
@@ -32,6 +32,8 @@ class SimplifiedTrainingJob(Protocol):
 	def features(self) -> FeatureSpec: ...
 	@property
 	def configuration(self) -> TrainingConfig: ...
+	@property
+	def target(self) -> TargetSpecification: ...
 	@property
 	def start(self) -> date: ...
 	@property
@@ -86,7 +88,7 @@ def execute_simplified_training(
 	result = readiness.ensure(
 		all_decisions,
 		job.features,
-		TargetSpec(),
+		job.target,
 		label_cutoff=label_cutoff,
 		availability_policy=job.availability_policy,
 		data_snapshot=job.data_snapshot,
@@ -96,7 +98,7 @@ def execute_simplified_training(
 		decisions,
 		job.cutoff,
 		job.features,
-		TargetSpec(),
+		job.target,
 		job.configuration,
 		artifact_path,
 		evaluation_decisions,

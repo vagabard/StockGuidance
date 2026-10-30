@@ -18,11 +18,11 @@ from stockguidance.market_data.history import HistoryBoundary
 from stockguidance.market_data.identity import content_id
 from stockguidance.market_data.publication import DailyPublicationPolicy
 from stockguidance.targets.construction import TargetValues, construct_targets
-from stockguidance.targets.specification import TargetSpec
+from stockguidance.targets.specification import TargetSpec, TargetSpecification
 
 
 def build_sample(
-	specification: FeatureSpecification, target: TargetSpec, timing: DecisionTiming,
+	specification: FeatureSpecification, target: TargetSpecification, timing: DecisionTiming,
 	boundary: HistoryBoundary, calendar: SessionCalendar, publication: DailyPublicationPolicy,
 	repository: CloseRepository | None, *, label_cutoff: datetime | None = None,
 	availability_policy: AvailabilityPolicy = AvailabilityPolicy.STRICT, data_snapshot: datetime | None = None,
@@ -64,7 +64,18 @@ def build_sample(
 			target_state = TargetState.NOT_YET_AVAILABLE
 		else:
 			target_state = TargetState.READY
-			sessions.update((timing.entry_session, timing.exit_session))
+			try:
+				target_sessions = tuple(calendar.shift(timing.entry_session, offset) for offset in (*target.baseline_offsets, 1))
+			except IndexError:
+				target_state = TargetState.UNAVAILABLE
+			else:
+				if any(session.session_date < boundary.history_start for session in target_sessions):
+					target_state = TargetState.UNAVAILABLE
+				else:
+					# A per-ticker return z-score uses the immediately preceding
+					# mature return window.  These closes are label dependencies,
+					# not feature timesteps and never become training entries.
+					sessions.update((timing.entry_session, timing.exit_session, *target_sessions))
 	data = None
 	channel_data: FeatureChannelData | None = None
 	if isinstance(specification, FeatureSpecV2) and window.state is WindowState.EXPECTED_AVAILABLE and specification.external_channels:

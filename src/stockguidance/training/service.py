@@ -35,8 +35,14 @@ def train_model(dataset: TrainingDataset, config: TrainingConfig, artifact_path:
 	scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=config.learning_rate_gamma)
 	scaler = torch.amp.GradScaler("cuda", enabled=resources.precision is Precision.FP16)
 	revision = dataset_revision(dataset)
-	identity = checkpoint_identity(config, revision, device=str(resources.device), precision=resources.precision.value, framework_version=str(torch.__version__))
-	start_epoch = 0 if resume_from is None else resume_checkpoint(resume_from, identity, model, optimizer, scheduler, scaler, generator)
+	identity = checkpoint_identity(config, revision, device=str(resources.device), precision=resources.precision.value, framework_version=str(torch.__version__), preprocessing_identity=None if dataset.preprocessing is None else dataset.preprocessing.identity)
+	checkpoint_schema = "stockguidance-checkpoint-1" if dataset.preprocessing is None else "stockguidance-checkpoint-2"
+	if resume_from is None:
+		start_epoch = 0
+	elif dataset.preprocessing is None:
+		start_epoch = resume_checkpoint(resume_from, identity, model, optimizer, scheduler, scaler, generator)
+	else:
+		start_epoch = resume_checkpoint(resume_from, identity, model, optimizer, scheduler, scaler, generator, schema=checkpoint_schema)
 	if start_epoch >= config.epochs:
 		raise ValueError("Resume requires a larger total epoch count than the checkpoint")
 	loader = make_loader(dataset, config, generator, shuffle=config.shuffle)
@@ -51,7 +57,10 @@ def train_model(dataset: TrainingDataset, config: TrainingConfig, artifact_path:
 	provenance = TrainingProvenance(dataset.training_cutoff, dataset.training_cutoff, dataset.eligible[0].timing.entry_session.session_date, dataset.eligible[-1].timing.entry_session.session_date, dataset.eligible[-1].timing.exit_session.session_date, dataset.eligible[-1].timing.exit_session.closes_at, revision, tuple(sample.cache_key for sample in dataset.eligible), tuple(sample.cache_key for sample in dataset.excluded), config.seed, config.epochs, dataset.data_snapshot)
 	metadata = ArtifactMetadata(semantics, config.model, provenance, str(torch.__version__))
 	if checkpoint_path is not None:
-		save_checkpoint(checkpoint_path, identity, config.epochs, model, optimizer, scheduler, scaler, generator)
+		if dataset.preprocessing is None:
+			save_checkpoint(checkpoint_path, identity, config.epochs, model, optimizer, scheduler, scaler, generator)
+		else:
+			save_checkpoint(checkpoint_path, identity, config.epochs, model, optimizer, scheduler, scaler, generator, schema=checkpoint_schema)
 	model.float()
 	artifact = export_artifact(artifact_path, model, metadata)
 	return TrainingResult(artifact, config.epochs, len(dataset.eligible), excluded_samples(dataset), tuple(metrics), training_mae, EvaluationKind.IN_SAMPLE if evaluation is None else EvaluationKind.CHRONOLOGICAL_HOLDOUT, evaluation_mae, 0 if evaluation is None else len(evaluation.eligible), excluded_samples(evaluation), None if evaluation is None else evaluation.training_cutoff, None if evaluation is None else dataset_revision(evaluation), str(resources.device), resources.precision.value, semantics.availability_policy, dataset.data_snapshot, revision)

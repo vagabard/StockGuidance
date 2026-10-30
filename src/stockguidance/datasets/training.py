@@ -12,7 +12,8 @@ from stockguidance.features.specification import FeatureSpecification
 from stockguidance.market_data.history import HistoryBoundary
 from stockguidance.market_data.availability import AvailabilityPolicy
 from stockguidance.market_data.publication import DailyPublicationPolicy
-from stockguidance.targets.specification import TargetSpec
+from stockguidance.preprocessing import FittedPreprocessing
+from stockguidance.targets.specification import TargetSpec, TargetSpecification
 
 
 @dataclass(frozen=True)
@@ -20,6 +21,7 @@ class TrainingDataset:
 	samples: tuple[Sample, ...]
 	training_cutoff: datetime
 	data_snapshot: datetime | None = None
+	preprocessing: FittedPreprocessing | None = None
 
 	def __post_init__(self) -> None:
 		require_aware_datetime(self.training_cutoff, "training cutoff")
@@ -37,6 +39,13 @@ class TrainingDataset:
 			raise ValueError("Training samples must be unique and chronological")
 		if self.samples and self.data_snapshot is not None and any(sample.data_snapshot != self.data_snapshot for sample in self.samples):
 			raise ValueError("Training samples must use one data snapshot")
+		if self.preprocessing is not None:
+			if not isinstance(self.preprocessing, FittedPreprocessing):
+				raise ValueError("Training preprocessing must be a fitted state")
+			preprocessing_sample: Sample | None = self.samples[0] if self.samples else None
+			if preprocessing_sample is None:
+				raise ValueError("Preprocessing cannot be attached to an empty dataset")
+			self.preprocessing.validate_for(preprocessing_sample.features.specification, preprocessing_sample.target_specification)
 
 	@property
 	def eligible(self) -> tuple[Sample, ...]:
@@ -46,10 +55,29 @@ class TrainingDataset:
 	def excluded(self) -> tuple[Sample, ...]:
 		return tuple(sample for sample in self.samples if not sample.training_eligible)
 
+	@property
+	def revision(self) -> str:
+		from stockguidance.market_data.identity import content_id
+
+		payload: dict[str, object] = {
+			"schema": "training-dataset-1" if self.preprocessing is None else "training-dataset-2",
+			"cutoff": self.training_cutoff.isoformat(),
+			"data_snapshot": None if self.data_snapshot is None else self.data_snapshot.isoformat(),
+			"samples": [sample.cache_key for sample in self.samples],
+		}
+		if self.preprocessing is not None:
+			payload["preprocessing"] = self.preprocessing.identity
+		return content_id(payload)
+
+	def with_preprocessing(self, preprocessing: FittedPreprocessing) -> "TrainingDataset":
+		if not isinstance(preprocessing, FittedPreprocessing):
+			raise ValueError("Training dataset requires a fitted preprocessing state")
+		return TrainingDataset(self.samples, self.training_cutoff, self.data_snapshot, preprocessing)
+
 
 def build_training_dataset(
 	decisions: tuple[DecisionTiming, ...], training_cutoff: datetime,
-	specification: FeatureSpecification, target: TargetSpec, boundary: HistoryBoundary,
+	specification: FeatureSpecification, target: TargetSpecification, boundary: HistoryBoundary,
 	calendar: SessionCalendar, publication: DailyPublicationPolicy, repository: CloseRepository | None,
 	availability_policy: AvailabilityPolicy = AvailabilityPolicy.STRICT, data_snapshot: datetime | None = None,
 	channel_repository: FeatureChannelRepository | None = None,

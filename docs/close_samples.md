@@ -17,8 +17,11 @@ A one-session window therefore contains zero relative features; choose a longer
 window for price movement information. Explicit `CloseFeature.LOG_CLOSE` is
 also supported, alone or in an explicitly ordered feature tuple.
 
-Both transformations are stateless. There is no fitted scaler, cross-sectional
-normalization, ranking, full-history extrema, or intraday input. The numerical
+For v1 jobs both transformations are stateless. There is no fitted scaler,
+cross-sectional normalization, ranking, full-history extrema, or intraday
+input in the v1 contract. Stage 6 adds explicit v2 targets and fitted
+preprocessing in [target_preprocessing.md](target_preprocessing.md); it does
+not change v1 job semantics. The numerical
 layout is `(lookback_sessions, ticker_count, feature_count)`, flattened in C order:
 oldest session first, then the declared ticker order, then the declared feature
 order. Sparse ticker IDs are identities, not array offsets. Missing prices
@@ -27,7 +30,9 @@ invalidate the whole feature vector; no ticker is dropped or reordered.
 `TargetSpec` supports only raw `close(T+1) / close(T) - 1`. Raw and transformed
 target tuples are identical and follow the feature specification's ticker order.
 There is no implicit target transformation. Legacy ranked, shifted, and
-open-to-close target specifications are incompatible. Stage 10 adds an explicit
+open-to-close target specifications are incompatible. `TargetSpecV2` adds
+explicit raw, per-ticker return z-score, and same-day cross-sectional return
+z-score targets while retaining raw labels. Stage 10 adds an explicit
 [entry-opening feature channel](entry_open.md) without changing these targets.
 Price adjustment and daily interval must match the
 non-secret source/request identity before storage is accessed.

@@ -6,6 +6,7 @@ import torch
 
 from stockguidance.artifacts.loading import load_artifact
 from stockguidance.datasets.training import build_training_dataset
+from stockguidance.preprocessing import PreprocessingSpec, fit_training_preprocessing
 from stockguidance.training.service import train_model
 
 
@@ -34,3 +35,14 @@ def test_resume_restores_optimizer_scheduler_and_random_state(training, samples,
 	with pytest.raises(ValueError, match="incompatible"):
 		train_model(revised, config, tmp_path / "bad", resume_from=tmp_path / "checkpoint")
 	assert not (tmp_path / "bad").exists()
+
+
+def test_fitted_preprocessing_is_bound_to_v2_checkpoint_identity(training, tmp_path):
+	dataset, _, config = training
+	state = fit_training_preprocessing(dataset, PreprocessingSpec("standard", "min_max"))
+	processed = dataset.with_preprocessing(state)
+	train_model(processed, replace(config, epochs=1), tmp_path / "processed", checkpoint_path=tmp_path / "processed-checkpoint")
+	checkpoint = torch.load(tmp_path / "processed-checkpoint", weights_only=True)
+	assert checkpoint["schema"] == "stockguidance-checkpoint-2"
+	with pytest.raises(ValueError, match="incompatible"):
+		train_model(dataset, replace(config, epochs=2), tmp_path / "wrong", resume_from=tmp_path / "processed-checkpoint")

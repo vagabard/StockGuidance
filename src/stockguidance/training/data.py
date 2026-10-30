@@ -14,7 +14,7 @@ def dataset_semantics(dataset: TrainingDataset) -> ModelSemantics:
 
 
 def dataset_revision(dataset: TrainingDataset) -> str:
-	return content_id({"schema": "training-dataset-1", "cutoff": dataset.training_cutoff.isoformat(), "data_snapshot": None if dataset.data_snapshot is None else dataset.data_snapshot.isoformat(), "samples": [sample.cache_key for sample in dataset.samples]})
+	return dataset.revision
 
 
 def validate_chronology(training: TrainingDataset, evaluation: TrainingDataset | None) -> ModelSemantics:

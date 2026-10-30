@@ -11,7 +11,7 @@ from stockguidance.features.specification import FeatureSpec
 from stockguidance.market_data.history import HistoryBoundary
 from stockguidance.market_data.availability import AvailabilityPolicy
 from stockguidance.market_data.publication import DailyPublicationPolicy
-from stockguidance.targets.specification import TargetSpec
+from stockguidance.targets.specification import TargetSpec, TargetSpecification
 from stockguidance.training.configuration import TrainingConfig
 from stockguidance.training.result import TrainingResult
 from stockguidance.training.service import train_model
@@ -22,7 +22,7 @@ class HistoryTrainingRequest:
 	decisions: tuple[DecisionTiming, ...]
 	training_cutoff: datetime
 	features: FeatureSpec
-	target: TargetSpec
+	target: TargetSpecification
 	configuration: TrainingConfig
 	artifact_path: Path
 	evaluation_decisions: tuple[DecisionTiming, ...] = ()

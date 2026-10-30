@@ -10,7 +10,7 @@ from stockguidance.features.construction import FeatureValues
 from stockguidance.features.history_window import WindowState
 from stockguidance.market_data.availability import AvailabilityPolicy
 from stockguidance.targets.construction import TargetValues
-from stockguidance.targets.specification import TargetSpec
+from stockguidance.targets.specification import TargetSpec, TargetSpecification
 from stockguidance.market_data.quality import QualityFlag
 
 
@@ -28,7 +28,7 @@ class Sample:
 	timing: DecisionTiming
 	features: FeatureValues
 	feature_state: WindowState
-	target_specification: TargetSpec
+	target_specification: TargetSpecification
 	targets: TargetValues
 	target_state: TargetState
 	label_cutoff: datetime | None

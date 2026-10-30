@@ -32,5 +32,9 @@ def training_arrays(dataset: TrainingDataset) -> tuple[NDArray[np.float64], NDAr
 	specification = eligible[0].features.specification
 	features = np.asarray([sample.features.values for sample in eligible], dtype=np.float64)
 	targets = np.asarray([sample.targets.transformed for sample in eligible], dtype=np.float64)
+	if dataset.preprocessing is not None:
+		dataset.preprocessing.validate_for(eligible[0].features.specification, eligible[0].target_specification)
+		features = dataset.preprocessing.transform_inputs(features)
+		targets = dataset.preprocessing.transform_outputs(targets)
 	validate_arrays(features, targets, specification)
 	return features, targets
