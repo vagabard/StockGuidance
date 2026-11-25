@@ -51,3 +51,13 @@ def test_per_ticker_target_uses_previous_mature_returns() -> None:
 	assert target.transformed[0] == pytest.approx((target.raw[0] - target.statistics.means[0]) / target.statistics.variances[0] ** .5)
 	assert target.transformed[1] == pytest.approx(0.0, abs=1e-10)
 	assert target.statistics is not None and len(target.statistics.baseline_sessions) == 20
+
+
+def test_zscore_target_accepts_negative_mean_and_preserves_raw_return_ranking() -> None:
+	sessions = _sessions(2)
+	data = _close_data(sessions, {(0, 1): 100.0, (0, 2): 100.0, (1, 1): 90.0, (1, 2): 80.0})
+	target = construct_targets(TargetSpecV2(kind=TargetKind.RETURN_ZSCORE_CROSS_SECTIONAL), (1, 2), sessions[0], sessions[1], data)
+	assert target.ready
+	assert target.raw == pytest.approx((-.1, -.2))
+	assert target.transformed == pytest.approx((1.0, -1.0))
+	assert target.statistics.means == pytest.approx((-.15,))

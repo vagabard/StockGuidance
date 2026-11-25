@@ -276,6 +276,11 @@ class SimplifiedCloseRepository(CloseRepository):
 			if readiness.status is ReadinessState.UNFINISHED_OPERATION:
 				overlap_date = next((day for day, value in by_date.items() if readiness.date_id is not None and value[0] == readiness.date_id), None)
 				raise SimplifiedCoverageError(readiness.phase or "operation", readiness.reason or "An unfinished operation overlaps this read", session_date=overlap_date, ticker_id=readiness.ticker_id)
+			from stockguidance.database.validation_gate import require_raw_pass
+			try:
+				require_raw_pass(cursor, self.table_names, ids)
+			except ValueError as error:
+				raise SimplifiedCoverageError("validation", str(error)) from error
 			prices_table = quote_identifier(self.table_names.table(TableRole.PRICES))
 			parameters = ids + tuple(query.ticker_ids)
 			cursor.execute(
@@ -298,40 +303,38 @@ class SimplifiedCloseRepository(CloseRepository):
 
 		observations = []
 		issues: list[CloseIssue] = []
+		prices_by_key = {(_integer(row[0],"price date_id"),_integer(row[1],"price ticker_id")):row for row in price_rows}
 		for session in query.scope.sessions:
 			date_id, _complete, raw_available, raw_revision = by_date[session.session_date]
 			for ticker_id in query.ticker_ids:
-				price_row: Sequence[object] | None = None
-				for candidate in price_rows:
-					if _integer(candidate[0], "price date_id") == date_id and _integer(candidate[1], "price ticker_id") == ticker_id:
-						price_row = candidate
-						break
+				price_row = prices_by_key.get((date_id,ticker_id))
 				if price_row is None:
 					issues.append(CloseIssue(ticker_id, session, PriceState.EXPECTED_ABSENCE, "Ticker is absent from the completed source response"))
 					continue
 				state = DATA_STATE_BY_ID.get(_integer(price_row[3], "price state"), DataState.BAD)
 				repair_row = repair.get((date_id, ticker_id))
 				quality, gap = _quality_for_repair(state)
-				available_at = raw_available
+				# Current validated history follows market-session chronology.
+				# Receipt/import timestamps do not determine historical eligibility.
+				available_at = session.closes_at
 				revision = raw_revision
 				if state is DataState.INTERPOLATED:
 					if repair_row is None or repair_row[1] is not DataState.INTERPOLATED:
 						issues.append(CloseIssue(ticker_id, session, PriceState.INVALID, "Interpolated source state has no matching repair metadata"))
 						continue
 					revision, _repair_state, repair_available = repair_row
-					available_at = repair_available or raw_available
 				if state is DataState.BAD:
 					issues.append(CloseIssue(ticker_id, session, PriceState.INVALID, "Source observation is explicitly invalid", quality, gap, () if revision is None else (revision,)))
 					continue
 				if state is DataState.MISSING:
 					issues.append(CloseIssue(ticker_id, session, PriceState.MISSING, "Source observation is explicitly known missing", quality, gap, () if revision is None else (revision,)))
 					continue
-				if available_at is None or revision is None:
-					issues.append(CloseIssue(ticker_id, session, PriceState.UNVERIFIED, "Completed source observation lacks availability or revision evidence"))
+				if revision is None:
+					issues.append(CloseIssue(ticker_id, session, PriceState.UNVERIFIED, "Completed source observation lacks a current data version"))
 					continue
 				assert available_at is not None
 				if available_at > query.scope.as_of:
-					issues.append(CloseIssue(ticker_id, session, PriceState.NOT_YET_AVAILABLE, "Source observation was committed after the query cutoff", quality, gap, (revision,)))
+					issues.append(CloseIssue(ticker_id, session, PriceState.NOT_YET_AVAILABLE, "Market session closes after the query cutoff", quality, gap, ()))
 					continue
 				try:
 					close = float(Decimal(str(price_row[2])))
@@ -343,7 +346,7 @@ class SimplifiedCloseRepository(CloseRepository):
 				if not query.quality_policy.accepts(quality):
 					issues.append(CloseIssue(ticker_id, session, PriceState.INVALID, "Interpolated or bad observation is excluded by the selected quality policy", quality, gap, (revision,)))
 					continue
-				observations.append(CloseObservation(ticker_id, close, ObservationTiming(session, session.closes_at, available_at), _close_revision(raw_revision, revision), quality, gap, (revision,) if revision is not None else ()))
+				observations.append(CloseObservation(ticker_id, close, ObservationTiming(session, session.closes_at, available_at), _close_revision(raw_revision, revision), quality, gap, ()))
 		return CloseData(query, tuple(observations), tuple(issues))
 
 	def inspect(self, query: CloseQuery) -> tuple[CloseData, DatabaseInspection]:
@@ -479,16 +482,22 @@ class SimplifiedReadinessWorkflow:
 			raise SimplifiedCoverageError("coverage", "No required exchange session is available at the requested cutoff")
 		SourceConfigurationRepository(self.source, self.connect, self.table_names).assert_compatible()
 		try:
-			update = run_simplified_update(self.source, self.connect, self.calendar, published, provider=self.provider, windows=(), staging_root=self.staging_root, clock=self.clock, table_names=self.table_names, lock_factory=self.lock_factory)
+			if self._already_complete(published, require_derived=isinstance(features, FeatureSpecV2) and bool(features.external_channels)):
+				update = SimplifiedUpdateResult(self.source,published,None,False,0,True)
+			else:
+				update = run_simplified_update(self.source, self.connect, self.calendar, published, provider=self.provider, windows=(), staging_root=self.staging_root, clock=self.clock, table_names=self.table_names, lock_factory=self.lock_factory)
 		except SimplifiedCoverageError:
 			raise
 		except Exception as error:
 			first = published[0]
 			raise SimplifiedCoverageError("raw", "Required database coverage could not be completed", session_date=first.session_date) from error
-		validation = validate_simplified_database(self.source, self.connect, self.calendar, published, table_names=self.table_names)
+		# Prepared channel reads check each sample's actual z-score statuses.
+		# Missing delta inputs in additional warm-up history may exclude samples;
+		# they must not reject every sample in the requested training period.
+		validation = validate_simplified_database(self.source, self.connect, self.calendar, published, table_names=self.table_names, ticker_ids=features.ticker_ids, include_derived=False)
 		if validation.state == "unfinished_operation":
 			raise SimplifiedCoverageError("operation", "An unfinished database operation overlaps the requested range")
-		self._require_completion(published)
+		self._require_completion(published, require_derived=isinstance(features, FeatureSpecV2) and bool(features.external_channels))
 		revision = database_revision(self.source, self.connect, published, self.table_names)
 		update = replace(update, data_revision=revision)
 		return SimplifiedReadinessResult(self.source, boundary, scope, update, validation, revision)
@@ -535,7 +544,8 @@ class SimplifiedReadinessWorkflow:
 		if not published:
 			raise SimplifiedCoverageError("coverage", "No required exchange session is available at the requested cutoff")
 		SourceConfigurationRepository(self.source, self.connect, self.table_names).assert_compatible()
-		validation = validate_simplified_database(self.source, self.connect, self.calendar, published, table_names=self.table_names)
+		validation = validate_simplified_database(self.source, self.connect, self.calendar, published, table_names=self.table_names, ticker_ids=features.ticker_ids, include_derived=False)
+		self._require_completion(published, require_derived=isinstance(features, FeatureSpecV2) and bool(features.external_channels))
 		if validation.state == "unfinished_operation":
 			raise SimplifiedCoverageError("operation", "An unfinished database operation overlaps the requested range")
 		boundary = boundary_for_scope(self.source, self.calendar, scope, self.clock.now())
@@ -545,7 +555,16 @@ class SimplifiedReadinessWorkflow:
 		update = replace(update, data_revision=revision)
 		return SimplifiedReadinessResult(self.source, boundary, scope, update, validation, revision)
 
-	def _require_completion(self, sessions: tuple[TradingSession, ...]) -> None:
+	def _already_complete(self, sessions: tuple[TradingSession, ...], *, require_derived: bool = True) -> bool:
+		with consistent_read_transaction(self.source,self.connect) as transaction:
+			cursor = transaction.cursor()
+			table = quote_identifier(self.table_names.table(TableRole.SESSIONS))
+			dates = tuple(s.session_date for s in sessions)
+			cursor.execute(f"SELECT id,raw_complete,delta_complete FROM {table} WHERE transaction_date IN ({_placeholders(dates)})",dates)
+			rows = cursor.fetchall()
+			return len(rows)==len(dates) and all(_boolean(row[1],"raw_complete") and (not require_derived or _boolean(row[2],"delta_complete")) for row in rows) and DatabaseReadinessGuard(self.table_names).check(ReadScope(date_ids=tuple(_integer(row[0],"date_id") for row in rows)),transaction).ready
+
+	def _require_completion(self, sessions: tuple[TradingSession, ...], *, require_derived: bool = True) -> None:
 		with consistent_read_transaction(self.source, self.connect) as transaction:
 			cursor = transaction.cursor()
 			require_simplified_schema(cursor, self.table_names)
@@ -560,7 +579,7 @@ class SimplifiedReadinessWorkflow:
 					raise SimplifiedCoverageError("coverage", "Required session is absent after update", session_date=session.session_date)
 				if not value[0]:
 					raise SimplifiedCoverageError("raw", "Required raw session is not complete", session_date=session.session_date)
-				if not value[1]:
+				if require_derived and not value[1]:
 					raise SimplifiedCoverageError("delta", "Required derived session is not complete", session_date=session.session_date)
 
 

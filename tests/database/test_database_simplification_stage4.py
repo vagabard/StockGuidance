@@ -153,6 +153,20 @@ def test_latest_incomplete_target_does_not_extend_beyond_snapshot(source_config:
 	assert max(_unit_dates(scope.clear.zscores, UnitKind.ZSCORE_SESSION.value)) == changed
 
 
+def test_initial_import_defers_unimported_future_derived_work(source_config: SourceConfig) -> None:
+	sessions, snapshot = _snapshot(source_config, incomplete_date=_sessions()[2].session_date)
+	items = list(snapshot.sessions)
+	items[3] = replace(items[3], raw_complete=False, delta_complete=False, raw_ticker_ids=(), delta_ticker_ids=())
+	snapshot = replace(snapshot, sessions=tuple(items))
+	requested = sessions[2].session_date
+	future = sessions[3].session_date
+	scope = DependencyPlanner().plan(_request(source_config, (sessions[2],), OperationKind.INITIAL_IMPORT), snapshot)
+
+	assert requested in _unit_dates(scope.clear.raw, UnitKind.RAW_SESSION.value)
+	assert future not in _unit_dates(scope.clear.deltas, UnitKind.DELTA_SESSION.value)
+	assert future not in _unit_dates(scope.clear.zscores, UnitKind.ZSCORE_SESSION.value)
+
+
 def test_scope_round_trip_is_deterministic_and_preserves_explicit_closure(source_config: SourceConfig) -> None:
 	sessions, snapshot = _snapshot(source_config)
 	request = _request(source_config, sessions, OperationKind.FORCED_REPLACEMENT, (sessions[2].session_date,))

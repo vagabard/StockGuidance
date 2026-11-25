@@ -8,6 +8,7 @@ from stockguidance.config.source import PriceAdjustment
 from stockguidance.calendar.decisions import DecisionTiming
 from stockguidance.calendar.exchange import ExchangeCalendar
 from stockguidance.recommendations.jobs import RecommendationConfiguration
+from stockguidance.recommendations.resolution import ReplayClock
 from stockguidance.database.repositories.eligibility import VerifiedEligibilityRepository
 from stockguidance.database.repositories.mysql_market_data import MySQLMarketDataRepository
 from stockguidance.database.repositories.mysql_validation import MySQLValidationRepository
@@ -62,6 +63,8 @@ def _artifact_owned_specification(configuration: RecommendationConfiguration, ar
 	semantics = artifact.metadata.semantics if hasattr(artifact, "metadata") else artifact.semantics
 	if semantics.source != configuration.source.identity:
 		raise ValueError("Recommendation source differs from the artifact-owned source")
+	if configuration.resolution_metadata and (semantics.features != configuration.features or semantics.target != configuration.target):
+		raise StageExecutionError(StageFailure(WorkflowStage.ARTIFACT,FailureCode.INCOMPATIBLE_ARTIFACT,"Selected universe/features differ from the saved artifact; retrain for the new selection"))
 	return semantics.features, semantics.target
 
 
@@ -74,7 +77,7 @@ def _target_assemble(configuration: RecommendationConfiguration, arguments: Reco
 		raise ValueError("Model policy and training configuration differ")
 	owned_artifact = _preflight_current_artifact(arguments)
 	features, target = _artifact_owned_specification(configuration, owned_artifact, current=arguments.policy is ModelRefreshPolicy.CURRENT)
-	clock = SystemClock()
+	clock = SystemClock() if configuration.replay_cutoff is None else ReplayClock(configuration.replay_cutoff)
 	first = min(configuration.start or configuration.anchor_date, configuration.anchor_date)
 	last = max(configuration.end, configuration.entry_date) + timedelta(days=30)
 	calendar = ExchangeCalendar(source.calendar_id, first - timedelta(days=45), last)
@@ -93,6 +96,9 @@ def _target_assemble(configuration: RecommendationConfiguration, arguments: Reco
 		raise ValueError("Current requires an explicit artifact identity")
 	reference = None if arguments.artifact_id is None else ArtifactReference(arguments.artifact, arguments.artifact_id)
 	job = RecommendationJob(source, scope.sessions[0].session_date, configuration.end, configuration.entry_date, features, target, ModelSelection(policy, None if reference is None else reference.artifact_id), AllocationSpec(configuration.allocation_policy, calendar.session(configuration.anchor_date)), configuration.publication, configuration.corrections, configuration.eligibility, configuration.top_k, reference, ArtifactKind(arguments.artifact_kind), retraining, configuration.availability_policy, arguments.refresh_mode, None)
+	if configuration.resolution_metadata:
+		from dataclasses import replace
+		job = replace(job,resolution_metadata=configuration.resolution_metadata)
 	portfolio = None
 	if arguments.portfolio_state is not None:
 		portfolio = load_portfolio(arguments.portfolio_state, job.allocation, calendar)
@@ -118,12 +124,13 @@ def assemble_and_recommend(configuration: RecommendationConfiguration, arguments
 	connect = MySQLConnectionFactory()
 	table_names = load_database_configuration(configuration.source.database_config).load_table_names()
 	try:
-		if target_schema_state(connect, configuration.source.database_config, table_names) == "target":
-			return _target_assemble(configuration, arguments, connect, table_names)
+		is_target = target_schema_state(connect, configuration.source.database_config, table_names) == "target"
 	except RuntimeError:
 		# A legacy history workflow can remain usable when its optional target
 		# database is unavailable.  A present incompatible target is not hidden.
-		pass
+		is_target = False
+	if is_target:
+		return _target_assemble(configuration, arguments, connect, table_names)
 	boundary = JsonHistoryStore(configuration.source.data_root / "history").load(configuration.source.identity)
 	if boundary is None:
 		raise UnknownHistoryBoundary("Recommendation requires evidenced, persisted source history; use update_market_data first")

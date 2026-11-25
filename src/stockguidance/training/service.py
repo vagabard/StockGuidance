@@ -1,5 +1,6 @@
 from dataclasses import asdict
 from pathlib import Path
+import sys
 
 from stockguidance.artifacts.contracts import ArtifactMetadata, ArtifactUniverse, ModelSemantics, TrainingProvenance
 from stockguidance.artifacts.exporting import export_artifact
@@ -76,10 +77,13 @@ def train_model(dataset: TrainingDataset, config: TrainingConfig, artifact_path:
 	loader = make_loader(dataset, config, generator, shuffle=config.shuffle)
 	metrics: list[EpochMetrics] = []
 	output_transform = None if dataset.preprocessing is None else dataset.preprocessing.output
+	print(f"Training started: {len(dataset.eligible)} samples, {len(semantics.features.ticker_ids)} tickers, {config.epochs} epochs, device={resources.device}", file=sys.stderr, flush=True)
 	for epoch in range(start_epoch + 1, config.epochs + 1):
 		epoch_result = fit_epoch_metrics(model, loader, optimizer, scaler, resources, config.loss, output_transform)
 		metrics.append(EpochMetrics(epoch, epoch_result.mae, float(optimizer.param_groups[0]["lr"]), epoch_result.objective_loss, epoch_result.rmse, epoch_result.pair_count, epoch_result.ordering_accuracy))
 		scheduler.step()
+		if epoch == start_epoch + 1 or epoch % 10 == 0 or epoch == config.epochs:
+			print(f"Training epoch {epoch}/{config.epochs}: MAE={epoch_result.mae:.8g}", file=sys.stderr, flush=True)
 	evaluation_generator = torch.Generator().manual_seed(config.seed)
 	training_metrics = evaluate_metrics(model, make_loader(dataset, config, evaluation_generator, shuffle=False), resources, config.loss, output_transform)
 	evaluation_dataset = None if evaluation is None else evaluation if dataset.preprocessing is None else evaluation.with_preprocessing(dataset.preprocessing)

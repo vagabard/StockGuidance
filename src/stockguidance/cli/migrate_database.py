@@ -24,7 +24,7 @@ def _windows(value: str) -> tuple[int, ...]:
 
 def parser() -> argparse.ArgumentParser:
 	result = argparse.ArgumentParser(description="Plan or explicitly execute the Stage 12 simplified-schema migration")
-	result.add_argument("phase", nargs="?", choices=("plan", "apply", "status", "validate", "cutover", "retire"), default="plan", help="plan and status do not write; validate checkpoints comparisons in the target")
+	result.add_argument("phase", nargs="?", choices=("plan", "apply", "status", "upgrade", "validate", "cutover", "retire"), default="plan", help="plan and status do not write; upgrade is explicit v2-to-v3 DDL")
 	result.add_argument("--legacy-dbinfo-file", type=Path, required=True)
 	result.add_argument("--target-dbinfo-file", type=Path, required=True)
 	result.add_argument("--data-root", type=Path, default=Path("data"))
@@ -34,6 +34,7 @@ def parser() -> argparse.ArgumentParser:
 	result.add_argument("--journal", type=Path, required=False)
 	result.add_argument("--batch-size", type=int, default=10_000, help="Maximum source rows per SQL copy/validation batch (default: 10000)")
 	result.add_argument("--apply-confirmation", default=None)
+	result.add_argument("--upgrade-confirmation", default=None)
 	result.add_argument("--cutover-confirmation", default=None)
 	result.add_argument("--retire-confirmation", default=None)
 	return result
@@ -60,7 +61,10 @@ def main(argv: list[str] | None = None) -> int:
 			print(json.dumps(payload, sort_keys=True, indent=2, default=str))
 			return 2 if payload.get("blocked_reasons") else 0
 		paths = _paths(arguments)
-		if arguments.phase == "apply":
+		if arguments.phase == "upgrade":
+			from stockguidance.database.schema_upgrade import upgrade
+			payload = upgrade(migration, paths, confirmation=arguments.upgrade_confirmation or "")
+		elif arguments.phase == "apply":
 			payload = migration.apply(paths, confirmation=arguments.apply_confirmation or "")
 		elif arguments.phase == "status":
 			payload = migration.status(paths)

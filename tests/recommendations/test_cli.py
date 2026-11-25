@@ -146,7 +146,7 @@ def test_unknown_history_fails_without_creating_paths(recommender, job_json, tmp
 
 def test_documented_configuration_parses_without_database_or_provider_calls(tmp_path):
 	document = (Path(__file__).resolve().parents[2] / "docs" / "recommendations.md").read_text(encoding="utf-8")
-	match = re.search(r"```json\n(.*?)\n```", document, re.DOTALL)
+	match = next((item for item in re.finditer(r"```json\n(.*?)\n```", document, re.DOTALL) if '"entry_date"' in item.group(1)),None)
 	assert match is not None
 	path = tmp_path / "documented.json"
 	path.write_text(match.group(1), encoding="utf-8")

@@ -1,3 +1,4 @@
+from typing import Any
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -37,6 +38,7 @@ class DecisionForecast:
 	sample: Sample
 	prediction: RankedPrediction
 	training: TrainingResult | None = None
+	resolution_metadata: dict[str,Any] | None = None
 
 
 class ScoreSource(Protocol):

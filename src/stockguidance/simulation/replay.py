@@ -4,7 +4,7 @@ The replay adapters deliberately accept only the data written by the simulation
 report.  They never open a database, refresh a provider, or load a model.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -64,7 +64,7 @@ def _rows(value: object, name: str) -> tuple[Mapping[str, object], ...]:
 class SavedExecutionPrices(ExecutionPriceSource):
 	"""Execution evidence loaded entirely from a saved simulation report."""
 
-	def __init__(self, source: SourceIdentity, audit_cutoff: datetime, frames: tuple[ExecutionFrame, ...]) -> None:
+	def __init__(self, source: SourceIdentity, audit_cutoff: datetime, frames: tuple[ExecutionFrame, ...], *, allow_subsets: bool=False) -> None:
 		if not isinstance(source, SourceIdentity) or not isinstance(audit_cutoff, datetime) or audit_cutoff.tzinfo is None:
 			raise ValueError("Saved execution prices require a typed source and aware audit cutoff")
 		if not frames or any(frame.source != source for frame in frames):
@@ -72,6 +72,7 @@ class SavedExecutionPrices(ExecutionPriceSource):
 		if len({frame.session for frame in frames}) != len(frames):
 			raise ValueError("Saved execution evidence cannot contain duplicate sessions")
 		self._source, self._audit_cutoff = source, audit_cutoff
+		self.allow_subsets = allow_subsets
 		self._frames = {frame.session: frame for frame in frames}
 
 	@property
@@ -91,6 +92,8 @@ class SavedExecutionPrices(ExecutionPriceSource):
 		if frame is None:
 			raise ReplayCoverageError(f"Saved execution quotes do not cover session {session.session_date.isoformat()}")
 		if frame.ticker_ids != ticker_ids:
+			if self.allow_subsets and set(ticker_ids).issubset(frame.ticker_ids):
+				return ExecutionFrame(self.source,session,ticker_ids,tuple(q for q in frame.quotes if q.ticker_id in ticker_ids),tuple(q for q in frame.issues if q.ticker_id in ticker_ids))
 			missing = sorted(set(ticker_ids) - set(frame.ticker_ids))
 			extra = sorted(set(frame.ticker_ids) - set(ticker_ids))
 			raise ReplayCoverageError(f"Saved execution quote coverage differs for {session.session_date.isoformat()}; missing={missing}, extra={extra}")
@@ -108,9 +111,13 @@ class SavedExecutionPrices(ExecutionPriceSource):
 			issues: list[CloseIssue] = []
 			for issue_value in _rows(value.get("issues"), "issues"):
 				issues.append(CloseIssue(_integer(issue_value.get("ticker_id"), "issue ticker ID"), session, PriceState(_text(issue_value.get("state"), "issue state")), "Saved execution issue"))
-			frames.append(ExecutionFrame(source, session, ticker_ids, tuple(quotes), tuple(issues)))
+			frame_values = value.get("ticker_ids")
+			if frame_values is not None and not isinstance(frame_values,list):
+				raise ValueError("Saved execution ticker IDs must be a list")
+			frame_ids = ticker_ids if frame_values is None else tuple(_integer(v,"execution ticker ID") for v in frame_values)
+			frames.append(ExecutionFrame(source, session, frame_ids, tuple(quotes), tuple(issues)))
 		cutoff = datetime.fromisoformat(_text(report.get("execution_audit_cutoff"), "execution audit cutoff"))
-		return cls(source, cutoff, tuple(frames))
+		return cls(source, cutoff, tuple(frames),allow_subsets=bool(report.get("dynamic_universe")))
 
 
 class SavedScoreSource(ScoreSource):
@@ -122,6 +129,7 @@ class SavedScoreSource(ScoreSource):
 		if report.get("schema") not in ("stockguidance-simulation-1", "stockguidance-simulation-2"):
 			raise ValueError("Unsupported saved simulation report")
 		self.report, self.request, self.calendar = report, request, calendar
+		self.dynamic_universe = bool(report.get("dynamic_universe"))
 		self._decisions = {self._entry_date(item): item for item in _rows(report.get("decisions"), "decisions")}
 		if len(self._decisions) != len(_rows(report.get("decisions"), "decisions")):
 			raise ValueError("Saved simulation decisions contain duplicate entry sessions")
@@ -169,15 +177,19 @@ class SavedScoreSource(ScoreSource):
 			raise DecisionUnavailable(f"Saved scores do not cover evaluation session {timing.entry_session.session_date.isoformat()}")
 		scores = tuple(RankedTicker(_integer(item.get("ticker_id"), "score ticker ID"), _real(item.get("score"), "score"), None if item.get("symbol") is None else str(item["symbol"])) for item in _rows(value.get("scores"), "scores"))
 		eligibility = self._eligibility(value.get("eligibility"), timing)
-		if tuple(item.ticker_id for item in scores) != request.features.ticker_ids or tuple(item.ticker_id for item in eligibility) != request.features.ticker_ids:
+		specification = replace(request.features,ticker_ids=tuple(item.ticker_id for item in scores)) if self.dynamic_universe else request.features
+		if tuple(item.ticker_id for item in scores) != specification.ticker_ids or tuple(item.ticker_id for item in eligibility) != specification.ticker_ids:
 			missing = sorted(set(request.features.ticker_ids) - {item.ticker_id for item in scores})
 			raise ReplayCoverageError(f"Saved scores do not cover the requested ordered universe; missing={missing}")
 		ranking = rank_scores(scores, eligibility, request.top_k)
 		sessions = tuple(self.calendar.shift(timing.entry_session, offset) for offset in range(-request.features.lookback_sessions, 0))
-		features = FeatureValues(request.features, sessions, (0.0,) * request.features.input_size)
-		targets = TargetValues((None,) * len(request.features.ticker_ids), (None,) * len(request.features.ticker_ids))
+		features = FeatureValues(specification, sessions, (0.0,) * specification.input_size)
+		targets = TargetValues((None,) * len(specification.ticker_ids), (None,) * len(specification.ticker_ids))
 		placeholder = Sample(request.source, timing, features, WindowState.EXPECTED_AVAILABLE, request.target, targets, TargetState.NOT_REQUESTED, None, _text(value.get("feature_identity"), "feature identity"), _text(value.get("data_revision"), "data revision"), self.calendar.version, request.availability_policy, request.data_snapshot)
-		return DecisionForecast(_text(value.get("artifact_id"), "artifact ID"), placeholder, RankedPrediction(scores, eligibility, ranking, _text(value.get("data_revision"), "prediction revision"), (), ()), None)
+		resolution = value.get("resolution")
+		if resolution is not None and not isinstance(resolution,dict):
+			raise ValueError("Saved decision resolution must be a mapping")
+		return DecisionForecast(_text(value.get("artifact_id"), "artifact ID"), placeholder, RankedPrediction(scores, eligibility, ranking, _text(value.get("data_revision"), "prediction revision"), (), ()), None,resolution)
 
 
 def load_saved_replay(report_path: Path) -> dict[str, object]:

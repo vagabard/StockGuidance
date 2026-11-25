@@ -424,8 +424,8 @@ class _PreparedScopePlanner:
 					raise SimplifiedRuntimeError(f"Ticker identity is duplicated for {label}")
 				if rows:
 					identifier = _db_int(rows[0][0], "ticker_id")
-					if rows[0][1] is not None and _db_text(rows[0][1], "ticker exchange") != exchange:
-						raise SimplifiedRuntimeError(f"Ticker exchange identity changed for {label}")
+					# The grouped daily response has no per-ticker exchange.  The
+					# session calendar is not evidence that an existing ticker moved.
 					identifiers.append(identifier)
 					continue
 				cursor.execute(f"INSERT INTO {table} (label, exchange) VALUES (%s, %s)", (label, exchange))
@@ -602,6 +602,8 @@ def validate_simplified_database(
 	sessions: tuple[TradingSession, ...],
 	*,
 	table_names: TableNames | None = None,
+	ticker_ids: tuple[int, ...] | None = None,
+	include_derived: bool = True,
 ) -> SimplifiedValidationResult:
 	if not sessions:
 		return SimplifiedValidationResult((), (SimplifiedFinding(None, None, "coverage", "Requested range contains no exchange sessions", True),), "failed")
@@ -625,6 +627,7 @@ def validate_simplified_database(
 			if not value[1]:
 				findings.append(SimplifiedFinding(day, None, "raw", "raw_completion_missing", True))
 		ids.extend(value[0] for value in by_date.values())
+		day_by_id = {value[0]: day for day, value in by_date.items()}
 		if ids:
 			guard = DatabaseReadinessGuard(names).check(ReadScope(date_ids=tuple(ids)), transaction)
 			if guard.status is ReadinessState.UNFINISHED_OPERATION:
@@ -633,36 +636,46 @@ def validate_simplified_database(
 			if ids:
 				placeholders = _placeholders(ids)
 				prices = quote_identifier(names.table(TableRole.PRICES))
-				cursor.execute(f"SELECT date_id, ticker_id, state_id FROM {prices} WHERE date_id IN ({placeholders}) ORDER BY date_id, ticker_id", tuple(ids))
+				ticker_filter = "" if ticker_ids is None else f" AND ticker_id IN ({_placeholders(ticker_ids)})"
+				parameters = tuple(ids) + (() if ticker_ids is None else ticker_ids)
+				cursor.execute(f"SELECT date_id, ticker_id, state_id FROM {prices} WHERE date_id IN ({placeholders}){ticker_filter} ORDER BY date_id, ticker_id", parameters)
 				for row in cursor.fetchall():
-					raw_day: date | None = next((key for key, value in by_date.items() if value[0] == _db_int(row[0], "raw date_id")), None)
+					raw_day: date | None = day_by_id.get(_db_int(row[0], "raw date_id"))
 					state = {1: DataState.GOOD, 2: DataState.BAD, 3: DataState.MISSING, 4: DataState.INTERPOLATED}.get(_db_int(row[2], "state_id"))
 					if state is DataState.BAD:
 						findings.append(SimplifiedFinding(raw_day, _db_int(row[1], "raw ticker_id"), "raw", "bad_observation", True))
 					elif state is DataState.MISSING:
 						findings.append(SimplifiedFinding(raw_day, _db_int(row[1], "raw ticker_id"), "raw", "expected_missing_observation", False))
-				deltas = quote_identifier(names.table(TableRole.DELTAS))
-				cursor.execute(f"SELECT date_id, ticker_id, calculation_status FROM {deltas} WHERE date_id IN ({placeholders}) ORDER BY date_id, ticker_id", tuple(ids))
-				for row in cursor.fetchall():
-					status = _db_text(row[2], "delta calculation status")
-					if status in {"missing_input", "invalid_input"}:
-						delta_day: date | None = next((key for key, value in by_date.items() if value[0] == _db_int(row[0], "delta date_id")), None)
-						findings.append(SimplifiedFinding(delta_day, _db_int(row[1], "delta ticker_id"), "delta", status, True))
-				completion_missing = [day for day, value in by_date.items() if not value[2]]
-				for day in completion_missing:
-					findings.append(SimplifiedFinding(day, None, "delta", "delta_completion_missing", True))
-				zscore = quote_identifier(names.table(TableRole.ZSCORE_SESSIONS))
-				cursor.execute(f"SELECT date_id, status_counts FROM {zscore} WHERE date_id IN ({placeholders})", tuple(ids))
-				for row in cursor.fetchall():
-					counts = _decode_json(row[1], "z-score status_counts")
-					if not isinstance(counts, dict):
-						findings.append(SimplifiedFinding(None, None, "zscore", "status_counts_not_an_object", True))
-						continue
-					for status, count in counts.items():
-						if str(status) != "0" and int(count) > 0:
-							zscore_day: date | None = next((key for key, value in by_date.items() if value[0] == _db_int(row[0], "z-score date_id")), None)
-							findings.append(SimplifiedFinding(zscore_day, None, "zscore", f"expected_non_ready_status_{status}", False))
-		return SimplifiedValidationResult(sessions, tuple(findings), "verified")
+				if include_derived:
+					deltas = quote_identifier(names.table(TableRole.DELTAS))
+					cursor.execute(f"SELECT date_id, ticker_id, calculation_status FROM {deltas} WHERE date_id IN ({placeholders}){ticker_filter} ORDER BY date_id, ticker_id", parameters)
+					for row in cursor.fetchall():
+						status = _db_text(row[2], "delta calculation status")
+						if status in {"missing_input", "invalid_input"}:
+							delta_day: date | None = day_by_id.get(_db_int(row[0], "delta date_id"))
+							findings.append(SimplifiedFinding(delta_day, _db_int(row[1], "delta ticker_id"), "delta", status, True))
+					completion_missing = [day for day, value in by_date.items() if not value[2]]
+					for day in completion_missing:
+						findings.append(SimplifiedFinding(day, None, "delta", "delta_completion_missing", True))
+					zscore = quote_identifier(names.table(TableRole.ZSCORE_SESSIONS))
+					cursor.execute(f"SELECT date_id, status_counts FROM {zscore} WHERE date_id IN ({placeholders})", tuple(ids))
+					for row in cursor.fetchall():
+						counts = _decode_json(row[1], "z-score status_counts")
+						if not isinstance(counts, dict):
+							findings.append(SimplifiedFinding(None, None, "zscore", "status_counts_not_an_object", True))
+							continue
+						for status, count in counts.items():
+							if str(status) != "0" and int(count) > 0:
+								zscore_day: date | None = day_by_id.get(_db_int(row[0], "z-score date_id"))
+								findings.append(SimplifiedFinding(zscore_day, None, "zscore", f"expected_non_ready_status_{status}", False))
+		from stockguidance.database.validation_gate import data_versions, record_raw_passes
+		# Classified bad/missing tickers are handled by scoped close reads; they
+		# do not invalidate the completed source response for other tickers.
+		invalid_raw = {item.date for item in findings if item.blocking and item.phase == "raw" and item.reason != "bad_observation"}
+		validated_ids = [value[0] for day, value in by_date.items() if value[1] and day not in invalid_raw]
+		versions = data_versions(cursor, names, validated_ids)
+	record_raw_passes(source, connect, versions)
+	return SimplifiedValidationResult(sessions, tuple(findings), "verified")
 
 
 def published_sessions(calendar: SessionCalendar, start: date, end: date, cutoff: datetime, publication_delay: timedelta) -> tuple[TradingSession, ...]:

@@ -79,6 +79,9 @@ def _target_simulation(configuration: SimulationConfiguration, arguments: Simula
 	source, names = source_from_database(configuration.source.database_config, configuration.source.data_root, connect, names)
 	if source.identity != configuration.source.identity:
 		raise ValueError("Simulation source differs from the database-owned configuration")
+	if configuration.recommendation_setup is not None:
+		from stockguidance.workflows.recommendation_simulation import simulate_recommendations
+		return simulate_recommendations(configuration,arguments,source,connect,names)
 	if (configuration.retraining is not None) != _training_policy(arguments.model_policy):
 		raise ValueError("Model policy and training configuration differ")
 	requested_start = configuration.start if configuration.retraining is None else min(configuration.start, configuration.retraining.start)
@@ -114,10 +117,13 @@ def _assemble_and_simulate(configuration: SimulationConfiguration, arguments: Si
 	connect = MySQLConnectionFactory()
 	names = load_database_configuration(configuration.source.database_config).load_table_names()
 	try:
-		if target_schema_state(connect, configuration.source.database_config, names) == "target":
-			return _target_simulation(configuration, arguments, connect, names)
+		is_target = target_schema_state(connect, configuration.source.database_config, names) == "target"
 	except (RuntimeError, TypeError):
-		pass
+		is_target = False
+	if is_target:
+		return _target_simulation(configuration, arguments, connect, names)
+	if configuration.recommendation_setup is not None:
+		raise ValueError("Dynamic recommendation simulations require the versioned target database")
 	boundary = JsonHistoryStore(configuration.source.data_root / "history").load(configuration.source.identity)
 	if boundary is None:
 		raise UnknownHistoryBoundary("Simulation requires evidenced, persisted source history")

@@ -1,3 +1,4 @@
+from typing import Any
 from dataclasses import dataclass
 from datetime import date
 from enum import StrEnum
@@ -63,6 +64,7 @@ class RecommendationJob:
 	availability_policy: AvailabilityPolicy = AvailabilityPolicy.STRICT
 	refresh_mode: RefreshMode = RefreshMode.REFRESH
 	allow_empty_selection: bool | None = None
+	resolution_metadata: dict[str,Any] | None = None
 
 	def __post_init__(self) -> None:
 		for value, expected in ((self.source, SourceConfig), (self.features, (FeatureSpec, FeatureSpecV2)), (self.target, TargetSpec), (self.model, ModelSelection), (self.allocation, AllocationSpec), (self.publication, DailyPublicationPolicy), (self.corrections, CorrectionPolicy), (self.eligibility, EligibilityPolicy)):

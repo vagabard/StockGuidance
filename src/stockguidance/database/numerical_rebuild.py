@@ -31,7 +31,7 @@ from stockguidance.database.simplified_contract import (
 )
 from stockguidance.database.simplified_schema import require_simplified_schema
 from stockguidance.database.table_names import TableNames, TableRole, load_table_names, quote_identifier
-from stockguidance.database.write_connections import WriteConnection
+from stockguidance.database.write_connections import WriteConnection, WriteCursor
 from stockguidance.market_data.identity import content_id, data_configuration_key
 from stockguidance.market_data.legacy_derived import DERIVED_COLUMNS, legacy_rows
 from stockguidance.market_data.quality import QualityFlag, QualityPolicy
@@ -196,6 +196,10 @@ def _json(value: object, name: str) -> object:
 
 def _provenance_values(value: object, name: str) -> tuple[str, ...]:
 	decoded = _json(value, name)
+	# Stage 12 retained the legacy quality field's empty JSON object.  It
+	# carries no provenance entries and is equivalent to the new empty array.
+	if decoded == {}:
+		return ()
 	if not isinstance(decoded, list) or any(not isinstance(item, str) for item in decoded):
 		raise NumericalRebuildError(f"{name} must be a JSON string array")
 	return tuple(sorted(set(cast(list[str], decoded))))
@@ -212,7 +216,7 @@ def _decimal(value: object | None, name: str) -> Decimal | None:
 
 
 def _bar(raw: _Raw, cutoff: datetime) -> DailyBar | None:
-	if raw.state not in (DataState.GOOD, DataState.INTERPOLATED) or raw.available_at is None or raw.available_at > cutoff:
+	if raw.state not in (DataState.GOOD, DataState.INTERPOLATED):
 		return None
 	if len(raw.values) != 7:
 		return None
@@ -247,14 +251,7 @@ def _quality(raw: _Raw, sessions: Mapping[int, _Session]) -> tuple[QualityFlag, 
 			if prior is not None and following is not None:
 				gap = max(1, following.sequence - prior.sequence - 1)
 			flags |= QualityFlag.INTERPOLATED_SINGLE if gap <= 1 else QualityFlag.INTERPOLATED_GAP
-	parts = [f"raw:{raw.date_id}:{raw.ticker_id}:{raw.state.value}"]
-	if raw.raw_revision is not None:
-		parts.append(f"source_revision:{raw.raw_revision}")
-	if raw.repair_revision is not None:
-		parts.append(f"repair_revision:{raw.repair_revision}")
-	if raw.available_at is not None:
-		parts.append(f"available_at:{raw.available_at.isoformat()}")
-	return flags, gap, tuple(parts)
+	return flags, gap, ()
 
 
 def _status_for_raw(raw: _Raw | None, cutoff: datetime, *, absent: str) -> str:
@@ -264,8 +261,6 @@ def _status_for_raw(raw: _Raw | None, cutoff: datetime, *, absent: str) -> str:
 		return CalculationStatus.INVALID_INPUT.value
 	if raw.state is DataState.MISSING:
 		return CalculationStatus.MISSING_INPUT.value
-	if raw.available_at is None or raw.available_at > cutoff:
-		return CalculationStatus.NOT_YET_AVAILABLE.value
 	if raw.state is DataState.INTERPOLATED and _bar(raw, cutoff) is None:
 		return CalculationStatus.INVALID_INPUT.value
 	return CalculationStatus.READY.value
@@ -345,16 +340,23 @@ class SimplifiedNumericalRebuildRunner:
 		raw_result = self.raw_runner.rebuild(operation, connection)
 		committed = list(raw_result.committed_units)
 		non_ready = list(raw_result.explicit_non_ready)
+		delta_non_ready: dict[int, bool] = {}
+		def has_non_ready_delta(unit: WorkUnit) -> bool:
+			if unit.date_id is None:
+				raise NumericalRebuildError("Delta work unit is incomplete")
+			if unit.date_id not in delta_non_ready:
+				delta_non_ready[unit.date_id] = self._delta_is_non_ready(unit, operation, connection)
+			return delta_non_ready[unit.date_id]
 		for unit in operation.scope.rebuild:
 			kind = UnitKind(unit.unit_kind)
 			if kind is UnitKind.DELTA_SESSION:
 				if self._delta_complete_for_resume(unit, connection):
 					committed.append(unit)
-					if self._delta_is_non_ready(unit, operation, connection):
+					if has_non_ready_delta(unit):
 						non_ready.append(unit)
 				elif self._rebuild_delta(unit, operation, connection):
 					committed.append(unit)
-					if self._delta_is_non_ready(unit, operation, connection):
+					if has_non_ready_delta(unit):
 						non_ready.append(unit)
 		for unit in operation.scope.rebuild:
 			if UnitKind(unit.unit_kind) is UnitKind.ZSCORE_SESSION:
@@ -421,7 +423,7 @@ class SimplifiedNumericalRebuildRunner:
 		sessions = quote_identifier(self.table_names.table(TableRole.SESSIONS))
 		ids = tuple(dict.fromkeys(date_ids))
 		cursor.execute(
-			f"SELECT r.date_id, r.ticker_id, t.label, r.state_id, r.open, r.high, r.low, r.close, r.volume, r.vwap, r.transactions, r.observed_at, s.raw_available_at, s.raw_revision FROM {table} r JOIN {tickers} t ON t.id = r.ticker_id JOIN {sessions} s ON s.id = r.date_id WHERE r.date_id IN ({_placeholders(ids)}) ORDER BY r.date_id, r.ticker_id",
+			f"SELECT r.date_id, r.ticker_id, t.label, r.state_id, r.open, r.high, r.low, r.close, r.volume, r.vwap, r.transactions, r.observed_at, s.raw_available_at, s.raw_revision FROM {table} r JOIN {tickers} t ON t.id = r.ticker_id JOIN {sessions} s ON s.id = r.date_id WHERE r.date_id IN ({_placeholders(ids)}) AND s.raw_complete = 1 ORDER BY r.date_id, r.ticker_id",
 			ids,
 		)
 		raw_rows = tuple(cursor.fetchall())
@@ -514,6 +516,20 @@ class SimplifiedNumericalRebuildRunner:
 			tuple(following_bars.values()),
 		)
 		by_label = {item.ticker: item.values for item in calculated}
+		sessions_by_id = {value.date_id: value for value in sessions.values()}
+		# Aggregate ranking quality once; revision validation belongs to the gate.
+		ranking_quality = QualityFlag.CLEAN
+		ranking_gap = 0
+		for current_item in current_records:
+			if current_bars[current_item.ticker_id] is None:
+				continue
+			following_item = following_records.get(current_item.ticker_id)
+			if following_item is None or current_item.label not in following_bars:
+				continue
+			for evidence in (current_item, following_item):
+				flags, gap, parts = _quality(evidence, sessions_by_id)
+				ranking_quality |= flags
+				ranking_gap = max(ranking_gap, gap)
 		result: list[_DeltaRow] = []
 		for item in sorted(current_records, key=lambda value: value.ticker_id):
 			current_status = _status_for_raw(item, cutoff, absent=CalculationStatus.MISSING_INPUT.value)
@@ -527,7 +543,7 @@ class SimplifiedNumericalRebuildRunner:
 					statuses.append(CalculationStatus.INSUFFICIENT_HISTORY.value)
 				else:
 					statuses.append(_status_for_raw(prior_records.get(item.ticker_id), cutoff, absent=CalculationStatus.MISSING_INPUT.value))
-				if following is None:
+				if following is None or following_db is None or not following_db.raw_complete:
 					statuses.append(CalculationStatus.NOT_YET_AVAILABLE.value)
 				else:
 					statuses.append(_status_for_raw(following_records.get(item.ticker_id), cutoff, absent=CalculationStatus.MISSING_INPUT.value))
@@ -537,14 +553,11 @@ class SimplifiedNumericalRebuildRunner:
 				quality_inputs.append(prior_records[item.ticker_id])
 			if item.ticker_id in following_records:
 				quality_inputs.append(following_records[item.ticker_id])
-			# The ranking columns consume the eligible following-session population.
-			if following is not None:
-				quality_inputs.extend(item for item in following_records.values() if _bar(item, cutoff) is not None)
-			flags = QualityFlag.CLEAN
-			gap = 0
+			flags = ranking_quality
+			gap = ranking_gap
 			provenance: set[str] = set()
 			for evidence in quality_inputs:
-				item_flags, item_gap, item_provenance = _quality(evidence, {value.date_id: value for value in sessions.values()})
+				item_flags, item_gap, item_provenance = _quality(evidence, sessions_by_id)
 				flags |= item_flags
 				gap = max(gap, item_gap)
 				provenance.update(item_provenance)
@@ -564,14 +577,16 @@ class SimplifiedNumericalRebuildRunner:
 			session_table = quote_identifier(self.table_names.table(TableRole.SESSIONS))
 			try:
 				cursor.execute("START TRANSACTION", ())
-				for row in rows:
-					cursor.execute(f"DELETE FROM {deltas} WHERE date_id = %s AND ticker_id = %s", (unit.date_id, row.ticker_id))
-					columns = ", ".join(DERIVED_COLUMNS)
-					placeholders = ", ".join("%s" for _ in range(len(DERIVED_COLUMNS) + 7))
-					cursor.execute(
-						f"INSERT INTO {deltas} (ticker_id, date_id, {columns}, calculation_status, quality_flags, gap_length, provenance, completed_at) VALUES ({placeholders})",
-						(row.ticker_id, unit.date_id, *row.values, row.status, int(row.quality), row.gap_length, json.dumps(row.provenance, separators=(",", ":")), self._now()),
-					)
+				columns = ", ".join(DERIVED_COLUMNS)
+				placeholders = ", ".join("%s" for _ in range(len(DERIVED_COLUMNS) + 7))
+				insert_sql = f"INSERT INTO {deltas} (ticker_id, date_id, {columns}, calculation_status, quality_flags, gap_length, provenance, completed_at) VALUES ({placeholders})"
+				for offset in range(0, len(rows), 500):
+					batch = rows[offset:offset + 500]
+					cursor.execute(f"DELETE FROM {deltas} WHERE date_id = %s AND ticker_id IN ({_placeholders(batch)})", (unit.date_id, *(row.ticker_id for row in batch)))
+					cast(WriteCursor, cursor).executemany(insert_sql, [
+						(row.ticker_id, unit.date_id, *row.values, row.status, int(row.quality), row.gap_length, json.dumps(row.provenance, separators=(",", ":")), self._now())
+						for row in batch
+					])
 				cursor.execute(f"UPDATE {session_table} SET delta_complete = 1, delta_completed_at = %s WHERE id = %s", (self._now(), unit.date_id))
 				connection.commit()
 			except Exception:
@@ -585,8 +600,8 @@ class SimplifiedNumericalRebuildRunner:
 		cursor = self._connection_cursor(connection)
 		try:
 			deltas = quote_identifier(self.table_names.table(TableRole.DELTAS))
-			cursor.execute(f"SELECT calculation_status FROM {deltas} WHERE date_id = %s", (unit.date_id,))
-			return any(row and str(row[0]) != CalculationStatus.READY.value for row in cursor.fetchall())
+			cursor.execute(f"SELECT 1 FROM {deltas} WHERE date_id = %s AND calculation_status <> %s LIMIT 1", (unit.date_id, CalculationStatus.READY.value))
+			return bool(cursor.fetchall())
 		finally:
 			cursor.close()
 
@@ -656,8 +671,6 @@ class SimplifiedNumericalRebuildRunner:
 			return ZScoreObservation(value=value, state=InputState.INVALID, quality=flags, gap_length=gap, provenance=provenance)
 		if raw.state is DataState.MISSING:
 			return ZScoreObservation(value=value, state=InputState.MISSING, quality=flags, gap_length=gap, provenance=provenance)
-		if raw.available_at is None or raw.available_at > cutoff:
-			return ZScoreObservation(value=value, state=InputState.NOT_YET_AVAILABLE, actual_available=False, quality=flags, gap_length=gap, provenance=provenance)
 		return ZScoreObservation(value=value, quality=flags, gap_length=gap, provenance=provenance)
 
 	def _delta_observation(
@@ -692,7 +705,7 @@ class SimplifiedNumericalRebuildRunner:
 			return {}
 		table = quote_identifier(self.table_names.table(TableRole.DELTAS))
 		parameters = tuple(date_ids) + tuple(ticker_ids)
-		cursor.execute(f"SELECT date_id, ticker_id, close_ratio_to_prior, calculation_status, quality_flags, gap_length, provenance FROM {table} WHERE date_id IN ({_placeholders(date_ids)}) AND ticker_id IN ({_placeholders(ticker_ids)})", parameters)
+		cursor.execute(f"SELECT date_id, ticker_id, close_ratio_to_prior, calculation_status, quality_flags, gap_length, '[]' FROM {table} WHERE date_id IN ({_placeholders(date_ids)}) AND ticker_id IN ({_placeholders(ticker_ids)})", parameters)
 		result: dict[tuple[int, int], tuple[object | None, str, QualityFlag, int, tuple[str, ...]]] = {}
 		for row in cursor.fetchall():
 			if len(row) != 7:
@@ -717,7 +730,7 @@ class SimplifiedNumericalRebuildRunner:
 		raw = self._load_raw(cursor, tuple(by_id), by_id)
 		date_ids = tuple(item.date_id for item in db_sessions.values())
 		completed_delta_dates = tuple(item.date_id for item in db_sessions.values() if item.delta_complete)
-		deltas = self._load_deltas(cursor, completed_delta_dates, ticker_ids)
+		deltas = self._load_deltas(cursor, completed_delta_dates, ticker_ids) if definition.family is ZScoreFamily.PRICE_DELTA else {}
 		observations: dict[int, tuple[ZScoreObservation, ...]] = {}
 		for ticker_id in ticker_ids:
 			values: list[ZScoreObservation] = []
@@ -754,7 +767,7 @@ class SimplifiedNumericalRebuildRunner:
 				self._ensure_series(cursor, definition)
 				target = self._session(unit.session_date)
 				affected = tuple(sorted({item.ticker_id for item in operation.scope.clear.zscores if item.date_id == unit.date_id and item.series_key == unit.series_key and item.window == unit.window and item.ticker_id is not None}))
-				cursor.execute(f"SELECT ticker_id, zscore, status, quality_flags, gap_length, provenance FROM {table} WHERE date_id = %s ORDER BY ticker_id", (unit.date_id,))
+				cursor.execute(f"SELECT ticker_id, zscore, status, quality_flags, gap_length, '[]' FROM {table} WHERE date_id = %s ORDER BY ticker_id", (unit.date_id,))
 				stored_rows: dict[int, ZScoreRow] = {}
 				for stored_row in cursor.fetchall():
 					if len(stored_row) != 6:
@@ -778,15 +791,19 @@ class SimplifiedNumericalRebuildRunner:
 					raise NumericalRebuildError("Z-score kernel returned an incomplete ticker set")
 				merged = {ticker_id: row for ticker_id, row in stored_rows.items() if ticker_id not in affected}
 				merged.update(calculated)
-				for ticker_id in affected:
-					cursor.execute(f"DELETE FROM {table} WHERE date_id = %s AND ticker_id = %s", (unit.date_id, ticker_id))
-					calculated_row = calculated[ticker_id]
-					cursor.execute(f"INSERT INTO {table} (date_id, ticker_id, zscore, status, quality_flags, gap_length, provenance) VALUES (%s,%s,%s,%s,%s,%s,%s)", (unit.date_id, ticker_id, calculated_row.score, int(calculated_row.status), int(calculated_row.quality), calculated_row.gap_length, json.dumps(calculated_row.provenance, separators=(",", ":"))))
+				insert_sql = f"INSERT INTO {table} (date_id, ticker_id, zscore, status, quality_flags, gap_length, provenance) VALUES (%s,%s,%s,%s,%s,%s,%s)"
+				for offset in range(0, len(affected), 500):
+					batch = affected[offset:offset + 500]
+					cursor.execute(f"DELETE FROM {table} WHERE date_id = %s AND ticker_id IN ({_placeholders(batch)})", (unit.date_id, *batch))
+					cast(WriteCursor, cursor).executemany(insert_sql, [
+						(unit.date_id, ticker_id, calculated[ticker_id].score, int(calculated[ticker_id].status), int(calculated[ticker_id].quality), calculated[ticker_id].gap_length, json.dumps(calculated[ticker_id].provenance, separators=(",", ":")))
+						for ticker_id in batch
+					])
 				metadata = quote_identifier(self.table_names.table(TableRole.ZSCORE_SESSIONS))
 				all_rows = tuple(sorted(merged.values(), key=lambda row: row.ticker_id))
 				dependency_payload = self._zscore_digest_payload(definition, target, input_sessions, affected, db_sessions, raw, operation.scope.cutoff)
 				dependency_digest = content_id(dependency_payload)
-				availability_digest = content_id({"states": dependency_payload["states"], "cutoff": operation.scope.cutoff.isoformat()})
+				availability_digest = content_id({"states": dependency_payload["states"], "policy": "current-validated-history-v1"})
 				status_counts = {status: sum(row.status is status for row in all_rows) for status in ZScoreStatus}
 				serialized = json.dumps({str(int(status)): status_counts[status] for status in ZScoreStatus}, separators=(",", ":"), sort_keys=True)
 				cursor.execute(f"DELETE FROM {metadata} WHERE series_key = %s AND date_id = %s", (unit.series_key, unit.date_id))
@@ -826,11 +843,8 @@ class SimplifiedNumericalRebuildRunner:
 		states: list[object] = []
 		for session in input_sessions:
 			db = db_sessions.get(session.session_date)
-			for ticker_id in ticker_ids:
-				item = None if db is None else raw.get((db.date_id, ticker_id))
-				state = InputState.MISSING.value if item is None else _status_for_raw(item, cutoff, absent=InputState.MISSING.value)
-				states.append((session.session_date.isoformat(), session.sequence, ticker_id, state, None if item is None else item.raw_revision, None if item is None or item.available_at is None else item.available_at.isoformat()))
-		return {"family": definition.family.value, "window": definition.window, "target": target.session_date.isoformat(), "sessions": [(item.session_date.isoformat(), item.sequence, None if (mapped := db_sessions.get(item.session_date)) is None else mapped.date_id) for item in input_sessions], "states": states}
+			states.append((session.session_date.isoformat(), None if db is None else db.date_id, False if db is None else db.raw_complete, None if db is None else db.raw_revision))
+		return {"family": definition.family.value, "window": definition.window, "target": target.session_date.isoformat(), "tickers": ticker_ids, "states": states}
 
 
 NumericalRebuildRunner = SimplifiedNumericalRebuildRunner

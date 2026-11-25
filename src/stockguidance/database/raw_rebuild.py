@@ -34,7 +34,7 @@ from stockguidance.database.simplified_contract import (
 )
 from stockguidance.database.simplified_schema import require_simplified_schema
 from stockguidance.database.table_names import TableNames, TableRole, load_table_names, quote_identifier
-from stockguidance.database.write_connections import WriteConnection
+from stockguidance.database.write_connections import WriteConnection, WriteCursor
 from stockguidance.market_data.archive import archive_content, archive_path, decode_archive, unique_object
 from stockguidance.market_data.identity import content_id, encode_json
 from stockguidance.market_data.manifests import decode_response, response_payload
@@ -453,7 +453,7 @@ class RawRebuildRunner:
 
 	def _write_raw_unit(
 		self,
-		cursor: Cursor,
+		cursor: WriteCursor,
 		connection: WriteConnection,
 		unit: WorkUnit,
 		payload: ValidatedRawPayload,
@@ -497,19 +497,19 @@ class RawRebuildRunner:
 				states_by_ticker[ticker] = DataState.MISSING
 				observed_by_ticker[ticker] = self._observed_at(payload.response, ticker, payload.session)
 				metadata.append((ticker, DataState.MISSING, (None,) * 7, tuple(FIELDS), observed_by_ticker[ticker]))
-			for ticker in sorted(values_by_ticker):
-				ticker_id = self._ticker_id(cursor, ticker, payload.session.calendar_id)
-				values = values_by_ticker[ticker]
-				if states_by_ticker[ticker] is DataState.MISSING:
-					values = (None,) * 7
-				columns = ", ".join(_RAW_COLUMNS)
-				placeholders = ", ".join("%s" for _ in range(11))
-				cursor.execute(
-					f"INSERT INTO {prices} (ticker_id, date_id, {columns}, state_id, observed_at) VALUES ({placeholders})",
-					(ticker_id, unit.date_id, *values, DATA_STATE_IDS[states_by_ticker[ticker]], observed_by_ticker[ticker]),
-				)
+			labels = tuple(sorted(values_by_ticker))
+			ticker_ids = self._ticker_ids(cursor, labels, payload.session.calendar_id)
+			columns = ", ".join(_RAW_COLUMNS)
+			placeholders = ", ".join("%s" for _ in range(11))
+			insert_raw = f"INSERT INTO {prices} (ticker_id, date_id, {columns}, state_id, observed_at) VALUES ({placeholders})"
+			for offset in range(0, len(labels), 500):
+				batch = labels[offset:offset + 500]
+				cursor.executemany(insert_raw, [
+					(ticker_ids[ticker], unit.date_id, *((None,) * 7 if states_by_ticker[ticker] is DataState.MISSING else values_by_ticker[ticker]), DATA_STATE_IDS[states_by_ticker[ticker]], observed_by_ticker[ticker])
+					for ticker in batch
+				])
 			for ticker, state, original, invalid, observed_at in metadata:
-				ticker_id = self._ticker_id(cursor, ticker, payload.session.calendar_id)
+				ticker_id = ticker_ids[ticker]
 				revision = content_id({"method": METHOD, "ticker": ticker, "date": payload.session.session_date.isoformat(), "original": [None if value is None else str(value) for value in original], "fields": list(invalid), "state": state.value})
 				cursor.execute(
 					f"INSERT INTO {repairs} (date_id, ticker_id, revision, state_id, original_values, effective_values, invalid_fields, interpolation_method, prior_date_id, following_date_id, endpoint_values, observed_at, available_at, endpoints_available_at, recorded_at) VALUES (%s,%s,%s,%s,%s,NULL,%s,NULL,NULL,NULL,NULL,%s,%s,NULL,%s)",
@@ -522,6 +522,30 @@ class RawRebuildRunner:
 			connection.rollback()
 			raise
 		return next((state for _, state, _, _, _ in metadata if state in {DataState.BAD, DataState.MISSING}), None)
+
+	def _ticker_ids(self, cursor: WriteCursor, labels: tuple[str, ...], exchange: str) -> dict[str, int]:
+		tickers = quote_identifier(self.table_names.table(TableRole.TICKERS))
+		requested = set(labels)
+		resolved: dict[str, int] = {}
+		def load() -> None:
+			for offset in range(0, len(labels), 500):
+				batch = labels[offset:offset + 500]
+				cursor.execute(f"SELECT id,label FROM {tickers} WHERE label IN ({','.join('%s' for _ in batch)})", batch)
+				for identifier, stored_label in cursor.fetchall():
+					key = stored_label.decode("utf-8") if isinstance(stored_label, bytes) else str(stored_label)
+					if key not in requested or key in resolved and resolved[key] != _db_id(identifier, "ticker_id"):
+						raise RawRebuildError("Ticker identity is duplicated")
+					resolved[key] = _db_id(identifier, "ticker_id")
+		load()
+		missing = [label for label in labels if label not in resolved]
+		for offset in range(0, len(missing), 500):
+			cursor.executemany(f"INSERT INTO {tickers} (label, exchange) VALUES (%s,%s)", [(label, exchange) for label in missing[offset:offset + 500]])
+		if missing:
+			resolved.clear()
+			load()
+		if len(resolved) != len(labels):
+			raise RawRebuildError("Ticker insert did not resolve stable identities")
+		return {label: resolved[label] for label in labels}
 
 	def _observed_at(self, response: ProviderResponse, ticker: str, session: TradingSession) -> datetime | None:
 		timestamp = dict(response.source_timestamps).get(ticker)
@@ -540,10 +564,9 @@ class RawRebuildRunner:
 			raise RawRebuildError("Ticker identity is duplicated")
 		if rows:
 			identifier = _db_id(rows[0][0], "ticker_id")
-			if rows[0][1] is not None and rows[0][1] != exchange:
-				raise RawRebuildError(f"Ticker exchange identity changed for {ticker}")
-			if rows[0][1] is None:
-				cursor.execute(f"UPDATE {tickers} SET exchange = %s WHERE id = %s", (exchange, identifier))
+			# Grouped daily bars do not identify a ticker's listing exchange.
+			# Preserve the existing exchange; this session's calendar is not
+			# evidence of an identity change.
 			return identifier
 		cursor.execute(f"INSERT INTO {tickers} (label, exchange) VALUES (%s,%s)", (ticker, exchange))
 		cursor.execute(f"SELECT id FROM {tickers} WHERE label = %s", (ticker,))

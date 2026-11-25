@@ -56,15 +56,17 @@ def simulation_payload(result: SimulationResult, *, schema: str = "stockguidance
 		raise ValueError("Unsupported simulation report schema")
 	request = result.request
 	final = None if not result.valuations else valuation_payload(result.valuations[-1])
-	evidence = [{"session": frame.session.session_date.isoformat(), "quotes": [{"ticker_id": item.ticker_id, "price": str(item.price), "revision": item.revision} for item in frame.quotes], "issues": [{"ticker_id": item.ticker_id, "state": item.state.value} for item in frame.issues]} for frame in result.execution_frames]
+	evidence = [{"session": frame.session.session_date.isoformat(), "ticker_ids":list(frame.ticker_ids), "quotes": [{"ticker_id": item.ticker_id, "price": str(item.price), "revision": item.revision} for item in frame.quotes], "issues": [{"ticker_id": item.ticker_id, "state": item.state.value} for item in frame.issues]} for frame in result.execution_frames]
+	dynamic = any(item.resolution_metadata for item in result.forecasts)
 	return {
+		"dynamic_universe":dynamic,
 		"schema": schema, "successful": result.successful, "complete": result.complete,
 		"replay": {"saved_scores": True, "execution_quotes": True, "coverage": "full_model_universe"} if schema == "stockguidance-simulation-2" else None,
 		"model_policy": result.score_policy.policy.value, "retrain_every_buy_decisions": result.score_policy.retrain_every_buy_decisions,
 		"cadence_basis": "scheduled_buy_decisions_from_allocation_anchor_including_skips",
 		"evaluation": "fixed_pre_period_model" if result.score_policy.retrain_every_buy_decisions is None else "chronological_retraining",
 		"source": asdict(request.source), "features": _features_payload(request.features),
-		"availability_policy": request.availability_policy.value, "availability_assumption": request.availability_policy.assumption, "point_in_time_replay": not request.availability_policy.retrospective, "data_snapshot": None if request.data_snapshot is None else request.data_snapshot.isoformat(),
+		"availability_policy": request.availability_policy.value, "availability_assumption": request.availability_policy.assumption, "point_in_time_replay": not request.availability_policy.retrospective and not dynamic, "data_snapshot": None if request.data_snapshot is None else request.data_snapshot.isoformat(),
 		"research_disclaimer": None if not request.availability_policy.retrospective else "Retrospective research assumes historical publication timing; corrected/adjusted history and the selected universe may contain hindsight and do not establish an original point-in-time replay.",
 		"target": _target_payload(request.target),
 		"calendar": {"id": request.allocation.anchor_session.calendar_id, "version": result.calendar_version},
@@ -74,7 +76,7 @@ def simulation_payload(result: SimulationResult, *, schema: str = "stockguidance
 		"eligibility": asdict(request.eligibility), "top_k": request.top_k,
 		"initial_portfolio": portfolio_payload(result.initial), "final_portfolio": portfolio_payload(result.final), "final_valuation": final,
 		"plans": [order_plan_payload(item) for item in result.plans],
-		"decisions": [{"entry_session": item.sample.timing.entry_session.session_date.isoformat(), "decision_cutoff": item.sample.timing.decision_cutoff.isoformat(), "artifact_id": item.artifact_id, "members": [{"artifact_id": identity, "weight": weight} for identity, weight in zip(item.prediction.member_artifact_ids, item.prediction.member_weights)], "feature_identity": item.sample.feature_cache_key, "data_revision": item.prediction.data_revision, "scores": [asdict(score) for score in item.prediction.scores], "ranking": [asdict(score) for score in item.prediction.ranking], "eligibility": [eligibility_payload(eligibility, detailed=schema == "stockguidance-simulation-2") for eligibility in item.prediction.eligibility]} for item in result.forecasts],
+		"decisions": [{"resolution":item.resolution_metadata,"ticker_ids":list(item.sample.features.specification.ticker_ids),"entry_session": item.sample.timing.entry_session.session_date.isoformat(), "decision_cutoff": item.sample.timing.decision_cutoff.isoformat(), "artifact_id": item.artifact_id, "members": [{"artifact_id": identity, "weight": weight} for identity, weight in zip(item.prediction.member_artifact_ids, item.prediction.member_weights)], "feature_identity": item.sample.feature_cache_key, "data_revision": item.prediction.data_revision, "scores": [asdict(score) for score in item.prediction.scores], "ranking": [asdict(score) for score in item.prediction.ranking], "eligibility": [eligibility_payload(eligibility, detailed=schema == "stockguidance-simulation-2") for eligibility in item.prediction.eligibility]} for item in result.forecasts],
 		"training_runs": [{"decision_cutoff": timing.decision_cutoff.isoformat(), "entry_session": timing.entry_session.session_date.isoformat(), "result": training_payload(training)} for timing, training in result.training_runs],
 		"events": [event_payload(item) for item in result.events], "equity": [valuation_payload(item) for item in result.valuations],
 		"realized_trades": [{"allocation": item.allocation, **position_payload(item.position), "actual_exit_session": item.exit_session_date, "exit_price": str(item.exit_price), "net_proceeds": str(item.net_proceeds), "realized_pnl": str(item.realized_pnl), "net_return": str(item.net_return), "close_return": item.close_return, "actual_price_return": item.actual_price_return, "exited_on_time": item.exited_on_time} for item in result.trades],

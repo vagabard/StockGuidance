@@ -1,5 +1,6 @@
+from typing import Any
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 import json
 from pathlib import Path
 
@@ -44,6 +45,8 @@ class RecommendationConfiguration:
 	availability_policy: AvailabilityPolicy = AvailabilityPolicy.STRICT
 	target: TargetSpecification = TargetSpec()
 	runs_root: Path | None = None
+	replay_cutoff: datetime | None = None
+	resolution_metadata: dict[str,Any] | None = None
 
 	def __post_init__(self) -> None:
 		require_positive_int(self.top_k, "top_k")

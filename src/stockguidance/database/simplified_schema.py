@@ -130,6 +130,8 @@ def _mysql_statements(table_names: TableNames, windows: tuple[int, ...]) -> tupl
 		f"CREATE TABLE IF NOT EXISTS {series} (series_key CHAR(64) NOT NULL PRIMARY KEY, schema_version INT NOT NULL, source_scope CHAR(64) NOT NULL, calendar_id VARCHAR(128) NOT NULL, family VARCHAR(32) NOT NULL, `window` INT NOT NULL, calculation_version VARCHAR(128) NOT NULL, delta_definition VARCHAR(128) NOT NULL, `precision` VARCHAR(32) NOT NULL, missing_value_policy VARCHAR(64) NOT NULL, created_at DATETIME(6) NOT NULL, UNIQUE KEY simplified_series_definition (source_scope, calendar_id, family, `window`, calculation_version, delta_definition, `precision`, missing_value_policy)) ENGINE=InnoDB",
 		f"CREATE TABLE IF NOT EXISTS {zscore_sessions} (series_key CHAR(64) NOT NULL, date_id INT UNSIGNED NOT NULL, dependency_digest CHAR(64) NOT NULL, availability_digest CHAR(64) NOT NULL, actual_input_available TINYINT(1) NOT NULL, completed_at DATETIME(6) NOT NULL, row_count INT NOT NULL, ready_count INT NOT NULL, status_counts JSON NOT NULL, content_digest CHAR(64) NOT NULL, PRIMARY KEY (series_key, date_id), CONSTRAINT simplified_zscore_sessions_series_fk FOREIGN KEY (series_key) REFERENCES {series}(series_key), CONSTRAINT simplified_zscore_sessions_date_fk FOREIGN KEY (date_id) REFERENCES {sessions}(id)) ENGINE=InnoDB",
 	]
+	from stockguidance.database.validation_gate import GATE_DDL
+	statements.append(GATE_DDL)
 	for window in windows:
 		resolved = table_names.resolve_zscore_tables((window,))[window]
 		for table in (resolved.price, resolved.price_delta, resolved.volume):

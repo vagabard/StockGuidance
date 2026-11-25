@@ -40,6 +40,8 @@ def simulate(request: SimulationRequest, boundary: HistoryBoundary, calendar: Se
 	benchmarks: list[BenchmarkResult] = []
 	pending: list[BenchmarkEntry] = []
 	last_quotes: dict[int, ClosingMark] = {}
+	dynamic = getattr(scores,"dynamic_universe",False)
+	active_tickers = request.features.ticker_ids
 	for timing in decisions:
 		session = timing.entry_session
 		state = release_proceeds(state, session, session.opens_at)
@@ -51,8 +53,11 @@ def simulate(request: SimulationRequest, boundary: HistoryBoundary, calendar: Se
 			events.append(SimulationEvent(EventKind.DECISION, timing.decision_cutoff, session, "Anchored scheduled buy decision", portfolio=state))
 			try:
 				forecast = scores.forecast(request, timing, buy_decision_index(request.allocation, session))
-				if forecast.sample.timing != timing or forecast.sample.features.specification != request.features or forecast.sample.target_specification != request.target or forecast.sample.source != request.source or forecast.sample.calendar_version != calendar.version:
+				specification = forecast.sample.features.specification
+				comparable = replace(specification,ticker_ids=request.features.ticker_ids) if dynamic else specification
+				if forecast.sample.timing != timing or comparable != request.features or forecast.sample.target_specification != request.target or forecast.sample.source != request.source or forecast.sample.calendar_version != calendar.version:
 					raise ValueError("Score source changed decision/model specifications")
+				active_tickers = specification.ticker_ids
 				forecasts.append(forecast)
 				if forecast.training is not None:
 					events.append(SimulationEvent(EventKind.TRAINING, timing.decision_cutoff, session, "Chronological fit uses only outcomes mature by this decision cutoff"))
@@ -67,8 +72,13 @@ def simulate(request: SimulationRequest, boundary: HistoryBoundary, calendar: Se
 			except Exception:
 				events.append(SimulationEvent(EventKind.FAILURE, timing.decision_cutoff, session, "Required historical training, prediction or planning failed", portfolio=state))
 		try:
-			frame = prices.read(session, request.features.ticker_ids)
-			if frame.source != request.source or frame.session != session or frame.ticker_ids != request.features.ticker_ids:
+			execution_tickers = request.features.ticker_ids
+			if dynamic:
+				# Retired members may still have positions or next-session
+				# benchmark outcomes to settle after a universe change.
+				execution_tickers = tuple(sorted(set(active_tickers) | {p.ticker_id for a in state.allocations for p in a.positions} | {v for b in pending for v in b.eligible_tickers}))
+			frame = prices.read(session, execution_tickers)
+			if frame.source != request.source or frame.session != session or frame.ticker_ids != execution_tickers:
 				raise ValueError("Execution source changed its exact request")
 			frames.append(frame)
 		except Exception:

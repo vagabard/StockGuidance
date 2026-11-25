@@ -200,7 +200,8 @@ class SQLMigration:
 		self.execute(f"CREATE TABLE IF NOT EXISTS {self.target(SESSIONS)} (id INT UNSIGNED NOT NULL PRIMARY KEY, transaction_date DATE NOT NULL, prior_id INT UNSIGNED NULL, following_id INT UNSIGNED NULL, raw_revision CHAR(64) NULL, available_at DATETIME(6) NULL, derived_receipt TINYINT NOT NULL DEFAULT 0) ENGINE=InnoDB")
 		existing = self.rows(f"SELECT identity_json, migration_time FROM {self.target(RUN)} WHERE id=1 FOR UPDATE")
 		if existing:
-			if json.loads(str(existing[0][0])) != json.loads(self.identity()):
+			from stockguidance.database.schema_upgrade import verify_upgrade_lineage
+			if not verify_upgrade_lineage(self, existing[0][0]):
 				raise MigrationError("Database checkpoint belongs to another migration or engine version")
 			self.migration_time = existing[0][1]
 		else:
@@ -815,7 +816,8 @@ class SQLMigration:
 				if not self.has_control():
 					return {"engine_version": ENGINE_VERSION, "phase": "not_started", "steps": []}
 				r = self.rows(f"SELECT identity_json,phase FROM {self.target(RUN)} WHERE id=1")
-				if not r or json.loads(str(r[0][0])) != json.loads(self.identity()):
+				from stockguidance.database.schema_upgrade import verify_upgrade_lineage
+				if not r or not verify_upgrade_lineage(self, r[0][0]):
 					raise MigrationError("Database checkpoint identity does not match")
 				return {"phase": r[0][1], **self.report()}
 			if operation == "apply":

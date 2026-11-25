@@ -177,7 +177,7 @@ class MySQLFeatureChannelRepository(FeatureChannelRepository):
 	def _read_zscore(self, cursor: Any, query: FeatureChannelQuery, channel: PriceZScore | PriceDeltaZScore | VolumeZScore, date_ids: dict[date, int]) -> tuple[list[FeatureChannelObservation], list[FeatureReadinessEvidence]]:
 		definition, attribute = _channel_definition(self.source, query, channel)
 		series = quote_identifier(self.table_names.table(TableRole.ZSCORE_SERIES))
-		cursor.execute(f"SELECT series_key, schema_version, source_scope, calendar_id, family, window, calculation_version, delta_definition, precision, missing_value_policy FROM {series} WHERE series_key = %s", (definition.series_key,))
+		cursor.execute(f"SELECT series_key, schema_version, source_scope, calendar_id, family, `window`, calculation_version, delta_definition, `precision`, missing_value_policy FROM {series} WHERE series_key = %s", (definition.series_key,))
 		series_rows = cursor.fetchall()
 		if len(series_rows) != 1 or tuple(series_rows[0]) != (definition.series_key, definition.schema_version, definition.source_scope, definition.calendar_id, definition.family.value, definition.window, definition.calculation_version, definition.delta_definition, definition.precision, definition.missing_value_policy):
 			raise FeatureChannelReadError(f"Prepared {channel_key(channel)} series definition is missing or incompatible")
@@ -196,16 +196,15 @@ class MySQLFeatureChannelRepository(FeatureChannelRepository):
 				evidence.append(FeatureReadinessEvidence(channel, session, FeatureReadinessState.PENDING, "prepared-completion-metadata", "Prepared feature completion metadata is missing"))
 				continue
 			metadata_row = metadata_rows[0]
-			actual_available = metadata_row[2] in (1, True)
 			try:
 				row_count, ready_count = int(str(metadata_row[3])), int(str(metadata_row[4]))
 			except (TypeError, ValueError, OverflowError):
 				raise FeatureChannelReadError("Prepared z-score completion metadata has invalid row counts") from None
-			if row_count != len(query.specification.ticker_ids) or ready_count < 0 or ready_count > row_count:
+			if row_count < len(query.specification.ticker_ids) or ready_count < 0 or ready_count > row_count:
 				raise FeatureChannelReadError("Prepared z-score completion metadata does not cover the requested ticker universe")
 			cursor.execute(f"SELECT date_id, ticker_id, zscore, status FROM {table} WHERE date_id = %s AND ticker_id IN ({_placeholders(query.specification.ticker_ids)}) ORDER BY ticker_id", (date_id, *query.specification.ticker_ids))
 			stored = {(_date_id(row[0]), _date_id(row[1])): row for row in cursor.fetchall() if len(row) == 4}
-			if len(stored) != row_count:
+			if len(stored) != len(query.specification.ticker_ids):
 				raise FeatureChannelReadError("Prepared z-score rows are incomplete or duplicated")
 			revision = content_id({"dependency": str(metadata_row[0]), "availability": str(metadata_row[1]), "content": str(metadata_row[5])})
 			for ticker_id in query.specification.ticker_ids:
@@ -222,7 +221,10 @@ class MySQLFeatureChannelRepository(FeatureChannelRepository):
 				if state is FeatureValueState.READY and value is None:
 					state, value = FeatureValueState.INVALID, None
 				observations.append(FeatureChannelObservation(channel, session, ticker_id, value, state, revision))
-			evidence.append(FeatureReadinessEvidence(channel, session, FeatureReadinessState.READY if actual_available else FeatureReadinessState.UNVERIFIED, revision, "Prepared z-score completion metadata verified" if actual_available else "Prepared z-score inputs were not all available"))
+			# Completion metadata describes the full database universe. Selected
+			# rows carry their own calculation status; unrelated missing inputs
+			# and receipt times do not disqualify current validated history.
+			evidence.append(FeatureReadinessEvidence(channel, session, FeatureReadinessState.READY, revision, "Prepared completion metadata and selected row statuses verified"))
 		return observations, evidence
 
 

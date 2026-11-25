@@ -56,7 +56,7 @@ class TargetStatistics:
 	def __post_init__(self) -> None:
 		if not isinstance(self.kind, TargetKind) or not isinstance(self.baseline_sessions, tuple) or len(self.means) != len(self.variances) or not self.means:
 			raise ValueError("Invalid target statistics")
-		if any(not isinstance(item, TradingSession) for item in self.baseline_sessions) or any(not math.isfinite(value) or value < 0 for value in (*self.means, *self.variances)):
+		if any(not isinstance(item, TradingSession) for item in self.baseline_sessions) or any(not math.isfinite(value) for value in (*self.means, *self.variances)) or any(value < 0 for value in self.variances):
 			raise ValueError("Target statistics must be finite population moments")
 
 	def to_mapping(self) -> dict[str, object]:

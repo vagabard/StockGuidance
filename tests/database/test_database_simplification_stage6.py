@@ -187,6 +187,33 @@ def test_missing_and_no_trading_do_not_create_cartesian_placeholders(tmp_path: P
 	assert database.sql("SELECT COUNT(*) FROM raw_stock_data") == [(2,)]
 
 
+def test_raw_rebuild_preserves_distinct_case_sensitive_ticker_ids(tmp_path: Path) -> None:
+	source = _source(tmp_path)
+	session = _session(date(2024, 7, 8), 1)
+	database = FakeDatabase(tmp_path / "case-sensitive.sqlite")
+	initialize_simplified_schema(source, database, windows=(20,))
+	database.sql("INSERT INTO transaction_dates (transaction_date) VALUES (?)", (session.session_date.isoformat(),))
+	database.sql("INSERT INTO ticker_symbol (label, exchange) VALUES (?, ?)", ("BCPC", "XNYS"))
+	database.sql("INSERT INTO ticker_symbol (label, exchange) VALUES (?, ?)", ("BCpC", "XNYS"))
+	response = ProviderResponse(
+		ResponseState.COMPLETE, (_bar("11.00000000", "BCPC"), _bar("12.00000000", "BCpC")),
+		200, "OK", (("resultsCount", 2),),
+		source_timestamps=tuple((ticker, int(session.closes_at.timestamp() * 1000)) for ticker in ("BCPC", "BCpC")),
+	)
+	content = archive_content(DownloadedSession(session, response, NOW))
+	path = tmp_path / "case-sensitive.ndjson"
+	path.write_bytes(content)
+	payload = PreparedPayload("case-sensitive", session.session_date, path, hashlib.sha256(content).hexdigest(), records_id(response.records), NOW, NOW)
+	result = RawRebuildRunner(source, FixtureCalendar({session.session_date: session}), clock=lambda: NOW).rebuild(
+		_operation(source, payload, session), database(tmp_path / "ignored")
+	)
+	assert len(result.committed_units) == 1
+	rows = database.sql("SELECT label, close FROM ticker_symbol JOIN raw_stock_data ON raw_stock_data.ticker_id=ticker_symbol.id ORDER BY ticker_symbol.id")
+	assert [(label, Decimal(str(close))) for label, close in rows] == [
+		("BCPC", Decimal("11")), ("BCpC", Decimal("12")),
+	]
+
+
 def test_gap_without_endpoints_is_a_completed_bad_raw_result(tmp_path: Path) -> None:
 	source = _source(tmp_path)
 	session = _session(date(2024, 7, 8), 1)

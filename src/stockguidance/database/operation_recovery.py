@@ -345,22 +345,23 @@ class DatabasePendingClearer:
 
 	def _delete_zscore_rows(self, cursor: Cursor, units: Sequence[WorkUnit]) -> None:
 		groups: dict[str, list[tuple[int, int]]] = {}
+		families: dict[str, str | None] = {}
 		for unit in units:
 			if unit.series_key is None or unit.window is None or unit.date_id is None or unit.ticker_id is None:
 				raise ClearingError("Z-score clear unit is incomplete")
-			cursor.execute(
-				f"SELECT family FROM {quote_identifier(self.table_names.table(TableRole.ZSCORE_SERIES))} WHERE series_key = %s",
-				(unit.series_key,),
-			)
-			rows = cursor.fetchall()
-			if not rows:
-				# Initial preparation may clear a bounded output scope before its
-				# series definition has ever been published.  The delete is already
-				# idempotently complete in that case.
+			if unit.series_key not in families:
+				cursor.execute(
+					f"SELECT family FROM {quote_identifier(self.table_names.table(TableRole.ZSCORE_SERIES))} WHERE series_key = %s",
+					(unit.series_key,),
+				)
+				rows = cursor.fetchall()
+				if len(rows) > 1:
+					raise ClearingError("Z-score series definition is missing")
+				families[unit.series_key] = None if not rows else (rows[0][0].decode("ascii") if isinstance(rows[0][0], bytes) else str(rows[0][0]))
+			family = families[unit.series_key]
+			if family is None:
+				# Initial preparation may clear an unpublished series.
 				continue
-			if len(rows) != 1:
-				raise ClearingError("Z-score series definition is missing")
-			family = rows[0][0].decode("ascii") if isinstance(rows[0][0], bytes) else str(rows[0][0])
 			resolved = self.table_names.resolve_zscore_tables((unit.window,))[unit.window]
 			if family == "price":
 				table = resolved.price

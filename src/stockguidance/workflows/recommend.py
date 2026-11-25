@@ -25,7 +25,7 @@ from stockguidance.recommendations.result import RankedTicker
 from stockguidance.workflows.failures import FailureCode, StageExecutionError, StageFailure, WorkflowStage
 from stockguidance.workflows.recommendation_dependencies import HistoryTrainer, RecommendationServices
 from stockguidance.workflows.recommendation_result import RecommendationRunResult, ValidationOnlyRefresh
-from stockguidance.workflows.train_model import HistoryTrainingRequest, train_from_history
+from stockguidance.workflows.train_model import HistoryTrainingRequest, train_from_history, InsufficientTrainingData
 from stockguidance.workflows.update_market_data import UpdateSettings, update_market_data
 from stockguidance.workflows.validate_database import ValidationSettings, validate_database
 from stockguidance.workflows.update_result import UpdateResult
@@ -129,8 +129,14 @@ def _recommend(job: RecommendationJob, boundary: HistoryBoundary, calendar: Sess
 	if job.retraining is not None:
 		try:
 			plan = job.retraining
-			training_request = HistoryTrainingRequest(plan.decisions, request.timing.decision_cutoff, job.features, job.target, plan.configuration, plan.artifact_path, availability_policy=job.availability_policy)
+			training_request = HistoryTrainingRequest(plan.decisions, request.timing.decision_cutoff, job.features, job.target, plan.configuration, plan.artifact_path, availability_policy=job.availability_policy,channel_repository=services.channels)
+			if job.resolution_metadata and job.resolution_metadata.get("universe"):
+				from stockguidance.artifacts.contracts import ArtifactUniverse
+				selection = job.resolution_metadata["universe"]
+				training_request = replace(training_request,universe=ArtifactUniverse(tuple(selection["ticker_ids"]),tuple(selection["ticker_labels"]),selection["selection_mode"],selection["data_version"]))
 			training = (trainer or train_from_history)(training_request, boundary, calendar, job.publication, services.closes)
+		except InsufficientTrainingData as error:
+			raise _failure(WorkflowStage.TRAINING, FailureCode.TRAINING_FAILED, str(error)) from None
 		except Exception:
 			raise _failure(WorkflowStage.TRAINING, FailureCode.TRAINING_FAILED, "Required mature-outcome training or artifact export failed") from None
 		try:
@@ -162,7 +168,7 @@ def _recommend(job: RecommendationJob, boundary: HistoryBoundary, calendar: Sess
 		raise
 	except Exception:
 		raise _failure(WorkflowStage.PLANNING, FailureCode.INVALID_REQUEST, "Supplied portfolio state cannot support a valid cash-rest order plan") from None
-	return RecommendationRunResult(result, scores, eligibility, sample, refresh, validation, prediction.member_artifact_ids, prediction.member_weights, training, order_plan, portfolio)
+	return RecommendationRunResult(result, scores, eligibility, sample, refresh, validation, prediction.member_artifact_ids, prediction.member_weights, training, order_plan, portfolio, job.resolution_metadata)
 
 
 def _ranked_payload(item: RankedTicker, *, versioned: bool) -> dict[str, Any]:
@@ -195,6 +201,7 @@ def _recommendation_report(run: RecommendationRunResult) -> dict[str, Any]:
 	symbols = {item.ticker_id: item.symbol for item in run.scores}
 	return {
 		"schema": "stockguidance-recommendation-2" if versioned else "stockguidance-recommendation-1", "successful": True,
+		"resolution": run.resolution_metadata,
 		"artifact_id": result.artifact_id,
 		"source": {"provider": request.source.identity.provider, "endpoint": request.source.identity.endpoint, "market": request.source.identity.market, "universe": request.source.identity.universe, "adjustment": request.source.identity.adjustment.value, "interval": request.source.identity.interval.value},
 		"data_revision": result.data_revision,
@@ -239,7 +246,7 @@ def _persist_recommendation_run(service: RunDirectoryService, handle: RunHandle,
 	atomic_write(handle.reports_directory / "recommendation.json", encode_json(report))
 	service.update_sections(
 		handle.run_id,
-		resolved_configuration={"timing": report["timing"], "data_revision": result.recommendation.data_revision, "refresh_mode": job.refresh_mode.value},
+		resolved_configuration={"timing": report["timing"], "data_revision": result.recommendation.data_revision, "refresh_mode": job.refresh_mode.value, "selection":job.resolution_metadata},
 		sections={
 			"identity": {"source": report["source"], "artifact_id": result.recommendation.artifact_id, "data_revision": result.recommendation.data_revision},
 			"resolution": report["timing"],
@@ -277,6 +284,9 @@ def recommend(job: RecommendationJob, boundary: HistoryBoundary, calendar: Sessi
 	handle = service.create(RunConfig(RunOperation.RECOMMENDATION, _recommendation_run_settings(job, execution)))
 	service.start(handle.run_id)
 	try:
+		if job.retraining is not None and job.resolution_metadata and job.resolution_metadata.get("automatic_artifact"):
+			from dataclasses import replace
+			job = replace(job,retraining=replace(job.retraining,artifact_path=handle.artifacts_directory / "model.sgmodel"))
 		result = _recommend(job, boundary, calendar, services, clock, trainer=trainer, portfolio=portfolio, execution=execution)
 		_persist_recommendation_run(service, handle, job, result)
 		service.complete(handle.run_id)

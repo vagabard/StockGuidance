@@ -453,7 +453,9 @@ class DependencyPlanner:
 				continue
 			for sequence in (item.session.sequence - 1, item.session.sequence, item.session.sequence + 1):
 				candidate = by_sequence.get(sequence)
-				if candidate is None:
+				if candidate is None or (not candidate.raw_complete and candidate.session.session_date not in raw_changes):
+					# An unimported future session has no usable derived output.
+					# Its own import will close this dependency later.
 					continue
 				candidate_tickers = cls._candidate_tickers(candidate, changed)
 				if candidate.session.sequence == item.session.sequence:
@@ -517,7 +519,7 @@ class DependencyPlanner:
 					last = changed_sequence + (window if series.definition.family is ZScoreFamily.PRICE_DELTA else window - 1)
 					for sequence in range(changed_sequence, last + 1):
 						candidate = by_sequence.get(sequence)
-						if candidate is not None:
+						if candidate is not None and (candidate.raw_complete or candidate.session.session_date in raw_changes or candidate.session.session_date in request_items):
 							keys.add((series.series_key, window, candidate.date_id, candidate.session.session_date, ticker_id))
 
 		# A derived-only request can repair a missing z-score completion unit even

@@ -163,6 +163,8 @@ def construct_configured_features(
 		quality_items.extend(close_issues)
 	if channel_data is not None:
 		quality_items.extend(channel_data.observations)
+	channel_observations = {} if channel_data is None else {(channel_key(row.channel), row.session, row.ticker_id): row for row in channel_data.observations}
+	channel_readiness = {} if channel_data is None else {(channel_key(row.channel), row.session): row for row in channel_data.readiness}
 	for session in sessions:
 		for ticker_id in specification.ticker_ids:
 			for channel in specification.feature_order:
@@ -194,11 +196,11 @@ def construct_configured_features(
 					continue
 				assert channel_data is not None
 				try:
-					channel_observation = channel_data.value(channel, session, ticker_id)
+					channel_observation = channel_observations[(channel_key(channel), session, ticker_id)]
 				except KeyError:
 					issues.append(FeatureIssue(channel_key(channel), ticker_id, session, FeatureIssueState.MISSING, "Prepared feature channel omitted a required key"))
 					continue
-				readiness = channel_data.readiness_for(channel, session)
+				readiness = channel_readiness.get((channel_key(channel), session))
 				if readiness is not None and readiness.state is not FeatureReadinessState.READY:
 					issues.append(FeatureIssue(channel_key(channel), ticker_id, session, FeatureIssueState(readiness.state.value), readiness.detail, provenance=(readiness.revision,)))
 				elif channel_observation.state is FeatureValueState.READY:

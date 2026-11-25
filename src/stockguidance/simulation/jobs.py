@@ -1,3 +1,4 @@
+from typing import Any
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -49,6 +50,7 @@ class SimulationConfiguration:
 	data_snapshot: datetime | None = None
 	horizon_sessions: int = 10
 	runs_root: Path | None = None
+	recommendation_setup: dict[str,Any] | None = None
 
 	def __post_init__(self) -> None:
 		require_money(self.initial_capital, "initial capital")
@@ -76,7 +78,7 @@ class SimulationConfiguration:
 def load_configuration(path: Path) -> SimulationConfiguration:
 	fields = mapping(json.loads(path.read_text(encoding="utf-8")))
 	required = ("source", "data_root", "database_config", "features", "start_date", "allocation", "decision_minutes_before_close", "publication", "execution_audit_cutoff", "eligibility", "retraining")
-	if set(fields) - {*required, "end_date", "horizon_sessions", "runs_root", "initial_capital", "top_k", "fee_per_fill", "availability_policy", "data_snapshot"} or any(name not in fields for name in required):
+	if set(fields) - {*required, "end_date", "horizon_sessions", "runs_root", "initial_capital", "top_k", "fee_per_fill", "availability_policy", "data_snapshot", "recommendation"} or any(name not in fields for name in required):
 		raise ValueError("Incomplete or unsupported simulation configuration fields")
 	identity = decode_source(exact_mapping(fields["source"], ("provider", "endpoint", "market", "universe", "adjustment", "interval")))
 	source = SourceConfig(identity, Path(text_field(fields, "data_root")), Path(text_field(fields, "database_config")))
@@ -106,4 +108,7 @@ def load_configuration(path: Path) -> SimulationConfiguration:
 	end = None if fields.get("end_date") is None else date.fromisoformat(text_field(fields, "end_date"))
 	horizon = integer(fields.get("horizon_sessions", 10))
 	runs_root = None if fields.get("runs_root") is None else Path(text_field(fields, "runs_root"))
-	return SimulationConfiguration(source, features, date.fromisoformat(text_field(fields, "start_date")), end, AllocationPolicy(text_field(allocation, "policy")), date.fromisoformat(text_field(allocation, "anchor_date")), decimal_text(fields.get("initial_capital", "1000.00")), timedelta(minutes=number(fields["decision_minutes_before_close"])), DailyPublicationPolicy(timedelta(minutes=number(publication["delay_minutes"])), text_field(publication, "evidence")), cutoff, EligibilityPolicy(integer(eligibility["minimum_transactions"])), integer(fields.get("top_k", 1)), ExecutionPolicy(decimal_text(fields.get("fee_per_fill", "0.00"))), retraining, availability_policy, data_snapshot, horizon, runs_root)
+	recommendation = fields.get("recommendation")
+	if recommendation is not None and not isinstance(recommendation,dict):
+		raise ValueError("Simulation recommendation settings must be a mapping")
+	return SimulationConfiguration(source, features, date.fromisoformat(text_field(fields, "start_date")), end, AllocationPolicy(text_field(allocation, "policy")), date.fromisoformat(text_field(allocation, "anchor_date")), decimal_text(fields.get("initial_capital", "1000.00")), timedelta(minutes=number(fields["decision_minutes_before_close"])), DailyPublicationPolicy(timedelta(minutes=number(publication["delay_minutes"])), text_field(publication, "evidence")), cutoff, EligibilityPolicy(integer(eligibility["minimum_transactions"])), integer(fields.get("top_k", 1)), ExecutionPolicy(decimal_text(fields.get("fee_per_fill", "0.00"))), retraining, availability_policy, data_snapshot, horizon, runs_root,recommendation)

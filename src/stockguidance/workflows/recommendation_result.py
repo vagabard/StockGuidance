@@ -1,3 +1,4 @@
+from typing import Any
 from dataclasses import dataclass
 
 from stockguidance.datasets.sample import Sample
@@ -36,3 +37,4 @@ class RecommendationRunResult:
 	training: TrainingResult | None
 	order_plan: OrderPlan | None = None
 	portfolio: PortfolioState | None = None
+	resolution_metadata: dict[str,Any] | None = None

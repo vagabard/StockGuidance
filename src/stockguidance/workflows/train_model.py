@@ -20,6 +20,12 @@ from stockguidance.preprocessing import PreprocessingSpec, fit_training_preproce
 from stockguidance.artifacts.contracts import ArtifactUniverse
 
 
+class InsufficientTrainingData(ValueError):
+	"""No complete samples remain for the exact requested universe."""
+
+
+
+
 @dataclass(frozen=True)
 class HistoryTrainingRequest:
 	decisions: tuple[DecisionTiming, ...]
@@ -67,6 +73,13 @@ class HistoryTrainingRequest:
 
 def train_from_history(request: HistoryTrainingRequest, boundary: HistoryBoundary, calendar: SessionCalendar, publication: DailyPublicationPolicy, repository: CloseRepository) -> TrainingResult:
 	dataset = build_training_dataset(request.decisions, request.training_cutoff, request.features, request.target, boundary, calendar, publication, repository, request.availability_policy, request.data_snapshot, request.channel_repository)
+	if not dataset.eligible:
+		from stockguidance.market_data.atomic import atomic_write
+		from stockguidance.market_data.identity import encode_json
+		from collections import Counter
+		summary = {"eligible_samples":0,"excluded_samples":len(dataset.samples),"exclusions":[{"entry_session":str(s.timing.entry_session.session_date),"feature_state":s.feature_state.value,"target_state":s.target_state.value,"issue_counts":dict(Counter(issue.state.value for issue in (*s.features.issues,*s.targets.issues)))} for s in dataset.samples]}
+		atomic_write(request.artifact_path.parent / "training-exclusions.json",encode_json(summary))
+		raise InsufficientTrainingData(f"No eligible training samples; {len(dataset.samples)} excluded. See training-exclusions.json beside the model destination")
 	if request.preprocessing != PreprocessingSpec():
 		dataset = dataset.with_preprocessing(fit_training_preprocessing(dataset, request.preprocessing))
 	evaluation = None if request.evaluation_cutoff is None else build_training_dataset(request.evaluation_decisions, request.evaluation_cutoff, request.features, request.target, boundary, calendar, publication, repository, request.availability_policy, request.data_snapshot, request.channel_repository)

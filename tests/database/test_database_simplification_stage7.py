@@ -1,5 +1,6 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -8,9 +9,9 @@ from support.ingestion import FakeDatabase
 
 from stockguidance.calendar.sessions import TradingSession
 from stockguidance.config.source import PriceAdjustment, SourceConfig, SourceIdentity
-from stockguidance.database.numerical_rebuild import SimplifiedNumericalRebuildRunner
+from stockguidance.database.numerical_rebuild import SimplifiedNumericalRebuildRunner, _Raw, _Session
 from stockguidance.database.operation_recovery import RebuildResult
-from stockguidance.database.simplified_contract import ClearScope, OperationKind, PendingScope, PendingUpdate, WorkUnit
+from stockguidance.database.simplified_contract import ClearScope, DataState, OperationKind, PendingScope, PendingUpdate, WorkUnit
 from stockguidance.database.simplified_schema import initialize_simplified_schema
 from stockguidance.market_data.identity import data_configuration_key
 from stockguidance.zscores.specification import ZScoreFamily
@@ -192,7 +193,7 @@ def test_warmup_missing_predecessor_and_zero_variance_are_explicit(tmp_path: Pat
 	assert runner_database.sql("SELECT status, zscore FROM zscores_price_2 WHERE date_id = 2") == [(5, None)]
 
 
-def test_interpolated_provenance_is_aggregated_and_quality_is_preserved(tmp_path: Path) -> None:
+def test_interpolated_quality_is_preserved_without_detailed_provenance(tmp_path: Path) -> None:
 	source = _source(tmp_path)
 	calendar = _calendar()
 	database = FakeDatabase(tmp_path / "interpolated.sqlite")
@@ -208,5 +209,51 @@ def test_interpolated_provenance_is_aggregated_and_quality_is_preserved(tmp_path
 	delta_rows = database.sql("SELECT calculation_status, quality_flags, gap_length, provenance FROM daily_delta_stock_data WHERE date_id = 2")
 	assert len(delta_rows) == 1 and delta_rows[0][0:3] == ("ready", 3, 1)
 	provenance = delta_rows[0][3]
-	assert "raw:2:1:interpolated" in provenance and "repair_revision:" + "b" * 64 in provenance
+	assert provenance == "[]"
 	assert database.sql("SELECT status, quality_flags, zscore FROM zscores_price_2 WHERE date_id = 2") == [(1, 3, None)]
+
+
+def test_ranking_values_change_without_generating_provenance(tmp_path: Path) -> None:
+	source = _source(tmp_path)
+	calendar = _calendar()
+	runner = SimplifiedNumericalRebuildRunner(source, calendar, _NoRawRunner(), clock=lambda: NOW)  # type: ignore[arg-type]
+	sessions = {
+		day: _Session(index, day, index, True, NOW, "a" * 64, False)
+		for index, day in enumerate(sorted(calendar.sessions_by_date), start=1)
+	}
+	raw = {
+		(date_id, ticker_id): _Raw(
+			date_id, ticker_id, f"T{ticker_id:03d}", DataState.GOOD,
+			(Decimal("10"), Decimal("11"), Decimal("9"), Decimal("10"), Decimal("100"), Decimal("10"), 5), NOW, NOW, "a" * 64, None, None, None,
+		)
+		for date_id in (1, 2, 3) for ticker_id in range(1, 121)
+	}
+	current, prior, following = (calendar.session(date(2024, 7, day)) for day in (2, 1, 3))
+	rows = runner._delta_rows(current, prior, following, sessions, raw, NOW)
+	assert len(rows) == 120
+	assert all(row.provenance == () for row in rows)
+	raw[(3, 120)] = replace(raw[(3, 120)], values=(Decimal("10"), Decimal("12"), Decimal("9"), Decimal("11"), Decimal("100"), Decimal("10"), 5))
+	changed = runner._delta_rows(current, prior, following, sessions, raw, NOW)
+	assert rows[-1].values != changed[-1].values
+	assert all(row.provenance == () for row in changed)
+
+
+def test_late_import_does_not_block_current_history_calculation(tmp_path: Path) -> None:
+	source, calendar = _source(tmp_path), _calendar()
+	database = FakeDatabase(tmp_path / "late-import.sqlite")
+	_seed_database(source, database, calendar)
+	database.sql("UPDATE transaction_dates SET raw_available_at='2030-01-01T00:00:00+00:00'")
+	runner = SimplifiedNumericalRebuildRunner(source, calendar, _NoRawRunner(), clock=lambda: NOW)  # type: ignore[arg-type]
+	runner.rebuild(_operation(source, calendar), database(tmp_path / "ignored"))
+	assert database.sql("SELECT calculation_status FROM daily_delta_stock_data WHERE date_id=2") == [("ready",)]
+	assert database.sql("SELECT status FROM zscores_price_2 WHERE date_id=2") == [(0,)]
+
+
+def test_unimported_following_session_leaves_only_future_targets_unavailable(tmp_path: Path) -> None:
+	source, calendar = _source(tmp_path), _calendar()
+	database = FakeDatabase(tmp_path / "unimported-follower.sqlite")
+	_seed_database(source, database, calendar)
+	database.sql("UPDATE transaction_dates SET raw_complete=0 WHERE id=3")
+	runner = SimplifiedNumericalRebuildRunner(source, calendar, _NoRawRunner(), clock=lambda: NOW)  # type: ignore[arg-type]
+	runner.rebuild(_operation(source, calendar), database(tmp_path / "ignored"))
+	assert database.sql("SELECT calculation_status,close_ratio_to_prior,next_day_change_in_price FROM daily_delta_stock_data WHERE date_id=2") == [("not_yet_available",pytest.approx(1.2),None)]

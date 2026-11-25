@@ -102,7 +102,7 @@ def test_readiness_reports_insufficient_exchange_history(tmp_path: Path) -> None
 		workflow.ensure((_decision(calendar),), FeatureSpec((1,), 10), TargetSpec(), label_cutoff=NOW)
 
 
-def test_target_readiness_fills_missing_rows_then_reuses_fileless_completion(tmp_path: Path) -> None:
+def test_target_readiness_fills_missing_rows_then_reuses_fileless_completion(tmp_path: Path, monkeypatch) -> None:
 	source, calendar = _source(tmp_path), _calendar()
 	database = FakeDatabase(tmp_path / "target.sqlite")
 	initialize_simplified_schema(source, database, windows=(2,))
@@ -110,6 +110,13 @@ def test_target_readiness_fills_missing_rows_then_reuses_fileless_completion(tmp
 	readiness = SimplifiedReadinessWorkflow(source, database, calendar, DailyPublicationPolicy(timedelta(minutes=15), "fixture"), provider, type("Clock", (), {"now": lambda self: NOW})(), lock_factory=lambda: nullcontext())
 	first = readiness.ensure((_decision(calendar),), FeatureSpec((1,), 2), TargetSpec(), label_cutoff=NOW)
 	assert first.successful and provider.calls
+	# Another ticker's classified bad row must not block this feature universe.
+	database.sql("INSERT INTO ticker_symbol (label,exchange) VALUES ('BBB','XNYS')")
+	database.sql("INSERT INTO raw_stock_data (ticker_id,date_id,state_id) SELECT 2,id,2 FROM transaction_dates WHERE transaction_date='2024-07-03'")
+	from stockguidance.database.simplified_runtime import validate_simplified_database
+	session = calendar.session(date(2024, 7, 3))
+	assert not validate_simplified_database(source,database,calendar,(session,)).complete
+	assert validate_simplified_database(source,database,calendar,(session,),ticker_ids=(1,)).complete
 	provider.calls.clear()
 	second = readiness.ensure((_decision(calendar),), FeatureSpec((1,), 2), TargetSpec(), label_cutoff=NOW)
 	assert second.successful and not provider.calls and first.data_revision == second.data_revision
@@ -117,6 +124,19 @@ def test_target_readiness_fills_missing_rows_then_reuses_fileless_completion(tmp
 	query = CloseQuery(SessionQuery(second.boundary, (calendar.session(date(2024, 7, 3)),), NOW), (1,))
 	data = SimplifiedCloseRepository(source, database).read(query)
 	assert len(data.observations) == 1 and data.observations[0].close == pytest.approx(11.0)
+	# Import happened at NOW, several days after this historical cutoff.
+	historical = CloseQuery(SessionQuery(second.boundary, (calendar.session(date(2024, 7, 3)),), datetime(2024, 7, 4, tzinfo=timezone.utc)), (1,))
+	assert len(SimplifiedCloseRepository(source, database).read(historical).observations) == 1
+	with pytest.raises(ValueError, match="information cutoff"):
+		SessionQuery(second.boundary, (calendar.session(date(2024, 7, 3)),), datetime(2024, 7, 3, 19, tzinfo=timezone.utc))
+	assert database.sql("SELECT COUNT(*) FROM stockguidance_validation_gate")[0][0] > 0
+	with monkeypatch.context() as changed_design:
+		changed_design.setattr("stockguidance.database.validation_gate.design_version", lambda: "0" * 64)
+		with pytest.raises(SimplifiedCoverageError, match="validation pass"):
+			SimplifiedCloseRepository(source, database).read(historical)
+	database.sql("UPDATE transaction_dates SET raw_revision=? WHERE transaction_date=?", ("f" * 64,"2024-07-03"))
+	with pytest.raises(SimplifiedCoverageError, match="validation pass"):
+		SimplifiedCloseRepository(source, database).read(historical)
 
 
 def test_correction_changes_revision_and_pending_scope_blocks_read(tmp_path: Path) -> None:
@@ -157,3 +177,38 @@ def test_read_path_blocks_an_overlapping_pending_operation(tmp_path: Path) -> No
 	with pytest.raises(SimplifiedCoverageError, match="unfinished|operation"):
 		SimplifiedCloseRepository(source, database).read(query)
 
+
+
+@pytest.mark.parametrize("validate_only", [False, True])
+def test_raw_close_readiness_does_not_require_unrelated_delta_completion(tmp_path, monkeypatch, validate_only):
+	source, calendar = _source(tmp_path), _calendar()
+	database = FakeDatabase(tmp_path / "raw-only.sqlite")
+	initialize_simplified_schema(source, database, windows=(2,))
+	workflow = SimplifiedReadinessWorkflow(source, database, calendar, DailyPublicationPolicy(timedelta(minutes=15), "fixture"), Provider(), type("Clock", (), {"now": lambda self: NOW})(), lock_factory=lambda: nullcontext())
+	workflow.ensure((_decision(calendar),), FeatureSpec((1,), 2), TargetSpec(), label_cutoff=NOW)
+	database.sql("UPDATE transaction_dates SET delta_complete=0")
+	from stockguidance.database.table_names import load_table_names, TableRole
+	database.sql(f"DELETE FROM {load_table_names().table(TableRole.DELTAS)}")
+	def unexpected_update(*args, **kwargs):
+		raise AssertionError("Complete raw history must not start a derived rebuild")
+	monkeypatch.setattr("stockguidance.workflows.simplified_readiness.run_simplified_update", unexpected_update)
+	result = (workflow.validate_only if validate_only else workflow.ensure)((_decision(calendar),), FeatureSpec((1,), 2), TargetSpec(), label_cutoff=NOW)
+	assert result.successful and result.validation.complete
+	from stockguidance.database.simplified_runtime import validate_simplified_database
+	assert not validate_simplified_database(source, database, calendar, result.scope.sessions, ticker_ids=(1,)).complete
+	assert validate_simplified_database(source, database, calendar, result.scope.sessions, ticker_ids=(1,), include_derived=False).complete
+
+
+def test_prepared_feature_readiness_leaves_missing_input_statuses_to_sample_checks(tmp_path):
+	from stockguidance.features.specification import FeatureSpecV2, PriceDeltaZScore
+	from stockguidance.database.table_names import load_table_names, TableRole
+	from stockguidance.database.simplified_runtime import validate_simplified_database
+	source, calendar = _source(tmp_path), _calendar()
+	database = FakeDatabase(tmp_path / "sample-status.sqlite")
+	initialize_simplified_schema(source, database, windows=(2,))
+	workflow = SimplifiedReadinessWorkflow(source, database, calendar, DailyPublicationPolicy(timedelta(minutes=15), "fixture"), Provider(), type("Clock", (), {"now": lambda self: NOW})(), lock_factory=lambda: nullcontext())
+	workflow.ensure((_decision(calendar),), FeatureSpec((1,), 3), TargetSpec(), label_cutoff=NOW)
+	database.sql(f"UPDATE {load_table_names().table(TableRole.DELTAS)} SET calculation_status='missing_input'")
+	result = workflow.ensure((_decision(calendar),), FeatureSpecV2((1,), 1, (PriceDeltaZScore(2),)), TargetSpec(), label_cutoff=NOW)
+	assert result.successful and result.validation.complete
+	assert not validate_simplified_database(source, database, calendar, result.scope.sessions, ticker_ids=(1,)).complete

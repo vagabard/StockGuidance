@@ -101,3 +101,39 @@ def test_channel_revision_changes_sample_identity():
 
 	assert first.feature_cache_key != second.feature_cache_key
 
+
+
+@pytest.mark.parametrize("missing_selected", [False, True])
+def test_prepared_zscore_reader_accepts_filtered_subset_and_requires_its_rows(tmp_path, missing_selected):
+	from stockguidance.config.source import SourceConfig
+	from stockguidance.database.repositories.features import MySQLFeatureChannelRepository, _channel_definition, FeatureChannelReadError
+	from stockguidance.zscores.results import ZScoreStatus
+	calendar, identity, _boundary, _publication, timing = _context()
+	source = SourceConfig(identity, tmp_path / "data", tmp_path / "db.id")
+	channel = PriceDeltaZScore(20)
+	session = timing.previous_session
+	spec = FeatureSpecV2((17, 3), 1, (channel,))
+	query = FeatureChannelQuery(identity, spec, (session,), (session,), timing.decision_cutoff)
+	definition, _ = _channel_definition(source, query, channel)
+	series = (definition.series_key, definition.schema_version, definition.source_scope, definition.calendar_id, definition.family.value, definition.window, definition.calculation_version, definition.delta_definition, definition.precision, definition.missing_value_policy)
+	rows = [(1, 3, 0.25, int(ZScoreStatus.READY)), (1, 17, -0.5, int(ZScoreStatus.READY))]
+	if missing_selected:
+		rows.pop()
+	class Cursor:
+		def __init__(self):
+			# Global metadata covers 100 stocks; unrelated unavailable inputs must
+			# not invalidate this selected pair's completed, ready values.
+			self.responses = iter(([series], [("dep", "availability", 0, 100, 98, "digest")], rows))
+		def execute(self, sql, parameters):
+			pass
+		def fetchall(self):
+			return next(self.responses)
+	repository = MySQLFeatureChannelRepository(source, None)
+	if missing_selected:
+		with pytest.raises(FeatureChannelReadError, match="incomplete"):
+			repository._read_zscore(Cursor(), query, channel, {session.session_date: 1})
+	else:
+		observations, evidence = repository._read_zscore(Cursor(), query, channel, {session.session_date: 1})
+		assert [row.ticker_id for row in observations] == [17, 3]
+		assert [row.value for row in observations] == [-0.5, 0.25]
+		assert evidence[0].state.value == "ready"

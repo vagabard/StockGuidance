@@ -17,16 +17,18 @@ def recommendation_payload(run: RecommendationRunResult) -> dict[str, object]:
 			payload["symbol"] = item.symbol
 		return payload
 	symbols = {item.ticker_id: item.symbol for item in run.scores}
+	current_history = bool(run.resolution_metadata and run.resolution_metadata.get("history_policy")=="current_revised_dataset")
 	return {
 		"schema": "stockguidance-recommendation-2" if versioned else "stockguidance-recommendation-1",
 		"successful": True, "kind": "ranked_suggestions" if run.order_plan is None else "portfolio_order_plan", "orders_planned": run.order_plan is not None and bool(run.order_plan.orders), "fills_recorded": False,
+		"resolution": run.resolution_metadata,
 		"cash_rest_enforced": run.order_plan is not None, "planning_status": "requires_supplied_portfolio_state" if run.order_plan is None else run.order_plan.state.value,
 		"supplied_portfolio": None if run.portfolio is None else portfolio_payload(run.portfolio),
 		"order_plan": None if run.order_plan is None else order_plan_payload(run.order_plan),
 		"model_policy": request.model.policy.value, "artifact_id": result.artifact_id,
 		"availability_policy": request.availability_policy.value,
-		"availability_assumption": request.availability_policy.assumption,
-		"point_in_time_replay": not request.availability_policy.retrospective,
+		"availability_assumption": "current_validated_history_by_market_session" if current_history else request.availability_policy.assumption,
+		"point_in_time_replay": not request.availability_policy.retrospective and not current_history,
 		"members": [{"artifact_id": identity, "weight": weight} for identity, weight in zip(run.member_artifact_ids, run.member_weights)],
 		"source": asdict(request.source.identity), "data_revision": result.data_revision,
 		"refresh_mode": request.refresh_mode.value,
@@ -55,6 +57,8 @@ def render_recommendations(run: RecommendationRunResult) -> str:
 	status = "Cash-rest order planning requires supplied portfolio state; no fills are recorded." if run.order_plan is None else f"Cash-rest order plan: {run.order_plan.state.value}; {len(run.order_plan.orders)} orders; no fills are recorded."
 	lines = [f"Ranked suggestions: entry close {timing.entry_session.session_date}; exit close {timing.exit_session.session_date}", f"Decision cutoff: {timing.decision_cutoff.isoformat()}", f"Artifact: {result.artifact_id}", f"Source revision: {result.data_revision}", f"Allocation policy: {result.request.allocation.policy.value}", status]
 	lines.extend(f"#{rank}: {item.symbol + ' ' if item.symbol is not None else ''}ticker_id={item.ticker_id} score={item.score:.8f} {result.score_units}" for rank, item in enumerate(result.ranking, start=1))
+	if run.resolution_metadata and run.resolution_metadata.get("history_policy"):
+		lines.insert(0,f"Mode: {run.resolution_metadata.get('mode','live')}; history: current revised dataset")
 	if not result.ranking:
 		lines.append("No eligible tickers; recommendation is valid but empty.")
 	if run.order_plan is not None:
