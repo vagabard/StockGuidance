@@ -10,6 +10,7 @@ from stockguidance.calendar.decisions import DecisionTiming
 from stockguidance.calendar.exchange import ExchangeCalendar
 from stockguidance.calendar.protocols import SessionCalendar
 from stockguidance.config.training import decode_preprocessing, decode_target, decode_training_configuration, number
+from stockguidance.config.history import HistoryLoadOptions
 from stockguidance.config.source import SourceConfig
 from stockguidance.config.validation import require_aware_datetime
 from stockguidance.calendar.clock import Clock
@@ -59,6 +60,7 @@ class TrainingJob:
 	data_snapshot: datetime | None = None
 	target: TargetSpecification = TargetSpec()
 	preprocessing: PreprocessingSpec = PreprocessingSpec()
+	data_loading: HistoryLoadOptions = HistoryLoadOptions()
 
 
 def load_job(path: Path) -> TrainingJob:
@@ -67,7 +69,7 @@ def load_job(path: Path) -> TrainingJob:
 		from stockguidance.training.configured import load_configured_job
 		return load_configured_job(path)  # type: ignore[return-value]
 	required = ("source", "data_root", "database_config", "features", "model", "training", "start_date", "end_date", "training_cutoff", "publication_delay_minutes", "publication_evidence", "decision_minutes_before_close", "evaluation")
-	if set(fields) - {*required, "availability_policy", "data_snapshot", "target", "preprocessing"} or any(name not in fields for name in required):
+	if set(fields) - {*required, "availability_policy", "data_snapshot", "target", "preprocessing", "data_loading"} or any(name not in fields for name in required):
 		raise ValueError("Incomplete or unsupported training job fields")
 	identity = decode_source(exact_mapping(fields["source"], ("provider", "endpoint", "market", "universe", "adjustment", "interval")))
 	source = SourceConfig(identity, Path(text_field(fields, "data_root")), Path(text_field(fields, "database_config")))
@@ -102,7 +104,7 @@ def load_job(path: Path) -> TrainingJob:
 		raise ValueError("Retrospective data_snapshot must include the training cutoff")
 	target = decode_target(fields.get("target"))
 	preprocessing = decode_preprocessing(fields.get("preprocessing"))
-	return TrainingJob(source, features, configuration, start, end, cutoff, publication, lead, evaluation_start, evaluation_end, evaluation_cutoff, availability_policy, data_snapshot, target, preprocessing)
+	return TrainingJob(source, features, configuration, start, end, cutoff, publication, lead, evaluation_start, evaluation_end, evaluation_cutoff, availability_policy, data_snapshot, target, preprocessing, HistoryLoadOptions.decode(fields.get("data_loading")))
 
 
 @dataclass(frozen=True)
@@ -161,8 +163,6 @@ def execute_job(
 		if database_source.identity != job.source.identity:
 			raise ValueError("Training source differs from the database-owned configuration")
 		job = replace(job, source=database_source)
-		if provider is None:
-			provider = ConfiguredPolygonProvider()
 		return execute_simplified_training(job, artifact_path, connect=connection, provider=provider, clock=clock, checkpoint_path=checkpoint_path, resume_from=resume_from)
 	history = open_job_history(job, connect=connection)
 	request = HistoryTrainingRequest(history.decisions, job.cutoff, job.features, job.target, job.configuration, artifact_path, history.evaluation_decisions, job.evaluation_cutoff, checkpoint_path, resume_from, job.availability_policy, job.data_snapshot, job.preprocessing)

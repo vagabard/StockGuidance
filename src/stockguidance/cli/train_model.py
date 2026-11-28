@@ -5,6 +5,7 @@ from typing import cast
 
 from stockguidance.training.jobs import execute_job, load_job
 from stockguidance.reporting.training import training_payload
+from stockguidance.database.prepared_history import PreparationRequired
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -46,6 +47,9 @@ def main(argv: list[str] | None = None) -> int:
 		result = execute_job(job, arguments.artifact, checkpoint_path=arguments.checkpoint, resume_from=arguments.resume)
 		print(json.dumps({"successful": True, **training_payload(result)}, sort_keys=True, allow_nan=False))
 		return 0
+	except PreparationRequired as error:
+		print(json.dumps({"successful":False,"failure":"database_preparation_required","message":str(error)}))
+		return 1
 	except Exception:
 		print(json.dumps({"successful": False, "failure": "training_or_export_failed"}))
 		return 1

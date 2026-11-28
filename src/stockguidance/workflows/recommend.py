@@ -26,6 +26,7 @@ from stockguidance.workflows.failures import FailureCode, StageExecutionError, S
 from stockguidance.workflows.recommendation_dependencies import HistoryTrainer, RecommendationServices
 from stockguidance.workflows.recommendation_result import RecommendationRunResult, ValidationOnlyRefresh
 from stockguidance.workflows.train_model import HistoryTrainingRequest, train_from_history, InsufficientTrainingData
+from stockguidance.datasets.prepared import PreparedHistory
 from stockguidance.workflows.update_market_data import UpdateSettings, update_market_data
 from stockguidance.workflows.validate_database import ValidationSettings, validate_database
 from stockguidance.workflows.update_result import UpdateResult
@@ -58,15 +59,33 @@ def _recommend(job: RecommendationJob, boundary: HistoryBoundary, calendar: Sess
 	refresh: UpdateResult | SimplifiedUpdateResult | ValidationOnlyRefresh
 	validation: ValidationResult | SimplifiedValidationResult
 	try:
-		if job.refresh_mode is RefreshMode.VALIDATE_ONLY:
-			if services.simplified_readiness is None:
-				if services.validation is None:
-					raise ValueError("Validate-only recommendations require a validation repository")
-				validation = validate_database(job.source, ValidationSettings(job.start, job.end, job.publication, request.timing.decision_cutoff, job.features if not isinstance(job.features, FeatureSpecV2) else None, job.target), boundary, calendar, services.validation, clock)
-				refresh = ValidationOnlyRefresh(content_id({"mode": "validate-only", "coverage": validation.plan.request.start.isoformat(), "end": validation.plan.request.end.isoformat(), "findings": [str(item) for item in validation.findings]}), validation.complete)
+		if isinstance(services.closes, PreparedHistory):
+			refresh = ValidationOnlyRefresh(getattr(services.closes,"revision"),True)
+			validation = SimplifiedValidationResult(services.closes.sessions,())
+		else:
+			if job.refresh_mode is RefreshMode.VALIDATE_ONLY:
+				if services.simplified_readiness is None:
+					if services.validation is None:
+						raise ValueError("Validate-only recommendations require a validation repository")
+					validation = validate_database(job.source, ValidationSettings(job.start, job.end, job.publication, request.timing.decision_cutoff, job.features if not isinstance(job.features, FeatureSpecV2) else None, job.target), boundary, calendar, services.validation, clock)
+					refresh = ValidationOnlyRefresh(content_id({"mode": "validate-only", "coverage": validation.plan.request.start.isoformat(), "end": validation.plan.request.end.isoformat(), "findings": [str(item) for item in validation.findings]}), validation.complete)
+				else:
+					readiness_decisions = (request.timing,) if job.retraining is None else tuple((*job.retraining.decisions, request.timing))
+					readiness = services.simplified_readiness.validate_only(
+						readiness_decisions,
+						job.features,
+						job.target,
+						label_cutoff=None if job.retraining is None else request.timing.decision_cutoff,
+						availability_policy=job.availability_policy,
+					)
+					refresh, validation = readiness.update, readiness.validation
+			elif services.simplified_readiness is None:
+				if services.market_data is None:
+					raise ValueError("Legacy recommendation services lack a market-data repository")
+				refresh = update_market_data(job.source, UpdateSettings(job.start, job.end, job.publication, job.corrections), boundary, calendar, services.provider, services.market_data, clock)
 			else:
 				readiness_decisions = (request.timing,) if job.retraining is None else tuple((*job.retraining.decisions, request.timing))
-				readiness = services.simplified_readiness.validate_only(
+				readiness = services.simplified_readiness.ensure(
 					readiness_decisions,
 					job.features,
 					job.target,
@@ -74,34 +93,22 @@ def _recommend(job: RecommendationJob, boundary: HistoryBoundary, calendar: Sess
 					availability_policy=job.availability_policy,
 				)
 				refresh, validation = readiness.update, readiness.validation
-		elif services.simplified_readiness is None:
-			if services.market_data is None:
-				raise ValueError("Legacy recommendation services lack a market-data repository")
-			refresh = update_market_data(job.source, UpdateSettings(job.start, job.end, job.publication, job.corrections), boundary, calendar, services.provider, services.market_data, clock)
-		else:
-			readiness_decisions = (request.timing,) if job.retraining is None else tuple((*job.retraining.decisions, request.timing))
-			readiness = services.simplified_readiness.ensure(
-				readiness_decisions,
-				job.features,
-				job.target,
-				label_cutoff=None if job.retraining is None else request.timing.decision_cutoff,
-				availability_policy=job.availability_policy,
-			)
-			refresh, validation = readiness.update, readiness.validation
-		if not refresh.successful:
-			raise ValueError("Incomplete refresh")
-		if job.features.signal_mode is SignalMode.ENTRY_OPEN:
-			if not isinstance(job.features, FeatureSpec):
-				raise ValueError("Entry-open recommendations require the legacy opening feature contract")
-			if services.openings is None:
-				raise ValueError("Entry opening capture is not configured")
-			opening_request = prepare_request(job, boundary, calendar, clock)
-			services.openings.refresh(job.features, opening_request.timing, boundary, clock)
+			if not refresh.successful:
+				raise ValueError("Incomplete refresh")
+			if job.features.signal_mode is SignalMode.ENTRY_OPEN:
+				if not isinstance(job.features, FeatureSpec):
+					raise ValueError("Entry-open recommendations require the legacy opening feature contract")
+				if services.openings is None:
+					raise ValueError("Entry opening capture is not configured")
+				opening_request = prepare_request(job, boundary, calendar, clock)
+				services.openings.refresh(job.features, opening_request.timing, boundary, clock)
 	except Exception:
 		raise _failure(WorkflowStage.REFRESH, FailureCode.NOT_READY, "Required source reconciliation failed or coverage remains incomplete") from None
 	try:
 		request = prepare_request(job, boundary, calendar, clock)
-		if services.simplified_readiness is None:
+		if isinstance(services.closes, PreparedHistory):
+			pass
+		elif services.simplified_readiness is None:
 			if services.validation is None:
 				raise ValueError("Legacy recommendation services lack a validation repository")
 			if not isinstance(job.features, FeatureSpec):
@@ -112,7 +119,7 @@ def _recommend(job: RecommendationJob, boundary: HistoryBoundary, calendar: Sess
 				raise ValueError("Incomplete validation")
 		elif not getattr(validation, "complete", False):
 			raise ValueError("Incomplete target-schema readiness")
-		sample = build_sample(job.features, job.target, request.timing, boundary, calendar, job.publication, services.closes, availability_policy=job.availability_policy, channel_repository=services.channels)
+		sample = services.closes.sample(request.timing) if isinstance(services.closes, PreparedHistory) else build_sample(job.features, job.target, request.timing, boundary, calendar, job.publication, services.closes, availability_policy=job.availability_policy, channel_repository=services.channels)
 		if sample.features.values is None:
 			raise ValueError("Unavailable inference sample")
 		query = CloseQuery(SessionQuery(boundary, (request.timing.previous_session,), request.timing.decision_cutoff), job.features.ticker_ids)

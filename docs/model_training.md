@@ -1,5 +1,10 @@
 # Close-to-close training and inference artifacts
 
+Versioned-database commands now use [prepared bulk history](prepared_history.md):
+read-only selection across training and simulation, streaming arrays, lazy
+windows, and phase timers. They report `current_prepared` availability. The
+strict and retrospective receipt contracts below apply to legacy/injected APIs.
+
 Stage 6 provides a typed training API and standalone inference artifacts. Inputs
 are Stage 5's exact historical closing prices through the previous session,
 optionally supplemented by the distinct [Stage 10 opening feature](entry_open.md);

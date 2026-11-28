@@ -10,6 +10,7 @@ from stockguidance.market_data.publication import DailyPublicationPolicy
 
 class AvailabilityPolicy(StrEnum):
 	STRICT = "strict"
+	CURRENT_PREPARED = "current_prepared"
 	RETROSPECTIVE_DAILY_PREVIOUS_CLOSE = "retrospective_daily_previous_close"
 
 	@property
@@ -18,6 +19,8 @@ class AvailabilityPolicy(StrEnum):
 
 	@property
 	def assumption(self) -> str:
+		if self is AvailabilityPolicy.CURRENT_PREPARED:
+			return "current_prepared_values_with_trading_session_chronology"
 		return "calendar_close_plus_evidenced_publication_delay_for_research_only" if self.retrospective else "actual_receipts_at_decision_cutoff"
 
 	def validate_features(self, specification: object) -> None:
@@ -42,6 +45,8 @@ class AvailabilityPolicy(StrEnum):
 
 	def observation_available_at(self, observation: "ObservationTiming", decision_cutoff: datetime, publication: DailyPublicationPolicy | None) -> bool:
 		require_aware_datetime(decision_cutoff, "decision cutoff")
+		if self is AvailabilityPolicy.CURRENT_PREPARED:
+			return observation.session.closes_at <= decision_cutoff
 		if self is AvailabilityPolicy.STRICT:
 			return observation.available_at <= decision_cutoff
 		if publication is None or getattr(publication, "after_close", None) is None:

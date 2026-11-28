@@ -11,7 +11,10 @@ class _Connect(Protocol):
 
 
 class MySQLConnectionFactory:
-	def __call__(self, database_config: Path) -> WriteConnection:
+	def streaming(self, database_config: Path) -> WriteConnection:
+		return self(database_config, streaming=True)
+
+	def __call__(self, database_config: Path, *, streaming: bool = False) -> WriteConnection:
 		configuration = load_database_configuration(database_config)
 		drivers = (MySQLDriver.CONNECTOR, MySQLDriver.PYMYSQL) if configuration.driver is MySQLDriver.AUTO else (configuration.driver,)
 		for driver in drivers:
@@ -20,7 +23,9 @@ class MySQLConnectionFactory:
 			except ImportError:
 				continue
 			parameters: dict[str, object] = {"host": configuration.host, "database": configuration.database, "user": configuration.user, "password": configuration.password, "port": configuration.port, "autocommit": False}
-			parameters.update({"buffered": True} if driver is MySQLDriver.CONNECTOR else {"charset": "utf8mb4"})
+			parameters.update({"buffered": not streaming} if driver is MySQLDriver.CONNECTOR else {"charset": "utf8mb4"})
+			if streaming and driver is MySQLDriver.PYMYSQL:
+				parameters["cursorclass"] = module.cursors.SSCursor
 			try:
 				return cast(_Connect, module.connect)(**parameters)
 			except Exception:

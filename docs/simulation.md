@@ -1,5 +1,11 @@
 # Cash-rest portfolios and chronological simulation
 
+Versioned-database simulations use [prepared bulk history](prepared_history.md).
+They select one complete universe across training and simulation, stream its
+values once, and reuse arrays for fitting, forecasts, and execution. Run the
+database updater separately. These runs report `current_prepared` availability;
+the receipt-time policies below describe legacy/injected repository APIs.
+
 Both allocation schedules buy at entry session T's close and sell at the next
 exchange session's close. Decisions precede the entry close and use the same
 `previous-close-v1` samples, explicit artifacts, previous-session liquidity,

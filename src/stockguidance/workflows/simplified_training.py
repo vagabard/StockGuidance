@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
+from dataclasses import replace
 from pathlib import Path
 from typing import Protocol
 
@@ -10,6 +11,7 @@ from stockguidance.calendar.clock import Clock, SystemClock
 from stockguidance.calendar.decisions import DecisionTiming
 from stockguidance.calendar.exchange import ExchangeCalendar
 from stockguidance.config.source import SourceConfig
+from stockguidance.config.history import HistoryLoadOptions
 from stockguidance.database.write_connections import WriteConnectionFactory
 from stockguidance.database.raw_rebuild import RawPayloadProvider
 from stockguidance.features.specification import FeatureSpecification
@@ -19,11 +21,9 @@ from stockguidance.targets.specification import TargetSpecification
 from stockguidance.training.configuration import TrainingConfig
 from stockguidance.preprocessing import PreprocessingSpec
 from stockguidance.training.result import TrainingResult
-from stockguidance.workflows.simplified_readiness import (
-	SimplifiedCloseRepository,
-	SimplifiedReadinessWorkflow,
-)
 from stockguidance.workflows.train_model import HistoryTrainingRequest, train_from_history
+from stockguidance.database.prepared_history import load_prepared_history
+from stockguidance.market_data.history import HistoryBoundary, HistoryProvenance
 
 
 class SimplifiedTrainingJob(Protocol):
@@ -62,7 +62,7 @@ class SimplifiedTrainingJob(Protocol):
 def _calendar(job: SimplifiedTrainingJob) -> ExchangeCalendar:
 	first = min(job.start, job.evaluation_start or job.start)
 	last = max(job.end, job.evaluation_end or job.end)
-	padding = timedelta(days=max(30, (job.features.lookback_sessions + 2) * 3))
+	padding = timedelta(days=max(30, (getattr(job.features,"required_history_sessions",job.features.lookback_sessions) + 2) * 3, (len(job.target.baseline_offsets)+2)*3))
 	return ExchangeCalendar(job.source.calendar_id, first - padding, last + padding)
 
 
@@ -80,23 +80,12 @@ def execute_simplified_training(
 	checkpoint_path: Path | None = None,
 	resume_from: Path | None = None,
 ) -> TrainingResult:
-	"""Ensure target coverage, then invoke the unchanged typed training path."""
+	"""Select and bulk-load current prepared data without repairing the database."""
 	when = clock or SystemClock()
 	calendar = _calendar(job)
 	decisions = _decisions(calendar, job.start, job.end, job.decision_lead)
 	evaluation_decisions = () if job.evaluation_start is None or job.evaluation_end is None else _decisions(calendar, job.evaluation_start, job.evaluation_end, job.decision_lead)
 	all_decisions = tuple(sorted((*decisions, *evaluation_decisions), key=lambda item: item.entry_session.sequence))
-	label_cutoff = job.evaluation_cutoff or job.cutoff
-	readiness = SimplifiedReadinessWorkflow(job.source, connect, calendar, job.publication, provider, when)
-	result = readiness.ensure(
-		all_decisions,
-		job.features,
-		job.target,
-		label_cutoff=label_cutoff,
-		availability_policy=job.availability_policy,
-		data_snapshot=job.data_snapshot,
-	)
-	repository = SimplifiedCloseRepository(job.source, connect)
 	request = HistoryTrainingRequest(
 		decisions,
 		job.cutoff,
@@ -108,16 +97,14 @@ def execute_simplified_training(
 		job.evaluation_cutoff,
 		checkpoint_path,
 		resume_from,
-		job.availability_policy,
-		job.data_snapshot,
+		AvailabilityPolicy.CURRENT_PREPARED,
+		None,
 		job.preprocessing,
 	)
-	training = train_from_history(request, result.boundary, calendar, job.publication, repository)
-	# The dataset revision already includes every read row.  Keep the explicit
-	# database revision available to callers that report readiness separately.
-	if not result.successful:
-		raise RuntimeError("Target database readiness did not complete")
-	return training
+	repository = load_prepared_history(job.source, connect, calendar, all_decisions, job.features, job.target, options=getattr(job,"data_loading",HistoryLoadOptions()))
+	boundary = HistoryBoundary(job.source.identity, calendar.calendar_id, repository.sessions[0].session_date, HistoryProvenance.EXPLICIT_BOUNDARY, "Current prepared database history", when.now())
+	request = replace(request, features=repository.features)
+	return train_from_history(request, boundary, calendar, job.publication, repository)
 
 
 __all__ = ["execute_simplified_training"]

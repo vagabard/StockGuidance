@@ -1,11 +1,12 @@
-from typing import Any
-from dataclasses import dataclass
+from typing import Any, TYPE_CHECKING
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 import json
 from pathlib import Path
 
 from stockguidance.artifacts.decoding import decode_features, decode_target, exact_mapping, integer
 from stockguidance.config.training import decode_training_configuration, number
+from stockguidance.config.history import HistoryLoadOptions
 from stockguidance.config.source import SourceConfig
 from stockguidance.config.validation import require_positive_int
 from stockguidance.features.specification import FeatureSpec, FeatureSpecV2, FeatureSpecification
@@ -18,6 +19,9 @@ from stockguidance.portfolio.policy import AllocationPolicy
 from stockguidance.recommendations.eligibility import EligibilityPolicy
 from stockguidance.training.configuration import TrainingConfig
 from stockguidance.targets.specification import TargetSpec, TargetSpecification
+
+if TYPE_CHECKING:
+	from stockguidance.datasets.prepared import PreparedHistory
 
 
 @dataclass(frozen=True)
@@ -47,6 +51,8 @@ class RecommendationConfiguration:
 	runs_root: Path | None = None
 	replay_cutoff: datetime | None = None
 	resolution_metadata: dict[str,Any] | None = None
+	prepared_history: "PreparedHistory | None" = field(default=None, repr=False, compare=False)
+	data_loading: HistoryLoadOptions = HistoryLoadOptions()
 
 	def __post_init__(self) -> None:
 		require_positive_int(self.top_k, "top_k")
@@ -63,7 +69,7 @@ class RecommendationConfiguration:
 def load_configuration(path: Path) -> RecommendationConfiguration:
 	fields = mapping(json.loads(path.read_text(encoding="utf-8")))
 	required = ("source", "data_root", "database_config", "features", "start_date", "end_date", "entry_date", "allocation", "publication", "corrections", "eligibility", "top_k", "retraining")
-	if set(fields) - {*required, "availability_policy", "target", "runs_root"} or any(name not in fields for name in required):
+	if set(fields) - {*required, "availability_policy", "target", "runs_root", "data_loading"} or any(name not in fields for name in required):
 		raise ValueError("Incomplete or unsupported recommendation configuration fields")
 	identity = decode_source(exact_mapping(fields["source"], ("provider", "endpoint", "market", "universe", "adjustment", "interval")))
 	if (identity.provider, identity.endpoint, identity.market, identity.universe) != ("polygon", GROUPED_ENDPOINT, "us-stocks", GROUPED_UNIVERSE):
@@ -86,4 +92,4 @@ def load_configuration(path: Path) -> RecommendationConfiguration:
 		raise ValueError("Recommendation configuration requires a typed feature specification")
 	target = TargetSpec() if fields.get("target") is None else decode_target(fields["target"])
 	runs_root = None if fields.get("runs_root") is None else Path(text_field(fields, "runs_root"))
-	return RecommendationConfiguration(source, features, None if fields["start_date"] is None else date.fromisoformat(text_field(fields, "start_date")), date.fromisoformat(text_field(fields, "end_date")), date.fromisoformat(text_field(fields, "entry_date")), AllocationPolicy(text_field(allocation, "policy")), date.fromisoformat(text_field(allocation, "anchor_date")), DailyPublicationPolicy(timedelta(minutes=number(publication["delay_minutes"])), text_field(publication, "evidence")), CorrectionPolicy(timedelta(days=number(corrections["recent_window_days"])), timedelta(hours=number(corrections["recent_refresh_hours"])), timedelta(days=number(corrections["archive_refresh_days"])), text_field(corrections, "evidence")), EligibilityPolicy(integer(eligibility["minimum_transactions"])), integer(fields["top_k"]), retraining, AvailabilityPolicy(str(fields.get("availability_policy", AvailabilityPolicy.STRICT.value))), target, runs_root)
+	return RecommendationConfiguration(source, features, None if fields["start_date"] is None else date.fromisoformat(text_field(fields, "start_date")), date.fromisoformat(text_field(fields, "end_date")), date.fromisoformat(text_field(fields, "entry_date")), AllocationPolicy(text_field(allocation, "policy")), date.fromisoformat(text_field(allocation, "anchor_date")), DailyPublicationPolicy(timedelta(minutes=number(publication["delay_minutes"])), text_field(publication, "evidence")), CorrectionPolicy(timedelta(days=number(corrections["recent_window_days"])), timedelta(hours=number(corrections["recent_refresh_hours"])), timedelta(days=number(corrections["archive_refresh_days"])), text_field(corrections, "evidence")), EligibilityPolicy(integer(eligibility["minimum_transactions"])), integer(fields["top_k"]), retraining, AvailabilityPolicy(str(fields.get("availability_policy", AvailabilityPolicy.STRICT.value))), target, runs_root, data_loading=HistoryLoadOptions.decode(fields.get("data_loading")))

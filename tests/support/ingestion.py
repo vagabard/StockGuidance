@@ -56,6 +56,12 @@ class FakeCursor:
 	def fetchall(self):
 		return self.cursor.fetchall() if self.synthetic is None else self.synthetic
 
+	def fetchmany(self, size=8192):
+		if self.synthetic is None:
+			return self.cursor.fetchmany(size)
+		rows, self.synthetic = self.synthetic[:size], self.synthetic[size:]
+		return rows
+
 	def executemany(self, operation, parameters):
 		for row in parameters:
 			self.execute(operation, row)

@@ -1,4 +1,4 @@
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import date, timedelta
 
 from stockguidance.artifacts.contracts import ArtifactReference
@@ -32,6 +32,9 @@ from stockguidance.runs.contracts import RunConfig, RunOperation
 from stockguidance.runs.service import RunDirectoryService
 from stockguidance.simulation.persistence import persist_simulation_result
 from stockguidance.targets.specification import TargetSpec
+from stockguidance.database.prepared_history import load_prepared_history
+from stockguidance.datasets.prepared import PreparedLiquidity
+from stockguidance.market_data.availability import AvailabilityPolicy
 from stockguidance.workflows.simplified_readiness import (
 	SimplifiedCloseRepository,
 	SimplifiedEligibilityRepository,
@@ -85,9 +88,9 @@ def _target_simulation(configuration: SimulationConfiguration, arguments: Simula
 	if (configuration.retraining is not None) != _training_policy(arguments.model_policy):
 		raise ValueError("Model policy and training configuration differ")
 	requested_start = configuration.start if configuration.retraining is None else min(configuration.start, configuration.retraining.start)
-	calendar = ExchangeCalendar(source.calendar_id, requested_start - timedelta(days=60), _calendar_end(configuration))
+	calendar = ExchangeCalendar(source.calendar_id, requested_start - timedelta(days=max(200,(getattr(configuration.features,"required_history_sessions",configuration.features.lookback_sessions)+2)*3,(len(configuration.target.baseline_offsets)+2)*3)), _calendar_end(configuration))
 	end = _resolved_end(configuration, calendar)
-	request = SimulationRequest(source.identity, configuration.features, TargetSpec(), AllocationSpec(configuration.allocation_policy, calendar.session(configuration.anchor_date)), configuration.start, end, configuration.initial_capital, configuration.decision_lead, configuration.eligibility, configuration.top_k, configuration.execution, configuration.availability_policy, configuration.data_snapshot)
+	request = SimulationRequest(source.identity, configuration.features, configuration.target, AllocationSpec(configuration.allocation_policy, calendar.session(configuration.anchor_date)), configuration.start, end, configuration.initial_capital, configuration.decision_lead, configuration.eligibility, configuration.top_k, configuration.execution, configuration.availability_policy, configuration.data_snapshot)
 	evaluation_decisions = tuple(DecisionTiming(calendar.shift(session, -1), session, calendar.shift(session, 1), session.closes_at - configuration.decision_lead) for session in calendar.sessions(configuration.start, end))
 	training_decisions: tuple[DecisionTiming, ...] = ()
 	if configuration.retraining is not None:
@@ -96,21 +99,15 @@ def _target_simulation(configuration: SimulationConfiguration, arguments: Simula
 	all_decisions = tuple(sorted((*training_decisions, *evaluation_decisions), key=lambda item: item.entry_session.sequence))
 	scope = required_session_scope(calendar, all_decisions, configuration.features, request.target, include_labels=configuration.retraining is not None, extra_sessions=tuple(calendar.sessions(configuration.start, end)))
 	boundary = boundary_for_scope(source, calendar, scope, configuration.audit_cutoff)
-	provider = ConfiguredPolygonProvider()
-	readiness = SimplifiedReadinessWorkflow(source, connect, calendar, configuration.publication, provider, SystemClock(), table_names=names, staging_root=source.data_root / ".database-simplification" / "pending")
-	readiness.ensure(
-		all_decisions,
-		request.features,
-		request.target,
-		label_cutoff=configuration.audit_cutoff if configuration.retraining is not None else None,
-		as_of=configuration.audit_cutoff,
-		availability_policy=configuration.availability_policy,
-		data_snapshot=configuration.data_snapshot,
-	)
-	closes = SimplifiedCloseRepository(source, connect, names)
-	signals = HistoricalSignals(boundary, calendar, configuration.publication, SignalRepository(closes, OpeningStore(source.data_root)), SimplifiedEligibilityRepository(closes), configuration.availability_policy, configuration.data_snapshot)
+	history = load_prepared_history(source, connect, calendar, all_decisions, request.features, request.target,
+		label_decisions=tuple(d for d in all_decisions if d.exit_session.session_date <= end),
+		extra_sessions=tuple(calendar.sessions(configuration.start,end)),
+		transaction_sessions=tuple(d.previous_session for d in evaluation_decisions),table_names=names,options=configuration.data_loading)
+	request = replace(request, features=history.features, availability_policy=AvailabilityPolicy.CURRENT_PREPARED, data_snapshot=None)
+	closes = history
+	signals = HistoricalSignals(boundary, calendar, configuration.publication, closes, PreparedLiquidity(history), AvailabilityPolicy.CURRENT_PREPARED)
 	scores = _score_source(arguments, configuration, signals, training_decisions)
-	return simulate(request, boundary, calendar, scores, RepositoryExecutionPrices(boundary, closes, configuration.audit_cutoff))
+	return replace(simulate(request, boundary, calendar, scores, RepositoryExecutionPrices(boundary, closes, configuration.audit_cutoff)), data_preparation={"selection":history.selection,"timings":history.timings})
 
 
 def _assemble_and_simulate(configuration: SimulationConfiguration, arguments: SimulationOptions) -> SimulationResult:
@@ -140,7 +137,7 @@ def _assemble_and_simulate(configuration: SimulationConfiguration, arguments: Si
 			raise ValueError("Retrospective data_snapshot must include the latest previous-close publication")
 	if configuration.audit_cutoff < calendar.session(end).closes_at:
 		raise ValueError("Execution audit cutoff must include the evaluation end close")
-	request = SimulationRequest(configuration.source.identity, configuration.features, TargetSpec(), AllocationSpec(configuration.allocation_policy, calendar.session(configuration.anchor_date)), configuration.start, end, configuration.initial_capital, configuration.decision_lead, configuration.eligibility, configuration.top_k, configuration.execution, configuration.availability_policy, configuration.data_snapshot)
+	request = SimulationRequest(configuration.source.identity, configuration.features, configuration.target, AllocationSpec(configuration.allocation_policy, calendar.session(configuration.anchor_date)), configuration.start, end, configuration.initial_capital, configuration.decision_lead, configuration.eligibility, configuration.top_k, configuration.execution, configuration.availability_policy, configuration.data_snapshot)
 	closes = VerifiedCloseRepository(configuration.source, MySQLValidationRepository(configuration.source, connect, names, (20, 60)))
 	signals = HistoricalSignals(boundary, calendar, configuration.publication, SignalRepository(closes, OpeningStore(configuration.source.data_root)), VerifiedEligibilityRepository(closes), configuration.availability_policy, configuration.data_snapshot)
 	scores: ScoreSource

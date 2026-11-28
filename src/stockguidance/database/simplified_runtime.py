@@ -513,7 +513,16 @@ def run_simplified_update(
 		raise SimplifiedRuntimeError("The exchange calendar does not match the database-owned source configuration")
 	if not forced_sessions.issubset({session.session_date for session in sessions}):
 		raise SimplifiedRuntimeError("Forced replacement dates must be within the requested session scope")
-	max_window = max(windows or (2,))
+	# A normal update maintains every registered series. Its context must include
+	# the largest registered lookback, even when no explicit window was passed.
+	if windows is None:
+		with consistent_read_transaction(source, connect) as transaction:
+			cursor = transaction.cursor()
+			cursor.execute(f"SELECT DISTINCT `window` FROM {quote_identifier(names.table(TableRole.ZSCORE_SERIES))}", ())
+			registered_windows = tuple(int(str(row[0])) for row in cursor.fetchall())
+		max_window = max(registered_windows or (2,))
+	else:
+		max_window = max(windows or (2,))
 	context = _session_context(calendar, sessions, max_window)
 	ensure_sessions(source, connect, context, names)
 	provider_counter = _CountingProvider(provider)

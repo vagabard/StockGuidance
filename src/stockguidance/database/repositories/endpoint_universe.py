@@ -33,7 +33,7 @@ class EndpointUniverseRepository:
 		self.names = table_names or load_table_names()
 		self.cache_root = cache_root or source.data_root / ".universe-cache"
 
-	def select(self, sessions: tuple[TradingSession,...], settings: EndpointSelection) -> dict[str,Any]:
+	def select(self, sessions: tuple[TradingSession,...], settings: EndpointSelection, *, require_transaction_observations: bool = False) -> dict[str,Any]:
 		started = perf_counter()
 		if not sessions:
 			raise ValueError("Universe selection requires trading sessions")
@@ -84,11 +84,23 @@ class EndpointUniverseRepository:
 			coverage_seconds = perf_counter()-coverage_started
 			if not candidates:
 				raise ValueError("Full-period history coverage filtering produced an empty universe")
+			transaction_excluded: tuple[int,...] = ()
+			if require_transaction_observations:
+				transaction_ids: set[int] = set()
+				for offset in range(0,len(candidates),500):
+					batch = candidates[offset:offset+500]
+					cursor.execute(f"SELECT ticker_id FROM {prices} WHERE date_id=%s AND ticker_id IN ({marks(batch)}) AND state_id=1 AND close>0 AND transactions IS NOT NULL AND transactions>=0",(ids[-1],*batch))
+					transaction_ids.update(int(str(row[0])) for row in cursor.fetchall())
+				transaction_excluded = tuple(v for v in candidates if v not in transaction_ids)
+				candidates = tuple(v for v in candidates if v in transaction_ids)
+			if not candidates:
+				raise ValueError("Transaction-observation filtering produced an empty universe")
 			sampled = evenly_spaced(ids,settings.sample_sessions) if settings.trim_percent else ()
 			from stockguidance.universe import endpoints
 			algorithm = content_id([ALGORITHM_VERSION,sha256(Path(__file__).read_bytes()).hexdigest(),sha256(Path(endpoints.__file__).read_bytes()).hexdigest()])
 			key = content_id({"algorithm":algorithm,"source":data_configuration_key(self.source.data_configuration),
-				"versions":versions,"candidates":candidates,"trim":str(settings.trim_percent),"sampled":sampled})
+				"versions":versions,"candidates":candidates,"trim":str(settings.trim_percent),"sampled":sampled,
+				"require_transaction_observations":require_transaction_observations})
 			cache = self.cache_root / f"{key}.json"
 			cache_hit = False
 			filter_started = perf_counter()
@@ -128,6 +140,8 @@ class EndpointUniverseRepository:
 				"coverage_required_sessions":len(ids),"coverage_required_percent":100,"coverage_eligible_count":len(candidates),
 				"coverage_excluded_ids":list(coverage_excluded),"coverage_excluded_labels":[labels[v] for v in coverage_excluded],
 				"coverage_missing_sessions":{str(v):len(ids)-observed_sessions.get(v,0) for v in coverage_excluded},"coverage_seconds":coverage_seconds,
+				"transaction_observation_required":require_transaction_observations,"transaction_observation_excluded_ids":list(transaction_excluded),
+				"transaction_observation_excluded_labels":[labels[v] for v in transaction_excluded],"transaction_observation_eligible_count":len(candidates),
 				"ticker_ids":list(selected),"ticker_labels":[labels[v] for v in selected],"trim_percent":str(settings.trim_percent),"trimmed_ids":list(trimmed),"missing_measurement_ids":list(missing),
 				"metric":"mean_daily_shares_times_close","sampled_dates":[str(by_id[v]) for v in sampled],"sampled":bool(sampled and len(sampled)<len(ids)),
 				"sample_sessions_requested":settings.sample_sessions,"required_measurement_sessions":len(sampled),"filter_disabled":not bool(settings.trim_percent),

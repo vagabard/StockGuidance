@@ -66,3 +66,4 @@ class TrainingResult:
 	loss_version: str = "mae-v1"
 	target_metric_units: str = "fractional_return"
 	objective_loss_units: str = "target_units"
+	data_preparation: dict[str, object] | None = None

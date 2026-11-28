@@ -41,7 +41,7 @@ class RecommendationRequest:
 		require_positive_int(self.top_k, "top_k")
 		if not isinstance(self.availability_policy, AvailabilityPolicy):
 			raise ValueError("Recommendation requires a typed availability policy")
-		if self.availability_policy is not AvailabilityPolicy.STRICT:
+		if self.availability_policy not in (AvailabilityPolicy.STRICT, AvailabilityPolicy.CURRENT_PREPARED):
 			raise ValueError("Retrospective research artifacts are not supported for production recommendations")
 		if self.source.identity != self.coverage.source:
 			raise ValueError("Coverage and configured source identities differ")

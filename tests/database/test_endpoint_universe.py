@@ -109,3 +109,13 @@ def test_explicit_selection_with_no_complete_tickers_fails(store):
 	_db,repository,sessions=store
 	with pytest.raises(ValueError,match="coverage filtering produced an empty universe"):
 		repository.select(sessions,EndpointSelection(tickers=("DDD",)))
+
+
+def test_optional_transaction_observation_filter_preserves_order_and_reports_exclusions(store):
+	db,repository,sessions=store
+	db.sql("UPDATE raw_stock_data SET transactions=10")
+	db.sql("UPDATE raw_stock_data SET transactions=NULL WHERE ticker_id=1 AND date_id=3")
+	result=repository.select(sessions,EndpointSelection(),require_transaction_observations=True)
+	assert result["ticker_ids"]==[5,6]
+	assert result["transaction_observation_excluded_ids"]==[1]
+	assert result["transaction_observation_eligible_count"]==2

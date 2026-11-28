@@ -9,6 +9,7 @@ from stockguidance.reporting.orders import order_plan_payload
 from stockguidance.reporting.training import training_payload
 from stockguidance.simulation.events import SimulationEvent
 from stockguidance.simulation.result import SimulationResult
+from stockguidance.market_data.availability import AvailabilityPolicy
 
 
 def _features_payload(features: object) -> dict[str, object]:
@@ -66,7 +67,7 @@ def simulation_payload(result: SimulationResult, *, schema: str = "stockguidance
 		"cadence_basis": "scheduled_buy_decisions_from_allocation_anchor_including_skips",
 		"evaluation": "fixed_pre_period_model" if result.score_policy.retrain_every_buy_decisions is None else "chronological_retraining",
 		"source": asdict(request.source), "features": _features_payload(request.features),
-		"availability_policy": request.availability_policy.value, "availability_assumption": request.availability_policy.assumption, "point_in_time_replay": not request.availability_policy.retrospective and not dynamic, "data_snapshot": None if request.data_snapshot is None else request.data_snapshot.isoformat(),
+		"data_preparation": result.data_preparation, "availability_policy": request.availability_policy.value, "availability_assumption": request.availability_policy.assumption, "point_in_time_replay": request.availability_policy is AvailabilityPolicy.STRICT and not dynamic, "data_snapshot": None if request.data_snapshot is None else request.data_snapshot.isoformat(),
 		"research_disclaimer": None if not request.availability_policy.retrospective else "Retrospective research assumes historical publication timing; corrected/adjusted history and the selected universe may contain hindsight and do not establish an original point-in-time replay.",
 		"target": _target_payload(request.target),
 		"calendar": {"id": request.allocation.anchor_session.calendar_id, "version": result.calendar_version},

@@ -13,7 +13,7 @@ def load_recommendation_artifact(reference: ArtifactReference, kind: ArtifactKin
 
 def require_compatible_artifact(artifact: LoadedModel | LoadedEnsemble, job: RecommendationJob, timing: DecisionTiming, calendar: SessionCalendar) -> None:
 	semantics = artifact.metadata.semantics if isinstance(artifact, LoadedModel) else artifact.semantics
-	if semantics.availability_policy is not AvailabilityPolicy.STRICT:
+	if semantics.availability_policy not in (AvailabilityPolicy.STRICT, AvailabilityPolicy.CURRENT_PREPARED):
 		raise ValueError("Retrospective research artifacts are not supported for production recommendations")
 	if semantics != ModelSemantics(job.source.identity, job.features, job.target, calendar.calendar_id, calendar.version, availability_policy=job.availability_policy):
 		raise ValueError("Recommendation artifact source/feature/target/ticker/calendar specifications differ")

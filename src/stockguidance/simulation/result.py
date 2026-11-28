@@ -30,6 +30,7 @@ class SimulationResult:
 	training_runs: tuple[tuple[DecisionTiming, TrainingResult], ...]
 	execution_frames: tuple[ExecutionFrame, ...]
 	execution_audit_cutoff: datetime
+	data_preparation: dict[str, object] | None = None
 
 	@property
 	def successful(self) -> bool:

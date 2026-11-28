@@ -26,6 +26,7 @@ from stockguidance.calendar.ranges import (
 	DatePlanSpec, DateRangeResolver, DependencyPlan, DependencySpec, SourceCoverageSnapshot,
 	coverage_snapshot_from_mapping, parse_date_range,
 )
+from stockguidance.config.history import HistoryLoadOptions
 from stockguidance.config.source import SourceConfig
 from stockguidance.config.training import decode_preprocessing, decode_target, decode_training_configuration
 from stockguidance.market_data.identity import decode_source, mapping, text_field
@@ -80,6 +81,7 @@ class ConfiguredTrainingJob:
 	calendar_end: date | None = None
 	coverage: SourceCoverageSnapshot | None = None
 	runs_root: Path | None = None
+	data_loading: HistoryLoadOptions = HistoryLoadOptions()
 
 	def __post_init__(self) -> None:
 		if not isinstance(self.source, SourceConfig) or not isinstance(self.date_plan, DatePlanSpec):
@@ -105,6 +107,7 @@ class ConfiguredTrainingJob:
 	def to_mapping(self) -> dict[str, object]:
 		return {
 			"contract_version": self.contract_version,
+			"data_loading": {"ticker_batch_size":self.data_loading.ticker_batch_size,"fetch_rows":self.data_loading.fetch_rows,"max_array_bytes":self.data_loading.max_array_bytes},
 			"source": {
 				"provider": self.source.identity.provider, "endpoint": self.source.identity.endpoint,
 				"market": self.source.identity.market, "universe": self.source.identity.universe,
@@ -161,7 +164,7 @@ def _number(value: object, name: str) -> float:
 def load_configured_job(path: Path) -> ConfiguredTrainingJob:
 	"""Decode a non-secret v2 job without resolving dates or touching a database."""
 	fields = mapping(json.loads(path.read_text(encoding="utf-8")))
-	allowed = {"contract_version", "source", "data_root", "database_config", "date_range", "evaluation_range", "dependencies", "membership", "features", "target", "preprocessing", "model", "loss", "training", "publication", "publication_delay_minutes", "publication_evidence", "decision_minutes_before_close", "availability_policy", "data_snapshot", "calendar", "coverage", "runs_root"}
+	allowed = {"contract_version", "source", "data_root", "database_config", "date_range", "evaluation_range", "dependencies", "membership", "features", "target", "preprocessing", "model", "loss", "training", "publication", "publication_delay_minutes", "publication_evidence", "decision_minutes_before_close", "availability_policy", "data_snapshot", "calendar", "coverage", "runs_root", "data_loading"}
 	if fields.get("contract_version") != "training-job-v2" or set(fields) - allowed:
 		raise ValueError("Incomplete or unsupported configured training job fields")
 	identity = decode_source(mapping(fields["source"]))
@@ -226,7 +229,7 @@ def load_configured_job(path: Path) -> ConfiguredTrainingJob:
 	calendar_end = None if calendar_fields.get("end") is None else date.fromisoformat(str(calendar_fields["end"]))
 	coverage = None if fields.get("coverage") is None else coverage_snapshot_from_mapping(identity, str(calendar_fields.get("name", source.calendar_id)), mapping(fields["coverage"]))
 	snapshot = None if fields.get("data_snapshot") is None else datetime.fromisoformat(text_field(fields, "data_snapshot"))
-	return ConfiguredTrainingJob(source, DatePlanSpec(range_value, evaluation, dependencies), lookback, tuple(channels), configuration, publication, lead, target, preprocessing, filters, ordered_ids, AvailabilityPolicy(str(fields.get("availability_policy", AvailabilityPolicy.STRICT.value))), snapshot, calendar_start, calendar_end, coverage, None if fields.get("runs_root") is None else Path(text_field(fields, "runs_root")))
+	return ConfiguredTrainingJob(source, DatePlanSpec(range_value, evaluation, dependencies), lookback, tuple(channels), configuration, publication, lead, target, preprocessing, filters, ordered_ids, AvailabilityPolicy(str(fields.get("availability_policy", AvailabilityPolicy.STRICT.value))), snapshot, calendar_start, calendar_end, coverage, None if fields.get("runs_root") is None else Path(text_field(fields, "runs_root")), HistoryLoadOptions.decode(fields.get("data_loading")))
 
 
 class PreparationService(Protocol):
@@ -324,9 +327,10 @@ def _prediction_rows(training: TrainingResult, repository: CloseRepository, job:
 		_cutoff(label_exits[-1] if label_exits else plan.evaluation.start_session, publication),
 		evaluation_decisions[-1].decision_cutoff,
 	)
-	dataset = build_training_dataset(evaluation_decisions, evaluation_cutoff, feature_spec, target, boundary, calendar, publication, repository, job.availability_policy, job.data_snapshot, channel_repository)
+	from stockguidance.datasets.prepared import PreparedHistory
+	samples = (repository.sample(d, evaluation_cutoff) for d in evaluation_decisions) if isinstance(repository, PreparedHistory) else iter(build_training_dataset(evaluation_decisions, evaluation_cutoff, feature_spec, target, boundary, calendar, publication, repository, job.availability_policy, job.data_snapshot, channel_repository).samples)
 	rows: list[dict[str, object]] = []
-	for sample in dataset.samples:
+	for sample in samples:
 		if sample.features.values is None:
 			continue
 		rows.append({"entry_session": sample.timing.entry_session.session_date.isoformat(), "ticker_ids": list(feature_spec.ticker_ids), "scores": list(predict_sample(loaded, sample)), "score_units": "fractional_return" if target.version.startswith("raw_return") else "target_score", "eligible": sample.training_eligible})
@@ -367,15 +371,20 @@ def execute_configured_training(
 		failure_stage = "preparation"
 		if preparation is not None:
 			preparation.validate(job, preview.plan)
-			preparation.prepare(job, preview.plan)
 		failure_stage = "universe"
 		training_request = UniverseSelectionRequest.from_dependency_plan(preview.plan, preview.calendar, filters=job.filters, ordered_ticker_ids=job.ordered_ticker_ids, as_of=job.data_snapshot)
-		active_universe_repository = universe_repository
-		if active_universe_repository is None and connect is not None:
-			from stockguidance.database.repositories.universe import MySQLUniverseRepository
-
-			active_universe_repository = MySQLUniverseRepository(job.source, connect)
-		selected = select_universe(training_request, _universe_data(active_universe_repository, training_request, universe_data))
+		prepared_history = None
+		if connect is not None and repository is None and universe_data is None and universe_repository is None:
+			from stockguidance.database.prepared_history import load_prepared_history
+			from stockguidance.universe.endpoints import EndpointSelection
+			from stockguidance.universe.selection import TickerIdentity, TickerExclusion, ExclusionReason
+			training_entries = _decisions(preview.calendar, preview.plan.training.entry_sessions, job.decision_lead)
+			evaluation_entries = _decisions(preview.calendar, preview.plan.evaluation.entry_sessions, job.decision_lead)
+			all_entries = tuple(sorted({d.entry_session.sequence:d for d in (*training_entries,*evaluation_entries)}.values(), key=lambda d:d.entry_session.sequence))
+			prepared_history = load_prepared_history(job.source, connect, preview.calendar, all_entries, job.feature_spec(job.ordered_ticker_ids or (1,)), job.target, label_decisions=tuple(d for d in all_entries if d.exit_session in (*preview.plan.training_label_exit_sessions,*preview.plan.evaluation_label_exit_sessions)), selection=EndpointSelection(ticker_ids=job.ordered_ticker_ids), filters=job.filters, filter_cutoff=training_request.filter_cutoff_session, options=job.data_loading)
+			selected = UniverseSelectionResult(training_request, tuple(TickerIdentity(t,l) for t,l in zip(prepared_history.features.ticker_ids, prepared_history.selection["ticker_labels"])), tuple(TickerExclusion(t,l,(ExclusionReason.MISSING_OBSERVATION,),("Required data coverage or configured filter failed",)) for t,l in zip(prepared_history.selection["excluded_ids"],prepared_history.selection["excluded_labels"])), (), (), getattr(prepared_history,"revision"))
+		else:
+			selected = select_universe(training_request, _universe_data(universe_repository, training_request, universe_data))
 		feature_spec = job.feature_spec(selected.ordered_ticker_ids)
 		if run_handle is not None:
 			run_service.update_sections(run_handle.run_id, sections={"universe": selected.to_mapping(), "specifications": {"features": feature_spec.to_mapping(), "target": job.target.to_mapping(), "preprocessing": job.preprocessing.to_mapping(), "model": job.configuration.model.to_mapping(), "loss": job.configuration.loss.to_mapping(), "universe": ArtifactUniverse(selected.ordered_ticker_ids, selected.ordered_ticker_labels, selected.request.selection_mode, selected.source_revision).to_mapping()}, "results": {"exclusions": [item.to_mapping() for item in selected.exclusions]}})
@@ -385,14 +394,14 @@ def execute_configured_training(
 		evaluation_labels = preview.plan.evaluation_label_exit_sessions
 		evaluation_cutoff = max(_cutoff(evaluation_labels[-1] if evaluation_labels else preview.plan.evaluation.start_session, job.publication), evaluation_decisions[-1].decision_cutoff)
 		active_boundary = boundary or _boundary(job, preview.plan, when)
-		active_repository = repository
+		active_repository = prepared_history or repository
 		if active_repository is None:
 			if connect is None:
 				raise ValueError("Configured training requires a close repository or a database connection")
 			from stockguidance.workflows.simplified_readiness import SimplifiedCloseRepository, SimplifiedReadinessWorkflow
 
 			readiness = SimplifiedReadinessWorkflow(job.source, connect, preview.calendar, job.publication, provider, when)
-			readiness.ensure(tuple((*training_decisions, *evaluation_decisions[:-1])), feature_spec, job.target, label_cutoff=evaluation_cutoff, availability_policy=job.availability_policy, data_snapshot=job.data_snapshot)
+			readiness.validate_only(tuple((*training_decisions, *evaluation_decisions[:-1])), feature_spec, job.target, label_cutoff=evaluation_cutoff, availability_policy=job.availability_policy, data_snapshot=job.data_snapshot)
 			active_repository = SimplifiedCloseRepository(job.source, connect)
 		assert active_repository is not None
 		output = artifact_path
@@ -404,7 +413,7 @@ def execute_configured_training(
 			raise ValueError("Configured training requires an artifact path")
 		failure_stage = "training"
 		universe = ArtifactUniverse(selected.ordered_ticker_ids, selected.ordered_ticker_labels, selected.request.selection_mode, selected.source_revision)
-		request = HistoryTrainingRequest(training_decisions, training_cutoff, feature_spec, job.target, job.configuration, output, evaluation_decisions, evaluation_cutoff, checkpoint_path, resume_from, job.availability_policy, job.data_snapshot, job.preprocessing, channel_repository, universe)
+		request = HistoryTrainingRequest(training_decisions, training_cutoff, feature_spec, job.target, job.configuration, output, evaluation_decisions, evaluation_cutoff, checkpoint_path, resume_from, AvailabilityPolicy.CURRENT_PREPARED if prepared_history is not None else job.availability_policy, None if prepared_history is not None else job.data_snapshot, job.preprocessing, channel_repository, universe)
 		training = train_from_history(request, active_boundary, preview.calendar, job.publication, active_repository)
 		failure_stage = "export"
 		if artifact_path is not None and artifact_path.resolve() != output.resolve():

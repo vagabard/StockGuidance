@@ -5,6 +5,7 @@ import sys
 from stockguidance.artifacts.contracts import ArtifactMetadata, ArtifactUniverse, ModelSemantics, TrainingProvenance
 from stockguidance.artifacts.exporting import export_artifact
 from stockguidance.datasets.training import TrainingDataset
+from stockguidance.datasets.prepared import ArrayTrainingDataset
 from stockguidance.models.factory import build_model
 from stockguidance.preprocessing import PreprocessingSpec, fit_training_preprocessing
 from stockguidance.training.batches import make_loader
@@ -17,7 +18,7 @@ from stockguidance.training.result import EpochMetrics, EvaluationKind, Excluded
 from stockguidance.market_data.identity import content_id
 
 
-def excluded_samples(dataset: TrainingDataset | None) -> tuple[ExcludedSample, ...]:
+def excluded_samples(dataset: TrainingDataset | ArrayTrainingDataset | None) -> tuple[ExcludedSample, ...]:
 	return () if dataset is None else tuple(ExcludedSample(sample.timing.entry_session.session_date, sample.feature_state.value, sample.target_state.value, tuple(sorted({issue.state.value for issue in (*sample.features.issues, *sample.targets.issues)}))) for sample in dataset.excluded)
 
 
@@ -31,7 +32,7 @@ def semantics_identity(semantics: ModelSemantics) -> str:
 	return content_id({"features": features, "target": semantics.target.to_mapping(), "calendar_id": semantics.calendar_id, "calendar_version": semantics.calendar_version, "source": asdict(semantics.source)})
 
 
-def train_model(dataset: TrainingDataset, config: TrainingConfig, artifact_path: Path, *, evaluation: TrainingDataset | None = None, checkpoint_path: Path | None = None, resume_from: Path | None = None, universe: ArtifactUniverse | None = None) -> TrainingResult:
+def train_model(dataset: TrainingDataset | ArrayTrainingDataset, config: TrainingConfig, artifact_path: Path, *, evaluation: TrainingDataset | ArrayTrainingDataset | None = None, checkpoint_path: Path | None = None, resume_from: Path | None = None, universe: ArtifactUniverse | None = None) -> TrainingResult:
 	if not isinstance(config, TrainingConfig) or not isinstance(artifact_path, Path):
 		raise ValueError("Training requires typed configuration and an explicit artifact path")
 	paths = tuple(path.resolve() for path in (artifact_path, checkpoint_path, resume_from) if path is not None)

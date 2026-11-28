@@ -1,11 +1,12 @@
 from stockguidance.artifacts.contracts import ModelSemantics
 from stockguidance.datasets.training import TrainingDataset
+from stockguidance.datasets.prepared import ArrayTrainingDataset
 from stockguidance.features.specification import FeatureSpec, FeatureSpecV2
 from stockguidance.market_data.identity import content_id
 
 
-def dataset_semantics(dataset: TrainingDataset) -> ModelSemantics:
-	if not isinstance(dataset, TrainingDataset) or not dataset.eligible:
+def dataset_semantics(dataset: TrainingDataset | ArrayTrainingDataset) -> ModelSemantics:
+	if not isinstance(dataset, (TrainingDataset, ArrayTrainingDataset)) or not dataset.eligible:
 		raise ValueError("Training requires complete features and mature close-to-close outcomes")
 	first = dataset.eligible[0]
 	if not isinstance(first.features.specification, (FeatureSpec, FeatureSpecV2)):
@@ -13,11 +14,11 @@ def dataset_semantics(dataset: TrainingDataset) -> ModelSemantics:
 	return ModelSemantics(first.source, first.features.specification, first.target_specification, first.timing.entry_session.calendar_id, first.calendar_version, availability_policy=first.availability_policy)
 
 
-def dataset_revision(dataset: TrainingDataset) -> str:
+def dataset_revision(dataset: TrainingDataset | ArrayTrainingDataset) -> str:
 	return dataset.revision
 
 
-def validate_chronology(training: TrainingDataset, evaluation: TrainingDataset | None) -> ModelSemantics:
+def validate_chronology(training: TrainingDataset | ArrayTrainingDataset, evaluation: TrainingDataset | ArrayTrainingDataset | None) -> ModelSemantics:
 	semantics = dataset_semantics(training)
 	for sample in training.samples:
 		if sample.timing.decision_cutoff > training.training_cutoff or sample.timing.entry_session.calendar_id != semantics.calendar_id:

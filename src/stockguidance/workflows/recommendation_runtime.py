@@ -1,4 +1,8 @@
 from datetime import timedelta
+from dataclasses import replace
+from stockguidance.database.prepared_history import load_prepared_history
+from stockguidance.datasets.prepared import PreparedLiquidity
+from stockguidance.market_data.availability import AvailabilityPolicy
 
 from stockguidance.artifacts.contracts import ArtifactReference
 from stockguidance.artifacts.ensembles import LoadedEnsemble
@@ -80,7 +84,7 @@ def _target_assemble(configuration: RecommendationConfiguration, arguments: Reco
 	clock = SystemClock() if configuration.replay_cutoff is None else ReplayClock(configuration.replay_cutoff)
 	first = min(configuration.start or configuration.anchor_date, configuration.anchor_date)
 	last = max(configuration.end, configuration.entry_date) + timedelta(days=30)
-	calendar = ExchangeCalendar(source.calendar_id, first - timedelta(days=45), last)
+	calendar = configuration.prepared_history.calendar if configuration.prepared_history is not None else ExchangeCalendar(source.calendar_id, first - timedelta(days=max(200, configuration.features.lookback_sessions*6)), last)
 	policy = ModelRefreshPolicy(arguments.policy)
 	entry = calendar.session(configuration.entry_date)
 	timing = DecisionTiming(calendar.shift(entry, -1), entry, calendar.shift(entry, 1), clock.now())
@@ -97,7 +101,6 @@ def _target_assemble(configuration: RecommendationConfiguration, arguments: Reco
 	reference = None if arguments.artifact_id is None else ArtifactReference(arguments.artifact, arguments.artifact_id)
 	job = RecommendationJob(source, scope.sessions[0].session_date, configuration.end, configuration.entry_date, features, target, ModelSelection(policy, None if reference is None else reference.artifact_id), AllocationSpec(configuration.allocation_policy, calendar.session(configuration.anchor_date)), configuration.publication, configuration.corrections, configuration.eligibility, configuration.top_k, reference, ArtifactKind(arguments.artifact_kind), retraining, configuration.availability_policy, arguments.refresh_mode, None)
 	if configuration.resolution_metadata:
-		from dataclasses import replace
 		job = replace(job,resolution_metadata=configuration.resolution_metadata)
 	portfolio = None
 	if arguments.portfolio_state is not None:
@@ -106,12 +109,13 @@ def _target_assemble(configuration: RecommendationConfiguration, arguments: Reco
 		if job.entry_date != job.allocation.anchor_session.session_date:
 			raise ValueError("Initial cash requires an actual portfolio state for a later entry")
 		portfolio = initial_portfolio(job.allocation, decimal_text(arguments.capital), clock.now())
-	provider = ConfiguredPolygonProvider(arguments.max_retries)
-	closes = SimplifiedCloseRepository(source, connect, names)
-	readiness = SimplifiedReadinessWorkflow(source, connect, calendar, job.publication, provider, clock, table_names=names, staging_root=source.data_root / ".database-simplification" / "pending")
-	opening_store = OpeningStore(source.data_root)
-	channels = MySQLFeatureChannelRepository(source, connect, names)
-	services = RecommendationServices(provider, None, None, SignalRepository(closes, opening_store), SimplifiedEligibilityRepository(closes), OpeningRefresh(source, opening_store, ConfiguredOpeningProvider(arguments.max_retries), closes), readiness, channels)
+	history = configuration.prepared_history or load_prepared_history(source,connect,calendar,tuple((*training_decisions,timing)),features,target,
+		label_decisions=training_decisions,transaction_sessions=(timing.previous_session,),table_names=names,options=configuration.data_loading)
+	if owned_artifact is not None and history.features != features:
+		raise ValueError("Prepared universe differs from the saved artifact; retrain for the new selection")
+	job = replace(job,features=history.features,availability_policy=AvailabilityPolicy.CURRENT_PREPARED,refresh_mode=RefreshMode.VALIDATE_ONLY,
+		resolution_metadata={**(job.resolution_metadata or {}),"universe":history.selection,"data_preparation":history.timings})
+	services = RecommendationServices(ConfiguredPolygonProvider(arguments.max_retries), None, None, history, PreparedLiquidity(history))
 	return recommend(job, boundary, calendar, services, clock, portfolio=portfolio, execution=ExecutionPolicy(decimal_text(arguments.fee_per_fill)), runs=RunDirectoryService(configuration.runs_root))
 
 

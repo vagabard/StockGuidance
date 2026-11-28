@@ -7,6 +7,7 @@ from stockguidance.calendar.protocols import SessionCalendar
 from stockguidance.config.validation import require_aware_datetime
 from stockguidance.database.repositories.closes import CloseRepository
 from stockguidance.datasets.training import build_training_dataset
+from stockguidance.datasets.prepared import PreparedHistory
 from stockguidance.features.specification import FeatureSpec, FeatureSpecV2, FeatureSpecification
 from stockguidance.features.channels import FeatureChannelRepository
 from stockguidance.market_data.history import HistoryBoundary
@@ -72,6 +73,24 @@ class HistoryTrainingRequest:
 
 
 def train_from_history(request: HistoryTrainingRequest, boundary: HistoryBoundary, calendar: SessionCalendar, publication: DailyPublicationPolicy, repository: CloseRepository) -> TrainingResult:
+	if isinstance(repository, PreparedHistory):
+		from dataclasses import replace
+		from stockguidance.database.prepared_history import Timings
+		from stockguidance.market_data.atomic import atomic_write
+		from stockguidance.market_data.identity import encode_json
+		timer = Timings()
+		if request.features != repository.features or request.target != repository.target or boundary.source != repository.source or calendar.version != repository.calendar.version:
+			raise ValueError("Prepared history and training request semantics differ")
+		with timer.phase("case setup"):
+			array_dataset = repository.dataset(request.decisions, request.training_cutoff)
+			array_evaluation = None if request.evaluation_cutoff is None else repository.dataset(request.evaluation_decisions, request.evaluation_cutoff)
+		with timer.phase("preprocessing"):
+			array_dataset = array_dataset.with_preprocessing(fit_training_preprocessing(array_dataset, request.preprocessing))
+		universe = request.universe or ArtifactUniverse(repository.features.ticker_ids, tuple(repository.selection["ticker_labels"]), repository.selection["selection_mode"], getattr(repository,"revision"))
+		training = train_model(array_dataset, request.configuration, request.artifact_path, evaluation=array_evaluation, checkpoint_path=request.checkpoint_path, resume_from=request.resume_from, universe=universe)
+		timings = {**repository.timings, "case_phases":timer.values["phases"]}
+		atomic_write(request.artifact_path.with_suffix(".data.json"), encode_json({"schema":"prepared-data-report-1", "selection":repository.selection,"timings":timings}))
+		return replace(training, data_preparation=timings)
 	dataset = build_training_dataset(request.decisions, request.training_cutoff, request.features, request.target, boundary, calendar, publication, repository, request.availability_policy, request.data_snapshot, request.channel_repository)
 	if not dataset.eligible:
 		from stockguidance.market_data.atomic import atomic_write

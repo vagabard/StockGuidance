@@ -14,6 +14,7 @@ from stockguidance.database.repositories.eligibility import EligibilityRepositor
 from stockguidance.database.repositories.sessions import SessionQuery
 from stockguidance.datasets.building import build_sample
 from stockguidance.datasets.sample import Sample
+from stockguidance.datasets.prepared import PreparedHistory
 from stockguidance.market_data.history import HistoryBoundary
 from stockguidance.market_data.availability import AvailabilityPolicy
 from stockguidance.market_data.publication import DailyPublicationPolicy
@@ -75,7 +76,7 @@ class HistoricalSignals:
 		validate_model(artifact, request, timing, self.calendar)
 		if self.availability_policy is not request.availability_policy or self.data_snapshot != request.data_snapshot:
 			raise ValueError("Historical signal policy and snapshot differ from the simulation request")
-		sample = build_sample(request.features, request.target, timing, self.boundary, self.calendar, self.publication, self.closes, availability_policy=self.availability_policy, data_snapshot=self.data_snapshot)
+		sample = self.closes.sample(timing) if isinstance(self.closes, PreparedHistory) else build_sample(request.features, request.target, timing, self.boundary, self.calendar, self.publication, self.closes, availability_policy=self.availability_policy, data_snapshot=self.data_snapshot)
 		if sample.features.values is None:
 			raise DecisionUnavailable("Required close history or full-universe opening inputs are unavailable at the historical decision")
 		query = CloseQuery(SessionQuery(self.boundary, (timing.previous_session,), self.availability_policy.query_as_of(timing.decision_cutoff, self.data_snapshot)), request.features.ticker_ids)

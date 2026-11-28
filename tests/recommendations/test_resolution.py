@@ -122,7 +122,11 @@ def test_flexible_resolution_preserves_requested_zscore_input_and_target(tmp_pat
 	monkeypatch.setattr(module, "source_from_database", lambda *args: (source, load_table_names()))
 	monkeypatch.setattr(module, "prepare_raw_history", lambda *args, **kwargs: None)
 	selection = {"ticker_ids": [1, 2], "ticker_labels": ["AAA", "BBB"], "coverage_seconds": 0, "coverage_excluded_ids": [], "filter_seconds": 0, "selection_seconds": 0, "selected_count": 2, "candidate_count": 2, "cache_hit": False}
-	monkeypatch.setattr(module.EndpointUniverseRepository, "select", lambda *args: selection)
+	def prepared(source, connect, calendar, entries, features, target, **kwargs):
+		from dataclasses import replace
+		from types import SimpleNamespace
+		return SimpleNamespace(features=replace(features,ticker_ids=(1,2)),selection=selection)
+	monkeypatch.setattr(module, "load_prepared_history", prepared)
 	target = TargetSpecV2(kind=TargetKind.RETURN_ZSCORE_PER_TICKER, rolling_window_sessions=20)
 	setup = load_setup(None, start="-1y", template={"features": {"channels": ["price_delta_zscore_20"]}, "target": target.to_mapping()})
 	clock = type("Clock", (), {"now": lambda self: datetime(2026, 11, 25, 15, tzinfo=timezone.utc)})()

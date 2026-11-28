@@ -101,6 +101,8 @@ class SignalComparison:
 def compare_signal_modes(request: SimulationRequest, boundary: HistoryBoundary, calendar: SessionCalendar, signals: HistoricalSignals, prices: ExecutionPriceSource, plan: WalkForwardTraining) -> SignalComparison:
 	if signals.boundary != boundary or signals.calendar is not calendar or request.source != boundary.source:
 		raise ValueError("Comparison source, history and calendar must be identical")
+	if not isinstance(request.features, FeatureSpec):
+		raise ValueError("Signal-mode comparison requires the legacy opening feature contract")
 	specifications = signal_specifications(request.features)
 	results, trainers, score_sources = [], [], []
 	for features in specifications:

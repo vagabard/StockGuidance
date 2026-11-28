@@ -1,0 +1,15 @@
+{
+  "target": {
+    "schema": "targets-v2",
+    "kind": "return_zscore_per_ticker",
+    "horizon": "next_trading_session",
+    "entry_price": "close",
+    "exit_price": "close",
+    "return_formula": "close(T+1) / close(T) - 1",
+    "rolling_window_sessions": 20
+  },
+  "features": {
+    "lookback_sessions": 20,
+    "channels": ["price_delta_zscore_20"]
+  }
+}

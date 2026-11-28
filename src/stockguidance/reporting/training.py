@@ -1,6 +1,7 @@
 from dataclasses import asdict
 
 from stockguidance.training.result import TrainingResult
+from stockguidance.market_data.availability import AvailabilityPolicy
 
 
 def training_payload(result: TrainingResult) -> dict[str, object]:
@@ -31,7 +32,8 @@ def training_payload(result: TrainingResult) -> dict[str, object]:
 		"evaluation_cutoff": None if result.evaluation_cutoff is None else result.evaluation_cutoff.isoformat(),
 		"availability_policy": result.availability_policy.value,
 		"availability_assumption": result.availability_policy.assumption,
-		"point_in_time_replay": not result.availability_policy.retrospective,
+		"point_in_time_replay": result.availability_policy is AvailabilityPolicy.STRICT,
+		"data_preparation": result.data_preparation,
 		"data_snapshot": None if result.data_snapshot is None else result.data_snapshot.isoformat(),
 		"data_revision": result.data_revision,
 		"excluded_training": [{**asdict(item), "entry_session": item.entry_session.isoformat()} for item in result.excluded_training],

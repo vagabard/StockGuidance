@@ -5,7 +5,7 @@ from enum import StrEnum
 
 from stockguidance.config.source import SourceIdentity
 from stockguidance.config.validation import require_aware_datetime, require_date, require_enum, require_positive_int
-from stockguidance.features.specification import FeatureSpec
+from stockguidance.features.specification import FeatureSpec, FeatureSpecV2, FeatureSpecification
 from stockguidance.market_data.availability import AvailabilityPolicy
 from stockguidance.portfolio.policy import AllocationSpec
 from stockguidance.portfolio.precision import ExecutionPolicy, require_money
@@ -22,7 +22,7 @@ class EvaluationPolicy(StrEnum):
 @dataclass(frozen=True)
 class SimulationRequest:
 	source: SourceIdentity
-	features: FeatureSpec
+	features: FeatureSpecification
 	target: TargetSpec
 	allocation: AllocationSpec
 	start: date
@@ -36,7 +36,7 @@ class SimulationRequest:
 	data_snapshot: datetime | None = None
 
 	def __post_init__(self) -> None:
-		for value, expected in ((self.source, SourceIdentity), (self.features, FeatureSpec), (self.target, TargetSpec), (self.allocation, AllocationSpec), (self.eligibility, EligibilityPolicy), (self.execution, ExecutionPolicy)):
+		for value, expected in ((self.source, SourceIdentity), (self.features, (FeatureSpec, FeatureSpecV2)), (self.target, TargetSpec), (self.allocation, AllocationSpec), (self.eligibility, EligibilityPolicy), (self.execution, ExecutionPolicy)):
 			if not isinstance(value, expected):
 				raise ValueError("Simulation requires typed source and strategy specifications")
 		require_date(self.start, "simulation start")

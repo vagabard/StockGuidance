@@ -301,6 +301,10 @@ def fit_training_preprocessing(dataset: object, specification: PreprocessingSpec
 
 	from stockguidance.datasets.numpy_arrays import training_arrays
 	from stockguidance.datasets.training import TrainingDataset
+	from stockguidance.datasets.prepared import ArrayTrainingDataset
+
+	if isinstance(dataset, ArrayTrainingDataset):
+		return _fit_indexed_preprocessing(dataset, specification, data_revision or dataset.revision)
 
 	if not isinstance(dataset, TrainingDataset):
 		raise ValueError("Training preprocessing requires a TrainingDataset")
@@ -309,6 +313,46 @@ def fit_training_preprocessing(dataset: object, specification: PreprocessingSpec
 	features, targets = training_arrays(dataset)
 	first = dataset.eligible[0]
 	return fit_preprocessing(specification, features, targets, feature_specification=first.features.specification, target_specification=first.target_specification, data_revision=data_revision or dataset.revision)
+
+
+def _fit_indexed_preprocessing(dataset: object, specification: PreprocessingSpec, revision: str) -> FittedPreprocessing:
+	"""Fit population moments without expanding overlapping windows in memory."""
+	import numpy as np
+	from stockguidance.datasets.prepared import ArrayTrainingDataset
+	assert isinstance(dataset, ArrayTrainingDataset)
+	if dataset.preprocessing is not None or not dataset.eligible:
+		raise ValueError("Preprocessing requires an unfitted, nonempty array dataset")
+	transforms = []
+	for output, method, axis in ((False, specification.input_method, specification.input_axis), (True, specification.output_method, specification.output_axis)):
+		width = 1 if output else dataset.history.features.input_size
+		mean = np.zeros(width, dtype=np.float64)
+		m2 = np.zeros(width, dtype=np.float64)
+		minimum = np.full(width, np.inf)
+		maximum = np.full(width, -np.inf)
+		count = 0
+		if method is not NormalizationMethod.NONE:
+			for index in range(len(dataset.eligible)):
+				x, y = dataset.case_arrays(index)
+				values = y.reshape(-1, 1) if output else x.reshape(1, -1)
+				n = len(values)
+				batch_mean = values.mean(axis=0)
+				delta = batch_mean-mean
+				m2 += ((values-batch_mean)**2).sum(axis=0) + delta**2 * count*n/(count+n)
+				mean += delta*n/(count+n)
+				count += n
+				minimum = np.minimum(minimum, values.min(axis=0))
+				maximum = np.maximum(maximum, values.max(axis=0))
+		if method is NormalizationMethod.NONE:
+			location, scale, constant = np.zeros(width), np.ones(width), np.zeros(width,dtype=bool)
+		else:
+			location = mean if method is NormalizationMethod.STANDARD else minimum
+			scale = np.sqrt(m2/count) if method is NormalizationMethod.STANDARD else maximum-minimum
+			constant = scale==0
+			scale = np.where(constant,1.0,scale)
+		transforms.append(FittedTransform(method, axis, tuple(float(v) for v in location), tuple(float(v) for v in scale), tuple(bool(v) for v in constant), len(dataset.eligible)))
+	features = dataset.history.features
+	keys = tuple(getattr(features,"channel_keys", ())) or tuple(getattr(v,"value",str(v)) for v in features.feature_order)
+	return FittedPreprocessing(specification, transforms[0], transforms[1], features.ticker_ids, keys, dataset.history.target.target_identity, revision)
 
 
 __all__ = ["FittedPreprocessing", "FittedTransform", "NormalizationMethod", "PreprocessingSpec", "fit_preprocessing", "fit_training_preprocessing"]

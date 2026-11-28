@@ -1,3 +1,4 @@
+from stockguidance.database.prepared_history import PreparationRequired
 import argparse
 import json
 from pathlib import Path
@@ -106,6 +107,9 @@ def main(argv: list[str] | None = None) -> int:
 		output = json.dumps(recommendation_payload(result), sort_keys=True, allow_nan=False) if arguments.format == "json" else render_recommendations(result)
 		print(output)
 		return 0
+	except PreparationRequired as error:
+		print(json.dumps({"successful":False,"stage":"data","failure":"database_preparation_required","message":str(error)}))
+		return 1
 	except StageExecutionError as error:
 		print(json.dumps({"successful": False, "stage": error.failure.stage.value, "failure": error.failure.code.value, "message": error.failure.message}))
 		return 1

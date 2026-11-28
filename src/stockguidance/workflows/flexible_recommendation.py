@@ -11,9 +11,13 @@ from typing import Any
 
 from stockguidance.artifacts.decoding import decode_features, decode_target
 from stockguidance.calendar.clock import SystemClock,Clock
+from stockguidance.calendar.decisions import DecisionTiming
+from stockguidance.database.prepared_history import load_prepared_history
+from stockguidance.market_data.availability import AvailabilityPolicy
 from stockguidance.calendar.protocols import SessionCalendar
 from stockguidance.calendar.sessions import TradingSession
 from stockguidance.config.source import SourceConfig
+from stockguidance.config.history import HistoryLoadOptions
 from stockguidance.database.table_names import TableNames
 from stockguidance.database.write_connections import WriteConnectionFactory
 from stockguidance.database.raw_rebuild import RawPayloadProvider
@@ -55,7 +59,7 @@ class RecommendationSetup:
 
 def load_setup(path: Path | None, **overrides: Any) -> RecommendationSetup:
 	base = overrides.get("template",{}) if path is None else json.loads(path.read_text(encoding="utf-8"))
-	allowed = {"source","data_root","database_config","features","start_date","end_date","entry_date","allocation","publication","corrections","eligibility","top_k","retraining","availability_policy","target","runs_root","model","training","trim_dollar_volume_percent","volume_sample_sessions","tickers"}
+	allowed = {"source","data_root","database_config","features","start_date","end_date","entry_date","allocation","publication","corrections","eligibility","top_k","retraining","availability_policy","target","runs_root","model","training","trim_dollar_volume_percent","volume_sample_sessions","tickers","data_loading"}
 	if not isinstance(base,dict) or set(base)-allowed:
 		raise ValueError("Unsupported recommendation configuration fields")
 	start = overrides.get("start") or base.get("start_date")
@@ -111,7 +115,7 @@ def resolve_setup(setup: RecommendationSetup, options: RecommendationOptions, *,
 	source,names = source_from_database(setup.dbinfo,setup.data_root,connect)
 	if base.get("source") is not None and decode_source(base["source"]) != source.identity:
 		raise ValueError("Configured source differs from the database-owned source")
-	if base.get("availability_policy","strict")!="strict":
+	if base.get("availability_policy","strict") not in ("strict","current_prepared"):
 		raise ValueError("Flexible recommendations use current validated history with market-session cutoffs")
 	publication = base.get("publication",{})
 	delay = timedelta(minutes=publication.get("delay_minutes",0))
@@ -131,21 +135,21 @@ def resolve_setup(setup: RecommendationSetup, options: RecommendationOptions, *,
 	calendar = ExchangeCalendar(source.calendar_id,requested_start-timedelta(days=max(200,(lookback+2)*3)),max(requested_end,now.date())+timedelta(days=30))
 	period = resolve_period(setup.start,setup.end,calendar,now,publication_delay=delay,decision_lead=lead)
 	context = calendar.sessions(calendar.shift(period.sessions[0],-lookback).session_date,period.sessions[-1].session_date)
-	prepare_raw_history(source,connect,calendar,context,refresh=options.refresh_mode is RefreshMode.REFRESH,
-		provider=provider or ConfiguredPolygonProvider(options.max_retries),clock=clock,names=names)
-	selection = EndpointUniverseRepository(source,connect,names).select(period.sessions,setup.selection)
-	print(f"Full-period coverage: {selection['coverage_seconds']:.3f}s; excluded {len(selection['coverage_excluded_ids'])} tickers; "
-		f"dollar-volume filtering: {selection['filter_seconds']:.3f}s; total selection: {selection['selection_seconds']:.3f}s; "
-		f"{selection['selected_count']}/{selection['candidate_count']} tickers; cache_hit={selection['cache_hit']}",file=sys.stderr,flush=True)
-	fields = {"ticker_ids":selection["ticker_ids"],"lookback_sessions":lookback,"signal_mode":"previous_close","interval":source.identity.interval.value,
+	fields = {"ticker_ids":list(setup.selection.ticker_ids or (1,)),"lookback_sessions":lookback,"signal_mode":"previous_close","interval":source.identity.interval.value,
 		"missing_history":"unavailable","feature_order":["close_over_first_window_close_minus_one"],"adjustment":source.identity.adjustment.value}
 	fields.update(custom_features)
-	fields["ticker_ids"] = selection["ticker_ids"]
 	if "channels" in fields:
 		fields.pop("feature_order",None)
 		fields.setdefault("schema","configured-features-v2")
 		fields.setdefault("layout","session_oldest_first,ticker,feature:C")
 	features = decode_features(fields)
+	target = decode_target(base["target"]) if "target" in base else TargetSpec()
+	entries = tuple(DecisionTiming(calendar.shift(s,-1),s,calendar.shift(s,1),s.closes_at-lead) for s in (*period.sessions,period.entry))
+	label_entries = tuple(d for d in entries if d.exit_session.session_date <= period.sessions[-1].session_date)
+	history = load_prepared_history(source,connect,calendar,entries,features,target,label_decisions=label_entries,
+		selection=setup.selection,transaction_sessions=(calendar.shift(period.entry,-1),),table_names=names,options=HistoryLoadOptions.decode(base.get("data_loading")))
+	features = history.features
+	selection = history.selection
 	minimum = setup.minimum_transactions
 	if minimum is None:
 		minimum = base.get("eligibility",{}).get("minimum_transactions",0)
@@ -161,12 +165,10 @@ def resolve_setup(setup: RecommendationSetup, options: RecommendationOptions, *,
 	resolution = {**period.to_mapping(),"universe":selection,"automatic_artifact":setup.automatic_artifact}
 	resolved = RecommendationConfiguration(source,features,context[0].session_date,period.sessions[-1].session_date,period.entry.session_date,
 		AllocationPolicy(allocation.get("policy","alternate_sessions")),anchor,publication_policy,correction_policy,EligibilityPolicy(minimum),base.get("top_k",5),plan,
-		target=decode_target(base["target"]) if "target" in base else TargetSpec(),
-		runs_root=setup.runs_root,replay_cutoff=period.decision_cutoff if period.replay else None,resolution_metadata=resolution)
-	# Source preparation uses actual operational time; replay scoring uses a
-	# separate clock and a read-only coverage path after preparation.
-	if period.replay:
-		options = replace(options,refresh_mode=RefreshMode.VALIDATE_ONLY)
+		availability_policy=AvailabilityPolicy.CURRENT_PREPARED, target=target,
+		runs_root=setup.runs_root,replay_cutoff=period.decision_cutoff if period.replay else None,resolution_metadata=resolution,prepared_history=history)
+	# The updater owns source preparation; every recommendation read is read-only.
+	options = replace(options,refresh_mode=RefreshMode.VALIDATE_ONLY)
 	return resolved,options
 
 

@@ -466,10 +466,10 @@ class _ReadTransaction:
 
 
 @contextmanager
-def consistent_read_transaction(source: SourceConfig, connect: WriteConnectionFactory) -> Iterator[ReadOnlyTransaction]:
+def consistent_read_transaction(source: SourceConfig, connect: WriteConnectionFactory, *, streaming: bool = False) -> Iterator[ReadOnlyTransaction]:
 	"""Open a repeatable-read snapshot for guard plus dependent reads."""
 
-	connection = connect(source.database_config)
+	connection = getattr(connect, "streaming", connect)(source.database_config) if streaming else connect(source.database_config)
 	cursor = connection.cursor()
 	sqlite_compatible = type(getattr(connection, "connection", None)).__module__ == "sqlite3"
 	try:

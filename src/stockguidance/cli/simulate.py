@@ -8,6 +8,7 @@ from stockguidance.recommendations.configuration import ArtifactKind
 from stockguidance.reporting.simulation import render_simulation, simulation_payload
 from stockguidance.simulation.configuration import EvaluationPolicy
 from stockguidance.simulation.options import SimulationOptions
+from stockguidance.database.prepared_history import PreparationRequired
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -49,6 +50,9 @@ def main(argv: list[str] | None = None) -> int:
 		output = json.dumps(simulation_payload(result), sort_keys=True, allow_nan=False) if arguments.format == "json" else render_simulation(result)
 		print(output)
 		return 0 if result.successful and result.complete else 2 if result.successful else 1
+	except PreparationRequired as error:
+		print(json.dumps({"successful":False,"stage":"data","message":str(error)}))
+		return 1
 	except Exception:
 		print(json.dumps({"successful": False, "stage": "simulation", "message": "Required historical data, model, execution or reporting failed"}))
 		return 1
